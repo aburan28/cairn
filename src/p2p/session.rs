@@ -18,7 +18,7 @@ use super::dht::{
 };
 use super::peers::{self, PeerHintLimits, PeersError, PeersMessage, PeersReport};
 use super::pop::{self, PopError, PopLimits, PopMessage, PopReport};
-use super::sync::{Message, Peer, SyncError};
+use super::sync::{About, Message, Peer, SyncError};
 use super::transport::{Connection, TransportError};
 use crate::blobs::BlobStore;
 use crate::gossip::{Candidate, Population};
@@ -62,7 +62,21 @@ impl fmt::Display for Dir {
 
 fn describe_record(message: &Message) -> String {
     match message {
-        Message::Hello { peer, records } => format!("Hello peer={peer} records={records}"),
+        Message::Hello {
+            peer,
+            records,
+            about,
+        } => format!(
+            "Hello peer={peer} records={records} about={}",
+            about.as_ref().map_or("none".to_string(), |a| {
+                format!(
+                    "v{} roles={} verifiers={}",
+                    a.version,
+                    a.roles.join(","),
+                    a.verifiers.join(",")
+                )
+            })
+        ),
         // `total`, not a bucket count: the bucket count is the constant 256 on
         // every inventory ever sent, so it distinguishes nothing.
         Message::Inventory(inventory) => format!("Inventory records={}", inventory.total()),
@@ -236,8 +250,22 @@ fn expect<T>(
 pub fn reconcile<F>(
     connection: &mut Connection,
     peer: &mut Peer,
-    mut verify: F,
+    verify: F,
 ) -> Result<(), SessionError>
+where
+    F: FnMut(&super::sync::Record) -> Result<(), SyncError>,
+{
+    reconcile_with(connection, peer, None, verify).map(|_| ())
+}
+
+/// [`reconcile`], saying what this node is in its hello and returning what
+/// the peer said in theirs -- `None` from a peer older than the field.
+pub fn reconcile_with<F>(
+    connection: &mut Connection,
+    peer: &mut Peer,
+    about: Option<&About>,
+    mut verify: F,
+) -> Result<Option<About>, SessionError>
 where
     F: FnMut(&super::sync::Record) -> Result<(), SyncError>,
 {
@@ -247,6 +275,7 @@ where
             peer: super::handshake::peer_id_hex(&connection.local()),
             records: u64::try_from(peer.len())
                 .map_err(|_| SessionError::Protocol("record count exceeds u64".into()))?,
+            about: about.cloned(),
         },
     )?;
     send(connection, Message::Inventory(Box::new(peer.inventory())))?;
@@ -264,8 +293,8 @@ where
             None
         }
     })?;
-    let remote_inventory = match hello {
-        Message::Hello { .. } => _remote_inventory,
+    let (remote_inventory, remote_about) = match hello {
+        Message::Hello { about, .. } => (_remote_inventory, about),
         _ => unreachable!(),
     };
     let differing = peer.inventory().differing(&remote_inventory);
@@ -321,7 +350,8 @@ where
     send(connection, Message::Done)?;
     expect(receive(connection)?, "done", |m| {
         matches!(m, Message::Done).then_some(())
-    })
+    })?;
+    Ok(remote_about)
 }
 
 fn send_code(connection: &mut Connection, message: CodeMessage) -> Result<(), SessionError> {
@@ -813,6 +843,43 @@ mod tests {
         reconcile(&mut connection, &mut peer, |_| Ok::<(), SyncError>(())).unwrap();
         assert_eq!(peer.len(), 2);
         assert_eq!(bob_thread.join().unwrap(), 2);
+    }
+
+    #[test]
+    fn each_side_learns_what_the_other_says_it_is() {
+        let alice = PeerIdentity::generate();
+        let bob = PeerIdentity::generate();
+        let bob_public = bob.to_public();
+        let listener = listen("127.0.0.1:0".parse::<SocketAddr>().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let bobs = About {
+            version: "1.17.0".into(),
+            roles: vec!["relay".into(), "verifier".into()],
+            verifiers: vec!["certificate".into()],
+        };
+        let bob_said = bobs.clone();
+        let bob_thread = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut connection = accept(stream, &bob).unwrap();
+            let mut peer = Peer::new();
+            reconcile_with(&mut connection, &mut peer, Some(&bob_said), |_| {
+                Ok::<(), SyncError>(())
+            })
+            .unwrap()
+        });
+
+        let mut connection = connect(&bob_public, addr, &alice).unwrap();
+        let mut peer = Peer::new();
+        // Alice says nothing, as a node older than the field would.
+        let heard = reconcile_with(
+            &mut connection,
+            &mut peer,
+            None,
+            |_| Ok::<(), SyncError>(()),
+        )
+        .unwrap();
+        assert_eq!(heard, Some(bobs));
+        assert_eq!(bob_thread.join().unwrap(), None);
     }
 
     fn candidate(n: i128, score: i64) -> Candidate {

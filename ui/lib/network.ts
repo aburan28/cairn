@@ -43,6 +43,20 @@ export type Session = {
   failures: number;
   /** This node's ledger length after the last successful session. */
   entries_after: number | null;
+  /**
+   * What the peer said it is in the hello of its last session: its declared
+   * roles, the verifier kinds it can run, its version. The peer's word,
+   * unchecked -- the same standing as `CAIRN_ROLES` on its own /network.
+   * Null from a peer older than the field, or one never reached; absent on
+   * a node older than it.
+   */
+  about?: PeerAbout | null;
+};
+
+export type PeerAbout = {
+  version: string;
+  roles: string[];
+  verifiers: string[];
 };
 
 export type AddressBook = {

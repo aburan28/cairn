@@ -291,12 +291,91 @@ fn unhex(text: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+/// What a node says it is, carried in its [`Message::Hello`].
+///
+/// A declaration, like `CAIRN_ROLES` on the node's own `GET /network`: the
+/// roles its operator set, the verifier kinds its machine can run, and the
+/// version it runs. The receiving node keeps it beside the session on its
+/// roster (`GET /sessions`) so a reader can see what the nodes it has
+/// reached offer -- and labels it as the peer's word, because nothing here
+/// is checked. A peer that says `verifier` has proved it holds its transport
+/// key and nothing else; attestations in the log are the evidence.
+///
+/// Bounded on the way in: a peer shapes these strings, and a roster is not a
+/// place for a kilobyte of them. Anything past the bounds is dropped, never
+/// an error, because the record round it rides on must not fail over what
+/// amounts to a business card.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct About {
+    pub version: String,
+    pub roles: Vec<String>,
+    pub verifiers: Vec<String>,
+}
+
+impl About {
+    /// Names and versions longer than this are cut; lists longer are
+    /// truncated. Every real value is far under both.
+    pub const MAX_TEXT: usize = 32;
+    pub const MAX_LIST: usize = 16;
+
+    pub fn to_value(&self) -> Value {
+        let list = |items: &[String]| {
+            Value::Array(items.iter().map(|s| Value::string(s.clone())).collect())
+        };
+        obj! {
+            "version" => Value::string(self.version.clone()),
+            "roles" => list(&self.roles),
+            "verifiers" => list(&self.verifiers),
+        }
+    }
+
+    /// Read a peer's declaration, bounded. `None` for anything that is not
+    /// an object, which an older peer never sends and a stranger cannot
+    /// turn into a refusal.
+    pub fn from_value(value: &Value) -> Option<About> {
+        if !matches!(value, Value::Object(_)) {
+            return None;
+        }
+        let text = |s: &str| s.chars().take(Self::MAX_TEXT).collect::<String>();
+        let list = |field: &str| -> Vec<String> {
+            value
+                .get(field)
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .take(Self::MAX_LIST)
+                        .map(text)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Some(About {
+            version: value
+                .get("version")
+                .and_then(Value::as_str)
+                .map(text)
+                .unwrap_or_default(),
+            roles: list("roles"),
+            verifiers: list("verifiers"),
+        })
+    }
+}
+
 /// A protocol message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     /// Opening greeting. The peer id is the SHA-256 of a McEliece public key —
-    /// see [`super::handshake`].
-    Hello { peer: String, records: u64 },
+    /// see [`super::handshake`]. `about` is what the node says it is; a peer
+    /// older than the field sends none and reads past it, because the field
+    /// is absent rather than null when there is nothing to say.
+    Hello {
+        peer: String,
+        records: u64,
+        about: Option<About>,
+    },
     /// "Here is everything I hold, summarised."
     Inventory(Box<Inventory>),
     /// "Here are my ids in these buckets." Sent only for buckets that differ.
@@ -312,11 +391,21 @@ pub enum Message {
 impl Message {
     pub fn to_value(&self) -> Value {
         match self {
-            Message::Hello { peer, records } => obj! {
-                "t" => Value::string("hello"),
-                "peer" => Value::string(peer.clone()),
-                "records" => Value::Int(i128::from(*records)),
-            },
+            Message::Hello {
+                peer,
+                records,
+                about,
+            } => {
+                let mut hello = obj! {
+                    "t" => Value::string("hello"),
+                    "peer" => Value::string(peer.clone()),
+                    "records" => Value::Int(i128::from(*records)),
+                };
+                if let (Value::Object(fields), Some(about)) = (&mut hello, about) {
+                    fields.insert("about".to_string(), about.to_value());
+                }
+                hello
+            }
             Message::Inventory(inv) => obj! {
                 "t" => Value::string("inventory"),
                 "inventory" => inv.to_value(),
@@ -365,6 +454,7 @@ impl Message {
                     .and_then(Value::as_i128)
                     .and_then(|n| u64::try_from(n).ok())
                     .ok_or_else(|| bad("hello has no record count".into()))?,
+                about: value.get("about").and_then(About::from_value),
             }),
             Some("inventory") => Ok(Message::Inventory(Box::new(Inventory::from_value(
                 value
@@ -1059,12 +1149,99 @@ mod tests {
     // -- framing ------------------------------------------------------------
 
     #[test]
+    fn a_hello_without_about_is_the_old_wire_shape_and_reads_back_as_none() {
+        // A node older than the field sends exactly this; a newer one must
+        // read it, and must send nothing an older one would choke on.
+        let old = Value::from_json(r#"{"peer":"sha256:aa","records":3,"t":"hello"}"#).unwrap();
+        assert_eq!(
+            Message::from_value(&old).unwrap(),
+            Message::Hello {
+                peer: "sha256:aa".into(),
+                records: 3,
+                about: None,
+            }
+        );
+        let plain = Message::Hello {
+            peer: "sha256:aa".into(),
+            records: 3,
+            about: None,
+        };
+        assert_eq!(
+            plain.to_value(),
+            old,
+            "nothing is added when there is nothing to say"
+        );
+    }
+
+    #[test]
+    fn a_peers_about_is_read_bounded_and_never_refused() {
+        let long = "x".repeat(100);
+        let many: Vec<Value> = (0..40).map(|i| Value::string(format!("k{i}"))).collect();
+        let hello = Value::object([
+            ("t", Value::string("hello")),
+            ("peer", Value::string("sha256:aa")),
+            ("records", Value::Int(0)),
+            (
+                "about",
+                Value::object([
+                    ("version", Value::string(long.clone())),
+                    ("roles", Value::Array(many.clone())),
+                    (
+                        "verifiers",
+                        Value::Array(vec![
+                            Value::string("lean"),
+                            Value::Int(7),
+                            Value::string(""),
+                        ]),
+                    ),
+                ]),
+            ),
+        ]);
+        let Message::Hello {
+            about: Some(about), ..
+        } = Message::from_value(&hello).unwrap()
+        else {
+            panic!("a hello with an about");
+        };
+        assert_eq!(about.version.len(), About::MAX_TEXT);
+        assert_eq!(about.roles.len(), About::MAX_LIST);
+        assert_eq!(
+            about.verifiers,
+            vec!["lean".to_string()],
+            "non-strings and empties are dropped"
+        );
+
+        // Not an object: a peer that sent nonsense said nothing, and the
+        // session goes on.
+        let odd = Value::object([
+            ("t", Value::string("hello")),
+            ("peer", Value::string("sha256:aa")),
+            ("records", Value::Int(0)),
+            ("about", Value::string("relay")),
+        ]);
+        assert!(matches!(
+            Message::from_value(&odd).unwrap(),
+            Message::Hello { about: None, .. }
+        ));
+    }
+
+    #[test]
     fn every_message_round_trips_through_canonical_bytes() {
         let inv = peer_with(0..5).inventory();
         let messages = vec![
             Message::Hello {
                 peer: "sha256:aa".into(),
                 records: 42,
+                about: None,
+            },
+            Message::Hello {
+                peer: "sha256:aa".into(),
+                records: 42,
+                about: Some(About {
+                    version: "1.17.0".into(),
+                    roles: vec!["relay".into(), "verifier".into()],
+                    verifiers: vec!["certificate".into(), "lean".into()],
+                }),
             },
             Message::Inventory(Box::new(inv)),
             Message::BucketIds {
