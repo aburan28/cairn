@@ -13,9 +13,11 @@
 //! byte; everything else is local behaviour that can differ without anybody
 //! disagreeing about what was settled.
 
+pub mod aead;
 pub mod attribution;
 pub mod canonical;
 pub mod drand;
+pub mod envelope;
 pub mod frontier;
 pub mod ledger;
 pub mod node;

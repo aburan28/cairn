@@ -290,10 +290,12 @@ fn share_for(
         .commitment_of(commitment_id)
         .expect("the commitment is in the log");
     let envelope = commitment.envelope.as_ref().expect("a sealed commitment");
-    let share = member
+    let (share, key) = member
         .committee
-        .open_share(envelope, seat.seat)
+        .open_share_keyed(envelope, seat.seat)
         .expect("a member opens its own sealed share");
+    // With its key, as `post_owed_committee_shares` publishes it, so the share
+    // is checkable by anyone.
     CommitteeShare::new(
         commitment_id,
         seat.seat,
@@ -301,6 +303,7 @@ fn share_for(
         cairn::hex::encode(&share.data),
         ts,
     )
+    .with_share_key(&key)
     .signed_with(&member.identity)
 }
 
@@ -671,6 +674,94 @@ fn a_member_who_publishes_garbage_does_not_stop_the_reveal() {
         .open_sealed(&commitment_id, REVEAL_AT)
         .expect("some honest subset opens it");
     assert_eq!(outcome.verdict.status, Status::Accept);
+}
+
+/// A share that carries its key is checked against the sealed share it claims
+/// to be, so a liar who also publishes a key -- its own real one, or any other
+/// -- is refused at the door instead of being tried at reveal time. And
+/// verified shares are tried first, so an unverified liar posted before them
+/// costs nothing.
+#[test]
+fn a_share_whose_key_does_not_open_its_sealed_share_is_refused() {
+    let (_dir, mut node, objective, members) = network("keyed-liar");
+    let submitter = Identity::from_secret_bytes([207u8; 32]);
+    let commitment_id = commit_sealed(
+        &mut node,
+        &objective,
+        &members,
+        &submitter,
+        n(42),
+        COMMITTEE_THRESHOLD,
+    );
+    let seats = node
+        .committee_of_commitment(&commitment_id)
+        .expect("committee");
+    let real = share_for(&node, &members, &commitment_id, &seats[0], REVEAL_AT);
+    let liar = &holder(&members, &seats[0]).identity;
+    let key = real
+        .share_key_bytes()
+        .expect("the honest record carries a key");
+
+    // The member's real key, with a share that is not the one it opens.
+    let mut wrong = real.share.clone();
+    wrong.replace_range(0..2, if &wrong[0..2] == "00" { "01" } else { "00" });
+    let forged = CommitteeShare::new(&commitment_id, seats[0].seat, real.x, wrong, REVEAL_AT)
+        .with_share_key(&key)
+        .signed_with(liar);
+    let refused = node.post_committee_share(&forged, REVEAL_AT);
+    assert!(
+        matches!(refused, Err(RuleViolation::ShareKeyDoesNotOpen { .. })),
+        "{refused:?}"
+    );
+    // The right share under a key that is not its key.
+    let mut other = key;
+    other[0] ^= 1;
+    let rekeyed = CommitteeShare::new(
+        &commitment_id,
+        seats[0].seat,
+        real.x,
+        real.share.clone(),
+        REVEAL_AT,
+    )
+    .with_share_key(&other)
+    .signed_with(liar);
+    assert!(matches!(
+        node.post_committee_share(&rekeyed, REVEAL_AT),
+        Err(RuleViolation::ShareKeyDoesNotOpen { .. })
+    ));
+    // The right share and key under a relabelled x-coordinate.
+    let relabelled = CommitteeShare::new(
+        &commitment_id,
+        seats[0].seat,
+        real.x.wrapping_add(1).max(1),
+        real.share.clone(),
+        REVEAL_AT,
+    )
+    .with_share_key(&key)
+    .signed_with(liar);
+    assert!(matches!(
+        node.post_committee_share(&relabelled, REVEAL_AT),
+        Err(RuleViolation::ShareKeyDoesNotOpen { .. })
+    ));
+
+    // Without a key, garbage is admitted -- it cannot be checked -- but it is
+    // tried after every verified share, so it costs the reveal nothing.
+    let mut bytes = cairn::hex::encode(&[0xa5u8; 32]);
+    bytes.truncate(real.share.len());
+    let unkeyed = CommitteeShare::new(&commitment_id, seats[0].seat, real.x, bytes, REVEAL_AT)
+        .signed_with(liar);
+    node.post_committee_share(&unkeyed, REVEAL_AT)
+        .expect("an unkeyed share is admitted, as before");
+    for seat in seats.iter().skip(1).take(usize::from(COMMITTEE_THRESHOLD)) {
+        let share = share_for(&node, &members, &commitment_id, seat, REVEAL_AT);
+        node.post_committee_share(&share, REVEAL_AT)
+            .expect("a verified share is admitted");
+    }
+    let outcome = node
+        .open_sealed(&commitment_id, REVEAL_AT)
+        .expect("the verified shares open it");
+    assert_eq!(outcome.verdict.status, Status::Accept);
+    assert!(node.audit(false).is_empty(), "{:?}", node.audit(false));
 }
 
 /// With only the liar and two honest members, no subset of three opens it, and

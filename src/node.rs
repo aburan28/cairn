@@ -550,6 +550,9 @@ pub enum RuleViolation {
     },
     /// A delay beacon whose proof does not show the work it claims.
     BeaconDoesNotVerify { epoch: u64 },
+    /// A committee share whose key does not open the sealed share it claims
+    /// to be. See `CommitteeShare::share_key`.
+    ShareKeyDoesNotOpen { commitment: String, seat: u8 },
     /// This node's own share of a sealed submission does not decrypt.
     ///
     /// Not a fault of the node: the submitter sealed something to this seat
@@ -1088,6 +1091,12 @@ impl fmt::Display for RuleViolation {
                 "the delay proof for epoch {epoch} does not check; a beacon nobody had \
                  to wait for is a value the sequencer chose, which is the grinding this \
                  record exists to price"
+            ),
+            RuleViolation::ShareKeyDoesNotOpen { commitment, seat } => write!(
+                f,
+                "the committee share for {commitment} seat {seat} carries a key that does not \
+                 open that seat's sealed share to the point it publishes, so it is not the \
+                 share the submitter sealed"
             ),
             RuleViolation::ShareWillNotOpen { commitment, seat } => write!(
                 f,
@@ -3858,6 +3867,29 @@ impl Node {
                 published_by: record.identity.clone(),
             });
         }
+        // A share that carries its key is checked against the sealed share it
+        // claims to open. One whose key does not open it to exactly this point
+        // is not the dealer's share, and a record saying otherwise is refused
+        // here rather than left to fail an AEAD tag at reveal time, where it
+        // could stall the reveal.
+        if record.share_key.is_some() {
+            let opens = match (
+                record.share_key_bytes(),
+                record.to_share(),
+                &commitment.envelope,
+            ) {
+                (Some(key), Ok(share), Some(envelope)) => {
+                    envelope.share_opens(record.seat, &key, share.index, &share.data)
+                }
+                _ => false,
+            };
+            if !opens {
+                return Err(RuleViolation::ShareKeyDoesNotOpen {
+                    commitment: record.commitment.clone(),
+                    seat: record.seat,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -4012,8 +4044,15 @@ impl Node {
             created_at: commitment.created_at.clone(),
         };
 
-        let mut shares = Vec::with_capacity(published.len());
-        for record in &published {
+        // Verified shares first. A share that carried its key was checked
+        // against the sealed share when it was admitted, so it is the point
+        // the dealer sealed, and `t` of them open the submission on the first
+        // try whatever anybody else published. Stable, so log order still
+        // decides within each group.
+        let mut ordered: Vec<&CommitteeShare> = published.iter().collect();
+        ordered.sort_by_key(|record| record.share_key.is_none());
+        let mut shares = Vec::with_capacity(ordered.len());
+        for record in ordered {
             shares.push(
                 record
                     .to_share()
@@ -4091,7 +4130,7 @@ impl Node {
             // seat. Nothing honest can be posted for it, and posting anything
             // else would be this node lying -- but it is said, because silence
             // here is indistinguishable from this seat withholding.
-            let Ok(share) = key.open_share(&envelope, seat) else {
+            let Ok((share, share_key)) = key.open_share_keyed(&envelope, seat) else {
                 out.push((
                     commitment_id.clone(),
                     Err(RuleViolation::ShareWillNotOpen {
@@ -4101,6 +4140,8 @@ impl Node {
                 ));
                 continue;
             };
+            // With the key, so anyone can check this is the share the dealer
+            // sealed. See `CommitteeShare::share_key`.
             let record = CommitteeShare::new(
                 &commitment_id,
                 seat,
@@ -4108,6 +4149,7 @@ impl Node {
                 crate::hex::encode(&share.data),
                 ts,
             )
+            .with_share_key(&share_key)
             .signed_with(signer);
             out.push((commitment_id, self.post_committee_share(&record, ts)));
         }
@@ -6504,6 +6546,21 @@ impl Node {
             if let Some(identity) = entry_identity(&entry.payload) {
                 let slot = peer_seqs.entry(identity).or_insert(record.seq);
                 *slot = (*slot).max(record.seq);
+            }
+        }
+
+        // A commitment that does not decode -- an envelope the decoder refuses,
+        // above all -- is one `commit` would have refused, so a log carrying
+        // one was assembled by other means. It seals nothing (a claim gets no
+        // earlier-epoch allowance from it), and a reader is told rather than
+        // left to find out from a reveal that does not open. The reference
+        // reports the same record from its decode pass.
+        for entry in self.ledger.entries_of_kind(COMMITMENT) {
+            if let Err(error) = Commitment::from_value(&entry.payload) {
+                problems.push(format!(
+                    "commitment at entry {}: cannot be decoded ({error})",
+                    entry.seq
+                ));
             }
         }
 
@@ -13298,6 +13355,35 @@ mod tests {
         assert_ne!(
             (0..32).map(|_| other.below(256)).collect::<Vec<_>>(),
             (0..32).map(|_| a.below(256)).collect::<Vec<_>>()
+        );
+    }
+
+    /// A commitment whose envelope does not decode is reported by the audit,
+    /// and it grants no sealed allowance: the two implementations used to
+    /// disagree on exactly that.
+    #[test]
+    fn the_audit_reports_a_commitment_whose_envelope_does_not_decode() {
+        let dir = TempDir::new("bad-envelope");
+        let mut node = node(&dir);
+        node.append(
+            COMMITMENT,
+            Value::object([
+                ("created_at", Value::string(TS)),
+                ("hash", Value::string(format!("sha256:{}", "22".repeat(32)))),
+                (
+                    "objective_id",
+                    Value::string(format!("sha256:{}", "33".repeat(32))),
+                ),
+                ("submitter", Value::string("alice")),
+                ("envelope", Value::Null),
+            ]),
+            TS,
+        )
+        .expect("append");
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|p| p.contains("cannot be decoded")),
+            "{problems:?}"
         );
     }
 

@@ -482,6 +482,23 @@ impl CommitteeKey {
     /// them apart from the ciphertext, and pretending otherwise would invent a
     /// distinction the cryptography does not support.
     pub fn open_share(&self, envelope: &SealedEnvelope, index: u8) -> Result<Share, EnvelopeError> {
+        self.open_share_keyed(envelope, index)
+            .map(|(share, _)| share)
+    }
+
+    /// [`CommitteeKey::open_share`], with the per-share AEAD key it used.
+    ///
+    /// The key is what makes a published share checkable by anyone: with it,
+    /// [`SealedEnvelope::share_opens`] decrypts the sealed share from the
+    /// envelope and compares. It opens this one share and nothing else -- it
+    /// is derived for this seat, this envelope and these encapsulations, and
+    /// the share it opens is being published beside it anyway -- so handing
+    /// it out costs nothing that publishing the share did not.
+    pub fn open_share_keyed(
+        &self,
+        envelope: &SealedEnvelope,
+        index: u8,
+    ) -> Result<(Share, [u8; KEY_LEN]), EnvelopeError> {
         let sealed = envelope
             .sealed_share(index)
             .ok_or(EnvelopeError::UnknownShare { index })?;
@@ -517,10 +534,13 @@ impl CommitteeKey {
         let (x, body) = plaintext
             .split_first()
             .ok_or(EnvelopeError::MalformedShare { index })?;
-        Ok(Share {
-            index: *x,
-            data: body.to_vec(),
-        })
+        Ok((
+            Share {
+                index: *x,
+                data: body.to_vec(),
+            },
+            *key.expose(),
+        ))
     }
 }
 
@@ -851,6 +871,29 @@ impl SealedEnvelope {
 
     pub fn sealed_share(&self, index: u8) -> Option<&SealedShare> {
         self.sealed_shares.iter().find(|s| s.index == index)
+    }
+
+    /// Does `share_key` open the share sealed at `index` to exactly the
+    /// Shamir point `(x, data)`?
+    ///
+    /// What lets anyone check a published share on its own, with no
+    /// verifiable-secret-sharing scheme and so no discrete-log assumption: the
+    /// member publishes the AEAD key it derived, and the sealed share on the
+    /// log either decrypts under it to that point or it does not. A member
+    /// cannot find a different key the dealer's ciphertext authenticates
+    /// under, so a share that passes is the one the dealer sealed.
+    pub fn share_opens(&self, index: u8, share_key: &[u8; KEY_LEN], x: u8, data: &[u8]) -> bool {
+        let Some(sealed) = self.sealed_share(index) else {
+            return false;
+        };
+        let cipher = cipher_for(&Secret32(*share_key));
+        let Ok(plaintext) =
+            cipher.decrypt(&Nonce::from(sealed.nonce), sealed.ciphertext.as_slice())
+        else {
+            return false;
+        };
+        let plaintext = Zeroizing::new(plaintext);
+        plaintext.split_first() == Some((&x, data))
     }
 
     pub fn to_value(&self) -> Value {
@@ -1187,6 +1230,30 @@ mod tests {
     /// these bytes are what any other implementation of ChaCha20-Poly1305
     /// produces, which is the property a second reader of a sealed envelope
     /// actually needs.
+    /// A published share is checkable on its own once its key is published:
+    /// the sealed share decrypts under it to exactly that point, and to nothing
+    /// else under any other key, index or coordinate.
+    #[test]
+    fn a_share_key_opens_exactly_the_share_it_was_derived_for() {
+        let (keys, members) = committee(4);
+        let envelope = SealedEnvelope::seal(b"payload", AAD, &members, 3, &mut OsRng).unwrap();
+        for (i, key) in keys.iter().enumerate() {
+            let seat = u8::try_from(i + 1).unwrap();
+            let (share, share_key) = key.open_share_keyed(&envelope, seat).unwrap();
+            assert!(envelope.share_opens(seat, &share_key, share.index, &share.data));
+            let mut data = share.data.clone();
+            data[0] ^= 1;
+            assert!(!envelope.share_opens(seat, &share_key, share.index, &data));
+            assert!(!envelope.share_opens(seat, &share_key, share.index ^ 1, &share.data));
+            let other_seat = if seat == 1 { 2 } else { 1 };
+            assert!(!envelope.share_opens(other_seat, &share_key, share.index, &share.data));
+            let mut other_key = share_key;
+            other_key[31] ^= 1;
+            assert!(!envelope.share_opens(seat, &other_key, share.index, &share.data));
+            assert!(!envelope.share_opens(99, &share_key, share.index, &share.data));
+        }
+    }
+
     #[test]
     fn the_aead_matches_the_rfc_8439_vector() {
         use chacha20poly1305::aead::{Aead, Payload};

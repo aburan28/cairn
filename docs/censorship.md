@@ -119,11 +119,15 @@ one-of-five is one every drawn member opens alone the moment the epoch turns.
 `Node::commit` therefore pins `t` and `n` against the constants the draw uses
 and refuses anything else.
 
-**What is still not checkable: which member lied.** A Shamir point cannot be
-verified on its own, and the schemes that would fix that — Feldman, Pedersen —
-rest on discrete log being hard in a group, which is precisely the assumption a
-post-quantum network has declined to make. So a member who publishes garbage
-cannot be identified, only routed around. Once more than `t` shares are
+**A published share is checkable on its own, without discrete log.** The
+schemes usually reached for — Feldman, Pedersen — rest on discrete log being
+hard in a group, which is precisely the assumption a post-quantum network has
+declined to make. They are not needed for this: a member publishes, with its
+share, the AEAD key it derived for its seat, and anyone decrypts that seat's
+sealed share from the envelope and compares. A key that opens it to anything
+else is refused at admission, and the key opens that one share only. Keyed
+shares are tried first, so `t` of them always open the submission. A share
+published without its key is still only routed around. Once more than `t` shares are
 published they are a Reed–Solomon codeword, so `open_sealed` decodes them
 (`shamir::agreeing`) and finds up to `⌊(m − t)/2⌋` wrong ones among the `m`
 published, then falls back to trying `t`-subsets, capped. At the default

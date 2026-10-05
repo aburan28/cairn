@@ -446,6 +446,14 @@ impl Commitment {
     }
 
     pub fn from_value(value: &Value) -> Result<Commitment, RecordError> {
+        // An envelope the primary's decoder would refuse is refused here too.
+        // It decides whether a claim may carry an earlier epoch than its
+        // reveal, so storing any value and calling it sealed was a rule the
+        // two implementations applied differently.
+        if let Some(envelope) = value.get("envelope") {
+            crate::envelope::check(envelope)
+                .map_err(|why| RecordError(format!("commitment envelope: {why}")))?;
+        }
         let commitment = Commitment {
             objective_id: text(value, "objective_id")?,
             submitter: text(value, "submitter")?,
@@ -713,6 +721,10 @@ pub struct CommitteeShare {
     pub created_at: String,
     pub identity: String,
     pub signature: Option<String>,
+    /// The AEAD key that opens this seat's sealed share, hex. Optional and
+    /// signed only when present, so older records keep their ids; when present
+    /// the sealed share must open under it to exactly `(x, share)`.
+    pub share_key: Option<String>,
 }
 
 /// Longest share body a committee share may carry, in bytes before hex.
@@ -720,7 +732,7 @@ pub const MAX_SHARE_BYTES: usize = 1024;
 
 impl CommitteeShare {
     pub fn signing_payload(&self) -> Value {
-        Value::object([
+        let mut value = Value::object([
             ("type", Value::string("committee_share")),
             ("commitment", Value::string(self.commitment.clone())),
             ("created_at", Value::string(self.created_at.clone())),
@@ -728,7 +740,36 @@ impl CommitteeShare {
             ("seat", Value::Int(i128::from(self.seat))),
             ("share", Value::string(self.share.clone())),
             ("x", Value::Int(i128::from(self.x))),
-        ])
+        ]);
+        if let (Value::Object(map), Some(key)) = (&mut value, &self.share_key) {
+            map.insert("share_key".to_string(), Value::string(key.clone()));
+        }
+        value
+    }
+
+    /// The share body and key as bytes, when both are well-formed hex.
+    pub fn share_and_key(&self) -> Option<(Vec<u8>, [u8; 32])> {
+        let decode = |text: &str| -> Option<Vec<u8>> {
+            if !text.len().is_multiple_of(2) {
+                return None;
+            }
+            (0..text.len())
+                .step_by(2)
+                .map(|i| {
+                    let pair = &text[i..i + 2];
+                    if pair
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    {
+                        u8::from_str_radix(pair, 16).ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let key: [u8; 32] = decode(self.share_key.as_deref()?)?.try_into().ok()?;
+        Some((decode(&self.share)?, key))
     }
 
     pub fn to_value(&self) -> Value {
@@ -792,6 +833,13 @@ impl CommitteeShare {
         if self.share.len() / 2 > MAX_SHARE_BYTES {
             return Err(RecordError("committee_share share is too long".into()));
         }
+        if let Some(key) = &self.share_key {
+            if key.len() != 64 || !lower_hex(key) {
+                return Err(RecordError(
+                    "committee_share share_key must be 64 lowercase hex".into(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -815,6 +863,7 @@ impl CommitteeShare {
             created_at: text(value, "created_at")?,
             identity: text(value, "identity")?,
             signature: optional_text(value, "signature")?,
+            share_key: optional_text(value, "share_key")?,
         })
     }
 }

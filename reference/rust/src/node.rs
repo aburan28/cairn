@@ -1990,9 +1990,12 @@ impl Node {
         let reveal_epoch = self.epoch_of_ts("reveal", ts)?;
         let declared_reveal_epoch = self.epoch_of_ts("claim", &claim.created_at)?;
         let matching_commitment = self.matching_commitment(claim);
-        let sealed = matching_commitment
-            .as_ref()
-            .is_some_and(|(commitment, _)| commitment.get("envelope").is_some());
+        // Sealed only if the commitment decodes and carries an envelope, as
+        // the primary decides it; an envelope that does not decode seals
+        // nothing.
+        let sealed = matching_commitment.as_ref().is_some_and(|(commitment, _)| {
+            Commitment::from_value(commitment).is_ok_and(|c| c.envelope.is_some())
+        });
         if declared_reveal_epoch != reveal_epoch && !sealed {
             return Err(format!(
                 "claim declares epoch {declared_reveal_epoch} but was admitted in epoch \
@@ -2787,6 +2790,25 @@ impl Node {
                 }
                 Some(_) => {}
             }
+            // A share that carries its key must be the one the dealer sealed:
+            // the sealed share opens under the key to exactly this point.
+            if record.share_key.is_some() {
+                let opens = match (record.share_and_key(), &commitment.envelope) {
+                    (Some((share, key)), Some(envelope)) => {
+                        crate::envelope::share_opens(envelope, record.seat, &key, record.x, &share)
+                    }
+                    _ => false,
+                };
+                if !opens {
+                    problems.push(format!(
+                        "entry {}: the key published with seat {} of commitment {} does not \
+                         open that seat's sealed share to the point it publishes",
+                        entry.seq,
+                        record.seat,
+                        short(&record.commitment)
+                    ));
+                }
+            }
             if !committee_seats.insert((record.commitment.clone(), record.seat)) {
                 problems.push(format!(
                     "entry {}: seat {} of commitment {} published twice",
@@ -3282,9 +3304,9 @@ impl Node {
             let admitted_claim =
                 unix_seconds(&entry.ts).map(|seconds| epoch_of(seconds, epoch_seconds()));
             let matching = self.matching_commitment(&claim);
-            let sealed = matching
-                .as_ref()
-                .is_some_and(|(commitment, _)| commitment.get("envelope").is_some());
+            let sealed = matching.as_ref().is_some_and(|(commitment, _)| {
+                Commitment::from_value(commitment).is_ok_and(|c| c.envelope.is_some())
+            });
             if declared_claim != admitted_claim && !sealed {
                 problems.push(format!(
                     "claim {}: declared epoch disagrees with its ledger admission epoch",

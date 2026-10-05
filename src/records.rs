@@ -1238,6 +1238,16 @@ pub struct CommitteeShare {
     /// anyone could write for any member and which would let a bystander stall
     /// a reveal by filling every seat with garbage.
     pub signature: Option<String>,
+    /// The AEAD key the member derived for this seat's sealed share, hex.
+    ///
+    /// Optional, and signed only when present, so a record written before it
+    /// existed keeps its id. With it the share is checkable by anyone: the
+    /// sealed share in the commitment's envelope must decrypt under this key
+    /// to exactly `(x, share)` (see `SealedEnvelope::share_opens`), and a
+    /// record whose key does not is refused. That is what stops one member's
+    /// garbage from stalling a reveal: a verified share is the one the dealer
+    /// sealed, so `t` of them always open it.
+    pub share_key: Option<String>,
 }
 
 /// Longest share body a committee share may carry, in bytes before hex.
@@ -1264,12 +1274,20 @@ impl CommitteeShare {
             created_at: created_at.into(),
             identity: String::new(),
             signature: None,
+            share_key: None,
         }
+    }
+
+    /// Carry the AEAD key that opens this seat's sealed share. See
+    /// [`CommitteeShare::share_key`].
+    pub fn with_share_key(mut self, key: &[u8; 32]) -> CommitteeShare {
+        self.share_key = Some(crate::hex::encode(key));
+        self
     }
 
     /// The bytes a signature covers: this record without its own signature.
     pub fn signing_payload(&self) -> Value {
-        Value::object([
+        let mut value = Value::object([
             ("type", Value::string(RecordKind::CommitteeShare.as_str())),
             ("commitment", Value::string(self.commitment.clone())),
             ("created_at", Value::string(self.created_at.clone())),
@@ -1277,7 +1295,11 @@ impl CommitteeShare {
             ("seat", Value::Int(i128::from(self.seat))),
             ("share", Value::string(self.share.clone())),
             ("x", Value::Int(i128::from(self.x))),
-        ])
+        ]);
+        if let (Value::Object(map), Some(key)) = (&mut value, &self.share_key) {
+            map.insert("share_key".to_string(), Value::string(key.clone()));
+        }
+        value
     }
 
     pub fn to_value(&self) -> Value {
@@ -1378,7 +1400,17 @@ impl CommitteeShare {
                 "between 1 and MAX_SHARE_BYTES bytes of share body",
             ));
         }
+        if let Some(key) = &self.share_key {
+            if decode_hex(key).map(|bytes| bytes.len()) != Some(32) {
+                return Err(invalid("share_key", "64 lowercase hex characters"));
+            }
+        }
         Ok(())
+    }
+
+    /// The share key's bytes, when the record carries a well-formed one.
+    pub fn share_key_bytes(&self) -> Option<[u8; 32]> {
+        decode_hex(self.share_key.as_deref()?)?.try_into().ok()
     }
 
     pub fn from_value(value: &Value) -> Result<CommitteeShare, RecordError> {
@@ -1403,6 +1435,7 @@ impl CommitteeShare {
             created_at: required_string(object, RECORD, "created_at")?,
             identity: required_string(object, RECORD, "identity")?,
             signature: optional_string(object, RECORD, "signature")?,
+            share_key: optional_string(object, RECORD, "share_key")?,
         })
     }
 }
