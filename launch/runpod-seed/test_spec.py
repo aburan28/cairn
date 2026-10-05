@@ -168,12 +168,16 @@ class DdnsTest(unittest.TestCase):
         made = ddns.plans("203.0.113.10", {"DDNS_UPDATE_URL": "https://example.com/update?addr={ip}"})
         self.assertEqual(made[0]["url"], "https://example.com/update?addr=203.0.113.10")
 
-    def test_key_name_is_the_hash_of_its_bytes(self):
-        # The check create.py applies before it will write a seeds entry.
-        raw = b"not a real mceliece key, the hash rule is the same"
-        transport = hashlib.sha256(raw).hexdigest()
-        text = raw.hex()
-        self.assertEqual(hashlib.sha256(bytes.fromhex(text)).hexdigest(), transport)
+    def test_key_name_is_the_peer_id_derivation(self):
+        # create.py must use the same id as crypto::kem::key_id. sha256 of
+        # the raw key is a different value and rejects a real publish.
+        raw = b"not a real mceliece key, the domain string is the point"
+        transport = hashlib.sha256(b"proofwork/p2p/peer-id/v1" + raw).hexdigest()
+        self.assertNotEqual(hashlib.sha256(raw).hexdigest(), transport)
+        self.assertEqual(
+            hashlib.sha256(b"proofwork/p2p/peer-id/v1" + bytes.fromhex(raw.hex())).hexdigest(),
+            transport,
+        )
 
 
 class BootTest(unittest.TestCase):
