@@ -45,11 +45,10 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use crate::canonical::{digest_bytes, Value};
 use crate::crypto::identity::Identity;
@@ -86,6 +85,31 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// answered with 503 rather than queued indefinitely: telling a client to come
 /// back is better than holding it open with no thread to serve it.
 const MAX_CONCURRENT: u64 = 64;
+
+/// Longest request line or header line read, in bytes. `read_line` alone
+/// grows its buffer for as long as the peer sends bytes without a newline,
+/// and one such request ended in an allocation failure that aborted the
+/// whole process, daemon included.
+const MAX_LINE_BYTES: u64 = 8 * 1024;
+
+/// Most header lines read before a request is refused.
+const MAX_HEADERS: usize = 100;
+
+/// The longest any one connection lives, request and response together.
+///
+/// [`REQUEST_TIMEOUT`] bounds each `read` and each `write`, not the request:
+/// a client sending one header line every ten seconds never trips it and
+/// holds a slot forever, so sixty-four of them answer every other caller 503.
+/// A reaper shuts the socket down at this age whatever it is doing. Generous,
+/// because `GET /log` on a long chain to a slow reader is a legitimate
+/// minute.
+const CONNECTION_LIFETIME: Duration = Duration::from_secs(120);
+
+/// Connections one remote address may hold at once, so that one host cannot
+/// take every slot. Loopback is exempt: a TLS proxy in front of this server
+/// makes every client loopback, and the reader in Cairn.app opens several at
+/// once.
+const MAX_PER_ADDRESS: u64 = 16;
 
 /// Queued submissions beyond which `POST /submit` is refused.
 ///
@@ -591,6 +615,18 @@ impl Serving {
                 if !admitted() {
                     return Err(refused(remote));
                 }
+                // A relation speaks for the leader beyond "this result is
+                // mine": `retracts` withdraws one of its own claims from
+                // /knowledge on identity alone. Signing says whose result it
+                // is and nothing else, so the leader signs those itself.
+                if !claim.relations.is_empty() {
+                    return Err((
+                        403,
+                        "the fleet signs results, not relations: a claim carrying \
+                         `relations` must be signed by the leader itself"
+                            .to_string(),
+                    ));
+                }
                 Ok((claim.signed_with(&signer.identity).to_value(), Some(me)))
             }
             _ => Ok((value, None)),
@@ -737,6 +773,9 @@ struct Request {
     query: BTreeMap<String, String>,
     length: u64,
     content_type: Option<String>,
+    /// The `Host` header, when the client sent one. Read only to refuse a
+    /// write addressed to a public DNS name; see [`host_may_write`].
+    host: Option<String>,
 }
 
 /// Serve until the process is killed.
@@ -776,35 +815,130 @@ pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
 pub fn serve_on(listener: TcpListener, mut serving: Serving) -> io::Result<()> {
     serving.bound = listener.local_addr().ok();
     let serving = Arc::new(serving);
-    let live = Arc::new(AtomicU64::new(0));
+    let open = Arc::new(Mutex::new(Connections::default()));
+    reap(Arc::downgrade(&open));
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(stream) => stream,
             // One failed accept is not a reason to stop serving.
             Err(_) => continue,
         };
+        let address = stream.peer_addr().ok().map(|addr| addr.ip());
+        let admitted = match open.lock() {
+            Ok(mut open) => open.admit(&stream, address),
+            Err(_) => Err("server is shutting down, try again\n"),
+        };
+        let id = match admitted {
+            Ok(id) => id,
+            Err(why) => {
+                // Answered, not dropped: a client that is told to come back
+                // can, and a silent close is indistinguishable from a broken
+                // server.
+                let mut stream = stream;
+                let _ = respond(&mut stream, 503, "text/plain", why.as_bytes());
+                continue;
+            }
+        };
         let serving = Arc::clone(&serving);
-        let live = Arc::clone(&live);
-        if live.load(Ordering::SeqCst) >= MAX_CONCURRENT {
-            // Answered, not dropped: a client that is told to come back can,
-            // and a silent close is indistinguishable from a broken server.
-            let mut stream = stream;
-            let _ = respond(
-                &mut stream,
-                503,
-                "text/plain",
-                b"too many connections, try again\n",
-            );
-            continue;
-        }
-        live.fetch_add(1, Ordering::SeqCst);
+        let slot = Slot {
+            open: Arc::clone(&open),
+            id,
+            address,
+        };
         std::thread::spawn(move || {
+            // Released on drop, so a handler that panics still frees its slot.
+            let _slot = slot;
             let mut stream = stream;
             let _ = handle(&mut stream, &serving);
-            live.fetch_sub(1, Ordering::SeqCst);
         });
     }
     Ok(())
+}
+
+/// The connections being served, each with the moment it must be gone by.
+#[derive(Default)]
+struct Connections {
+    next: u64,
+    /// Id → deadline, and a handle the reaper can shut down. The handle is
+    /// taken when the reaper fires; the entry stays until the handler's
+    /// thread has actually let go, so the count never undercounts.
+    live: BTreeMap<u64, (Instant, Option<TcpStream>)>,
+    per_address: BTreeMap<IpAddr, u64>,
+}
+
+impl Connections {
+    fn admit(&mut self, stream: &TcpStream, address: Option<IpAddr>) -> Result<u64, &'static str> {
+        if self.live.len() as u64 >= MAX_CONCURRENT {
+            return Err("too many connections, try again\n");
+        }
+        if let Some(address) = address.filter(|address| !address.is_loopback()) {
+            let held = self.per_address.entry(address).or_insert(0);
+            if *held >= MAX_PER_ADDRESS {
+                return Err("too many connections from one address, try again\n");
+            }
+            *held += 1;
+        }
+        let id = self.next;
+        self.next += 1;
+        self.live.insert(
+            id,
+            (
+                Instant::now() + CONNECTION_LIFETIME,
+                stream.try_clone().ok(),
+            ),
+        );
+        Ok(id)
+    }
+
+    fn release(&mut self, id: u64, address: Option<IpAddr>) {
+        self.live.remove(&id);
+        if let Some(address) = address.filter(|address| !address.is_loopback()) {
+            if let Some(held) = self.per_address.get_mut(&address) {
+                *held = held.saturating_sub(1);
+                if *held == 0 {
+                    self.per_address.remove(&address);
+                }
+            }
+        }
+    }
+
+    /// Shut down every connection past its deadline. Its handler's next read
+    /// or write fails, the handler returns, and its [`Slot`] lets go.
+    fn expire(&mut self, now: Instant) {
+        for (deadline, stream) in self.live.values_mut() {
+            if now >= *deadline {
+                if let Some(stream) = stream.take() {
+                    let _ = stream.shutdown(Shutdown::Both);
+                }
+            }
+        }
+    }
+}
+
+/// One admitted connection's hold on [`Connections`], released on drop.
+struct Slot {
+    open: Arc<Mutex<Connections>>,
+    id: u64,
+    address: Option<IpAddr>,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Ok(mut open) = self.open.lock() {
+            open.release(self.id, self.address);
+        }
+    }
+}
+
+/// Run the reaper for as long as the server's connection table exists.
+fn reap(open: Weak<Mutex<Connections>>) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let Some(table) = open.upgrade() else { return };
+        if let Ok(mut table) = table.lock() {
+            table.expire(Instant::now());
+        };
+    });
 }
 
 fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
@@ -820,6 +954,22 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             return respond(stream, 400, "text/plain", message.as_bytes());
         }
     };
+    if matches!(request.method.as_str(), "POST" | "PUT")
+        && !host_may_write(request.host.as_deref(), &allowed_hosts())
+    {
+        return respond(
+            stream,
+            421,
+            "application/json",
+            error_body(&format!(
+                "this node does not accept writes addressed to {:?}; a public DNS name is \
+                 how a web page rebinds itself onto a local node. Address it by IP, \
+                 localhost or a LAN name, or list the name in {ALLOWED_HOSTS_ENV}",
+                request.host.as_deref().unwrap_or("")
+            ))
+            .as_bytes(),
+        );
+    }
 
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") | ("GET", "/index") => index(stream, serving),
@@ -894,9 +1044,8 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
 /// mean implementing dechunking for no caller that needs it.
 fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
     let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|_| "could not read the request line".to_string())?;
+    read_bounded_line(reader, &mut line)
+        .map_err(|why| why.unwrap_or_else(|| "could not read the request line".to_string()))?;
     let mut parts = line.split_whitespace();
     let method = parts
         .next()
@@ -919,17 +1068,25 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
 
     let mut length = 0u64;
     let mut content_type = None;
+    let mut host = None;
+    let mut headers = 0usize;
     loop {
         let mut header = String::new();
-        let read = reader
-            .read_line(&mut header)
-            .map_err(|_| "could not read headers".to_string())?;
+        let read = read_bounded_line(reader, &mut header)
+            .map_err(|why| why.unwrap_or_else(|| "could not read headers".to_string()))?;
         if read == 0 || header.trim().is_empty() {
             break;
+        }
+        headers += 1;
+        if headers > MAX_HEADERS {
+            return Err(format!("more than {MAX_HEADERS} header lines"));
         }
         if let Some((name, value)) = header.split_once(':') {
             let name = name.trim().to_ascii_lowercase();
             let value = value.trim();
+            if name == "host" {
+                host = Some(value.to_string());
+            }
             if name == "content-length" {
                 length = value
                     .parse::<u64>()
@@ -968,6 +1125,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
         query,
         length,
         content_type,
+        host,
     })
 }
 
@@ -3022,6 +3180,72 @@ fn submit(
 /// Body: `{"deposit":"…","submitter":"…","max_bytes":N?,"digest":"hex?"}`.
 /// The response never includes cloud credentials — only a grant id, object
 /// key, mode, and put URL. See `docs/design/deposit-grants.md`.
+/// Read one line of at most [`MAX_LINE_BYTES`]. `Err(Some(why))` names a line
+/// that was too long; `Err(None)` is an I/O failure for the caller to word.
+fn read_bounded_line(
+    reader: &mut BufReader<TcpStream>,
+    line: &mut String,
+) -> Result<usize, Option<String>> {
+    let read = reader
+        .by_ref()
+        .take(MAX_LINE_BYTES)
+        .read_line(line)
+        .map_err(|_| None)?;
+    if read as u64 >= MAX_LINE_BYTES && !line.ends_with('\n') {
+        return Err(Some(format!(
+            "request line or header longer than {MAX_LINE_BYTES} bytes"
+        )));
+    }
+    Ok(read)
+}
+
+/// Names, beyond the ones [`host_may_write`] always accepts, that a write may
+/// be addressed to: the public name of a node behind a TLS proxy, say.
+/// Comma-separated.
+pub const ALLOWED_HOSTS_ENV: &str = "CAIRN_HTTP_HOSTS";
+
+fn allowed_hosts() -> Vec<String> {
+    std::env::var(ALLOWED_HOSTS_ENV)
+        .map(|names| {
+            names
+                .split(',')
+                .map(|name| name.trim().trim_end_matches('.').to_ascii_lowercase())
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a write addressed to `host` is one this node takes.
+///
+/// DNS rebinding turns any page a browser opens into a same-origin client of
+/// a node on loopback or the LAN: the page's own name starts resolving to
+/// `127.0.0.1`, and the browser sends the page's name as `Host`. So a write
+/// whose `Host` is a public DNS name is refused unless the operator listed
+/// that name. IP literals, `localhost`, single-label names (a Mac's own
+/// hostname) and the reserved LAN suffixes cannot be a stranger's page.
+/// Reads are not checked: everything this server answers is public.
+fn host_may_write(host: Option<&str>, extra: &[String]) -> bool {
+    // Every browser sends Host; a request without one is not a page.
+    let Some(host) = host else { return true };
+    let host = host.trim();
+    if host.starts_with('[') {
+        // `[v6]` or `[v6]:port`: an IPv6 literal.
+        return true;
+    }
+    let name = host
+        .rsplit_once(':')
+        .filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
+        .map_or(host, |(name, _)| name)
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if name.parse::<IpAddr>().is_ok() || name == "localhost" || !name.contains('.') {
+        return true;
+    }
+    const LAN: [&str; 5] = [".localhost", ".local", ".lan", ".internal", ".home.arpa"];
+    LAN.iter().any(|suffix| name.ends_with(suffix)) || extra.contains(&name)
+}
+
 fn deposit_grant(
     stream: &mut TcpStream,
     reader: &mut BufReader<TcpStream>,
@@ -3129,6 +3353,29 @@ fn deposit_upload(
             error_body("empty body").as_bytes(),
         );
     }
+    // The grant is checked before the body is read: up to MAX_PROXY_BYTES
+    // per connection, on every node, for a grant id nobody issued, is
+    // gigabytes of memory for the price of a few sockets.
+    let dir = DepositDir::at(&serving.deposits);
+    match dir.load_grant(grant_id) {
+        Ok(grant) if grant.consumed => {
+            return respond_deposit_error(stream, &DepositError::Consumed(grant.id))
+        }
+        Ok(grant) if deposit::now_secs() > grant.expires_at => {
+            return respond_deposit_error(stream, &DepositError::Expired(grant.id))
+        }
+        Ok(grant) if request.length > grant.max_bytes => {
+            return respond_deposit_error(
+                stream,
+                &DepositError::TooLarge {
+                    got: request.length,
+                    max: grant.max_bytes,
+                },
+            )
+        }
+        Ok(_) => {}
+        Err(error) => return respond_deposit_error(stream, &error),
+    }
     let mut body = Vec::new();
     if reader.take(request.length).read_to_end(&mut body).is_err() {
         return respond(
@@ -3138,7 +3385,6 @@ fn deposit_upload(
             error_body("could not read the body").as_bytes(),
         );
     }
-    let dir = DepositDir::at(&serving.deposits);
     let secrets_dir = secrets::default_dir();
     match deposit::redeem_grant(&dir, grant_id, &body, &secrets_dir) {
         Ok(receipt) => respond(
@@ -3428,7 +3674,7 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     struct TempDir {
         path: PathBuf,
@@ -4997,6 +5243,179 @@ mod tests {
     /// queued to fail at drain; a worker's own nickname and anybody's
     /// already-signed record pass through untouched.
     #[test]
+    fn an_endless_line_or_a_header_flood_is_refused_and_the_server_survives() {
+        let dir = TempDir::new("bounded-lines");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, Serving::new(&log, "."));
+        });
+        let ask = |bytes: &[u8]| -> String {
+            let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("timeout");
+            // The peer may close before taking every byte; that is the point.
+            let _ = socket.write_all(bytes);
+            let mut response = String::new();
+            let _ = std::io::Read::read_to_string(&mut socket, &mut response);
+            response
+        };
+        // A request line with no newline in sight: answered at the bound,
+        // not buffered until the allocator gives up.
+        let mut endless = b"GET /goals?q=".to_vec();
+        endless.extend(std::iter::repeat_n(b'a', 64 * 1024));
+        let answer = ask(&endless);
+        assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+        assert!(answer.contains("longer than"), "{answer}");
+
+        let mut flood = String::from("GET /health HTTP/1.1\r\nHost: x\r\n");
+        for i in 0..=MAX_HEADERS {
+            flood.push_str(&format!("X-{i}: y\r\n"));
+        }
+        flood.push_str("\r\n");
+        let answer = ask(flood.as_bytes());
+        assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+
+        let healthy = ask(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        assert!(healthy.starts_with("HTTP/1.1 200"), "{healthy}");
+    }
+
+    #[test]
+    fn one_address_cannot_hold_every_slot_and_the_reaper_ends_old_connections() {
+        let mut open = Connections::default();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let mut client = std::net::TcpStream::connect(addr).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+
+        let stranger: IpAddr = "203.0.113.7".parse().unwrap();
+        let mut held = Vec::new();
+        for _ in 0..MAX_PER_ADDRESS {
+            held.push(open.admit(&server, Some(stranger)).expect("under the cap"));
+        }
+        assert!(
+            open.admit(&server, Some(stranger)).is_err(),
+            "one host took a 17th slot"
+        );
+        // Another address, and loopback (a TLS proxy), are not held to it.
+        let neighbour: IpAddr = "203.0.113.8".parse().unwrap();
+        assert!(open.admit(&server, Some(neighbour)).is_ok());
+        assert!(open
+            .admit(&server, Some("127.0.0.1".parse().unwrap()))
+            .is_ok());
+        open.release(held.pop().unwrap(), Some(stranger));
+        assert!(
+            open.admit(&server, Some(stranger)).is_ok(),
+            "a released slot is reusable"
+        );
+
+        // Past the lifetime, every socket is shut down whatever it is doing.
+        open.expire(Instant::now() + CONNECTION_LIFETIME + Duration::from_secs(1));
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+        let mut byte = [0u8; 1];
+        let read = std::io::Read::read(&mut client, &mut byte);
+        assert!(
+            matches!(read, Ok(0)),
+            "the client was not cut off: {read:?}"
+        );
+    }
+
+    #[test]
+    fn a_write_addressed_to_a_public_name_is_refused_unless_listed() {
+        for host in [
+            None,
+            Some("127.0.0.1:8080"),
+            Some("[::1]:8080"),
+            Some("192.168.1.20"),
+            Some("localhost:8080"),
+            Some("node.localhost"),
+            Some("adams-mac"),
+            Some("adams-mac.local:8080"),
+            Some("box.lan"),
+            Some("cairn.internal"),
+            Some("router.home.arpa"),
+        ] {
+            assert!(host_may_write(host, &[]), "{host:?} refused");
+        }
+        for host in [
+            "evil.example",
+            "evil.example:8080",
+            "127.0.0.1.nip.io",
+            "rebind.attacker.com.",
+        ] {
+            assert!(!host_may_write(Some(host), &[]), "{host} accepted");
+        }
+        let listed = vec!["node.example.org".to_string()];
+        assert!(host_may_write(Some("node.example.org:443"), &listed));
+        assert!(host_may_write(Some("NODE.example.org."), &listed));
+        assert!(!host_may_write(Some("other.example.org"), &listed));
+
+        // End to end: the 421 comes before the body is read or the route runs.
+        let dir = TempDir::new("rebinding");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, ".").accepting_into(dir.path.join("queue"));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+        socket
+            .write_all(
+                b"POST /submit HTTP/1.1\r\nHost: rebind.attacker.example:8080\r\n\
+                  Content-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .expect("write");
+        let mut response = String::new();
+        let _ = std::io::Read::read_to_string(&mut socket, &mut response);
+        assert!(response.starts_with("HTTP/1.1 421"), "{response}");
+    }
+
+    #[test]
+    fn an_upload_to_a_grant_nobody_issued_is_refused_before_its_body_is_read() {
+        let dir = TempDir::new("deposit-upload");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, Serving::new(&log, "."));
+        });
+        let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("timeout");
+        // Declares 60 MiB and sends none of it. Answered from the headers
+        // alone; a server that read first would sit here until its timeout.
+        let id = "ab".repeat(32);
+        socket
+            .write_all(
+                format!(
+                    "PUT /deposit/upload/{id} HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    60u64 << 20
+                )
+                .as_bytes(),
+            )
+            .expect("write");
+        let started = Instant::now();
+        let mut response = String::new();
+        let _ = std::io::Read::read_to_string(&mut socket, &mut response);
+        assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn a_fleet_leader_signs_its_workers_records_and_refuses_strangers() {
         let dir = TempDir::new("fleet-signing");
         let (log, objective_id) = orbit_search_log(&dir);
@@ -5060,6 +5479,38 @@ mod tests {
         let (status, body) = ask_json(addr, "/submit?kind=commitment", &commitment(&other));
         assert!(status.contains("202"), "{status}");
         assert_eq!(body.get("signed_as").unwrap(), &Value::Null);
+
+        // A claim that speaks for the leader beyond "this is mine" -- here,
+        // retracting one of its claims -- is not the fleet's to sign.
+        let retraction = Value::object([
+            ("type", Value::string("claim")),
+            ("objective_id", Value::string(objective_id.clone())),
+            ("submitter", Value::string(me.clone())),
+            ("artifact", Value::object([("x", Value::Int(1))])),
+            ("nonce", Value::string("00".repeat(16))),
+            ("created_at", Value::string(now.clone())),
+            ("cites", Value::Array(Vec::new())),
+            (
+                "relations",
+                Value::Array(vec![Value::object([
+                    ("kind", Value::string("retracts")),
+                    (
+                        "target",
+                        Value::string(
+                            "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+                        ),
+                    ),
+                ])]),
+            ),
+        ])
+        .canonical_string();
+        let (status, body) = ask_json(addr, "/submit?kind=claim", &retraction);
+        assert!(status.contains("403"), "{status} {body:?}");
+        assert!(body
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("relations"));
 
         // Outside the fleet: a fleet of a network this test is not on.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");

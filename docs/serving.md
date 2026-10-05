@@ -435,9 +435,24 @@ and it is not done.
 does not rest on the transport: nothing served is secret, and nothing accepted
 is trusted.
 
-**Not rate-limited** beyond a concurrent-connection cap and a body-size cap.
-An operator exposing this to the open internet should put it behind something
-that does rate limiting, the same as any other small service.
+**Not rate-limited** beyond these bounds: 64 connections at once, 16 of them
+from any one non-loopback address; a request line or header of at most 8 KiB
+and at most 100 headers; a 1 MiB body (64 MiB for a deposit upload, and only
+once its grant has been checked); and 120 seconds for any connection,
+request and response together, after which it is shut down whatever it is
+doing. An operator exposing this to the open internet should still put it
+behind something that does rate limiting, the same as any other small
+service.
+
+**Writes are refused when addressed to a public DNS name.** A `POST` or `PUT`
+whose `Host` is a name with a dot in it answers `421`, unless the name ends in
+`.local`, `.lan`, `.internal`, `.localhost` or `.home.arpa` or is listed in
+`CAIRN_HTTP_HOSTS` (comma-separated). IP literals, `localhost` and
+single-label names always pass, and reads are never checked. This is the
+DNS-rebinding defence: a page whose own name starts resolving to `127.0.0.1`
+reaches a local node as a same-origin client, and its name is what it sends as
+`Host`. A node behind a TLS proxy at `node.example.org` lists that name; a
+`cairn work` worker that addresses its node by IP or LAN name needs nothing.
 
 **Not a way to avoid running a node.** It publishes one node's view. Two
 operators serving two logs are two sources, and nothing here makes them agree —

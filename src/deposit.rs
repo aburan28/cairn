@@ -52,6 +52,10 @@ pub const DEFAULT_MAX_BYTES: u64 = 32 << 20;
 /// [`crate::serve::MAX_BODY_BYTES`] on purpose: a deposit is not a claim.
 pub const MAX_PROXY_BYTES: u64 = 64 << 20;
 
+/// Unexpired grants kept at once. Each is a file, and anyone who can reach a
+/// node may ask for one, so this is the ceiling on what that costs the disk.
+pub const MAX_OUTSTANDING_GRANTS: usize = 1024;
+
 /// A deposit provider. The protocol speaks deposits and grants; these are the
 /// adapters that actually move bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -592,6 +596,40 @@ impl DepositDir {
         write_atomic(&path, grant.to_json().as_bytes())
     }
 
+    /// Delete grants past their expiry, and say how many unexpired remain.
+    /// A grant that will not parse is left alone and counted: nothing here
+    /// deletes a file it cannot read.
+    pub fn prune_grants(&self, now: u64) -> Result<usize, DepositError> {
+        let dir = self.grants_dir();
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(source) => {
+                return Err(DepositError::Io {
+                    context: format!("listing {}", dir.display()),
+                    source,
+                })
+            }
+        };
+        let mut live = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let expired = fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| Grant::from_json(&text).ok())
+                .is_some_and(|grant| now > grant.expires_at);
+            if expired {
+                let _ = fs::remove_file(&path);
+            } else {
+                live += 1;
+            }
+        }
+        Ok(live)
+    }
+
     pub fn load_grant(&self, id: &str) -> Result<Grant, DepositError> {
         let path = self.grant_path(id)?;
         if !path.exists() {
@@ -645,6 +683,16 @@ pub fn issue_grant(
         }
     }
 
+    // `POST /deposit/grant` is open to anyone who can reach the node, and
+    // each grant is a file. Expired grants are deleted here, and past a
+    // ceiling of live ones the answer is "come back later", so a loop of
+    // requests cannot fill the disk.
+    if deposits.prune_grants(now_secs())? >= MAX_OUTSTANDING_GRANTS {
+        return Err(DepositError::Unavailable(format!(
+            "{MAX_OUTSTANDING_GRANTS} grants are outstanding; try again once some expire"
+        )));
+    }
+
     let mut id_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut id_bytes);
     let id = hex::encode(&id_bytes);
@@ -688,6 +736,46 @@ pub fn issue_grant(
         });
     }
     Ok(response)
+}
+
+/// Write an upload body to a fresh private file in the temp directory.
+fn staged_upload(body: &[u8]) -> Result<PathBuf, DepositError> {
+    let io_error = |source| DepositError::Io {
+        context: String::from("staging an s3 upload"),
+        source,
+    };
+    for _ in 0..16 {
+        let mut random = [0u8; 16];
+        OsRng.fill_bytes(&mut random);
+        let path = std::env::temp_dir().join(format!(
+            "cairn-deposit-put-{}-{}",
+            std::process::id(),
+            hex::encode(&random)
+        ));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                if let Err(source) = file.write_all(body).and_then(|()| file.sync_all()) {
+                    let _ = fs::remove_file(&path);
+                    return Err(io_error(source));
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(source) => return Err(io_error(source)),
+        }
+    }
+    Err(io_error(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a staging file",
+    )))
 }
 
 /// Redeem a grant by writing `body` through the deposit's provider.
@@ -885,12 +973,10 @@ pub fn aws_signing_key(secret: &[u8], date_stamp: &str, region: &str, service: &
 fn curl_put(url: &str, body: &[u8]) -> Result<(), DepositError> {
     // Temp file rather than stdin: some curl builds buffer differently, and a
     // named file makes Content-Length unambiguous for the presigned binding.
-    let tmp = std::env::temp_dir().join(format!(
-        "cairn-deposit-put-{}-{}",
-        std::process::id(),
-        now_secs()
-    ));
-    write_atomic(&tmp, body)?;
+    // A random name created exclusively at 0600: `pid-seconds` was shared by
+    // two uploads redeemed in the same second (one stored the other's
+    // bytes), and predictable in a shared /tmp.
+    let tmp = staged_upload(body)?;
     let output = Command::new("curl")
         .args([
             "--silent",
@@ -975,7 +1061,7 @@ fn normalize_prefix(prefix: &str) -> String {
     }
 }
 
-fn now_secs() -> u64 {
+pub fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1179,6 +1265,43 @@ mod tests {
         assert!(!valid_deposit_name("../x"));
         assert!(!valid_deposit_name("a/b"));
         assert!(!valid_deposit_name("-bad"));
+    }
+
+    #[test]
+    fn expired_grants_are_deleted_and_live_ones_counted() {
+        let root = scratch("prune-root");
+        let dir = DepositDir::at(scratch("prune-cfg"));
+        let secrets = scratch("prune-secrets");
+        secrets::prepare(&secrets).unwrap();
+        dir.add(&DepositSpec::file("demo", &root)).unwrap();
+        let live = issue_grant(&dir, "demo", "alice", None, None, None, &secrets).unwrap();
+        let mut stale = issue_grant(&dir, "demo", "bob", None, None, None, &secrets).unwrap();
+        stale.expires_at = 1;
+        stale.put_url = None;
+        dir.save_grant(&stale).unwrap();
+
+        assert_eq!(dir.prune_grants(now_secs()).unwrap(), 1);
+        assert!(dir.load_grant(&live.id).is_ok());
+        assert!(matches!(
+            dir.load_grant(&stale.id),
+            Err(DepositError::MissingGrant(_))
+        ));
+    }
+
+    #[test]
+    fn upload_staging_files_are_private_and_never_shared() {
+        let first = staged_upload(b"one").unwrap();
+        let second = staged_upload(b"two").unwrap();
+        assert_ne!(first, second, "two uploads in one second shared a file");
+        assert_eq!(fs::read(&first).unwrap(), b"one");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&first).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = fs::remove_file(first);
+        let _ = fs::remove_file(second);
     }
 
     #[test]
