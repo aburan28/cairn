@@ -158,7 +158,11 @@ subprocess per request, rather than in Python, whose big-integer arithmetic is
 not constant-time. `cairn agent install --fleet` hands the member file to the
 service with `LoadCredential=`, so the key is in neither the unit nor its
 environment file; [`worker@.service`](../launch/fleet/worker@.service) does
-the same for a walker.
+the same for a walker. To a service with `User=`, systemd's copy lists as
+`-r--r-----+`: the `+` is the ACL that lets that user alone read it, and the
+group bits are that ACL's mask rather than a group's access, so cairn reads
+it as it is. Anywhere else, a secret with group or other bits is set back to
+0600 before it is read.
 
 A client in another language signs the request string in
 [design/fleet-enrollment.md](design/fleet-enrollment.md) §6 and checks itself
