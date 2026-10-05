@@ -22,6 +22,11 @@ venv/
 # so a scratch `.jsonl` dropped in `conformance/` during debugging stays
 # ignored.
 !conformance/adversarial.jsonl
+# The sealed-submission logs the primary wrote and both implementations audit
+# (`conformance/sealed/manifest.json`). Ignored like the corpus above, they
+# never reached CI: there the reference opened ten missing files as empty logs,
+# found nothing to flag, and failed only for the flagged cases.
+!conformance/sealed/*.jsonl
 # ...except the published one. A project whose whole claim is "anyone can
 # re-derive every settled result from the log" has to ship a log. See
 # launch/README.md and scripts/make-launch-log.sh.

@@ -22,7 +22,11 @@ fn the_primarys_sealed_fixtures_audit_as_their_manifest_says() {
     assert!(cases.len() >= 10, "{} cases", cases.len());
     for case in cases {
         let file = case.get("log").and_then(Value::as_str).expect("log");
-        let ledger = Ledger::open(dir.join(file)).expect("opens");
+        let path = dir.join(file);
+        // A missing log opens as an empty one, which audits clean: CI once
+        // passed the clean cases that way while the files were gitignored.
+        assert!(path.is_file(), "conformance/sealed/{file} is missing");
+        let ledger = Ledger::open(path).expect("opens");
         let node = Node::new(ledger, &dir);
         let problems = node.audit(false);
         match case.get("flagged_entry").and_then(Value::as_i128) {
