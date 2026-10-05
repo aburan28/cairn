@@ -176,7 +176,12 @@ impl Value {
     pub fn from_json(text: &str) -> Result<Value, CanonicalError> {
         let mut parser = Parser { text, pos: 0 };
         parser.skip_whitespace();
-        let value = parser.parse_value(0, "$")?;
+        // One path buffer for the whole parse, extended by each level and
+        // truncated back on the way out. A fresh `format!` per element copied
+        // the whole path every time, so nesting long keys over a long array
+        // made a megabyte of peer input cost terabytes of copying.
+        let mut path = String::from("$");
+        let value = parser.parse_value(0, &mut path)?;
         parser.skip_whitespace();
         if parser.pos != text.len() {
             return Err(parser.malformed("trailing characters after the value"));
@@ -275,7 +280,7 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_value(&mut self, depth: usize, path: &str) -> Result<Value, CanonicalError> {
+    fn parse_value(&mut self, depth: usize, path: &mut String) -> Result<Value, CanonicalError> {
         if depth > MAX_DEPTH {
             return Err(CanonicalError::Malformed(
                 "recursion limit exceeded".to_string(),
@@ -303,7 +308,7 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_array(&mut self, depth: usize, path: &str) -> Result<Value, CanonicalError> {
+    fn parse_array(&mut self, depth: usize, path: &mut String) -> Result<Value, CanonicalError> {
         self.expect(b'[')?;
         self.skip_whitespace();
         let mut out = Vec::new();
@@ -312,8 +317,14 @@ impl Parser<'_> {
             return Ok(Value::Array(out));
         }
         loop {
-            let item = self.parse_value(depth + 1, &format!("{path}[{}]", out.len()))?;
-            out.push(item);
+            let base = path.len();
+            {
+                use std::fmt::Write as _;
+                let _ = write!(path, "[{}]", out.len());
+            }
+            let item = self.parse_value(depth + 1, path);
+            path.truncate(base);
+            out.push(item?);
             self.skip_whitespace();
             match self.peek() {
                 Some(b',') => {
@@ -329,7 +340,7 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_object(&mut self, depth: usize, path: &str) -> Result<Value, CanonicalError> {
+    fn parse_object(&mut self, depth: usize, path: &mut String) -> Result<Value, CanonicalError> {
         self.expect(b'{')?;
         self.skip_whitespace();
         let mut out = BTreeMap::new();
@@ -345,8 +356,12 @@ impl Parser<'_> {
             self.skip_whitespace();
             self.expect(b':')?;
             self.skip_whitespace();
-            let value = self.parse_value(depth + 1, &format!("{path}.{key}"))?;
-            out.insert(key, value);
+            let base = path.len();
+            path.push('.');
+            path.push_str(&key);
+            let value = self.parse_value(depth + 1, path);
+            path.truncate(base);
+            out.insert(key, value?);
             self.skip_whitespace();
             match self.peek() {
                 Some(b',') => {
@@ -819,6 +834,37 @@ mod tests {
         let original = Value::string("control \u{01} tab\tnewline\nquote\"backslash\\ é 😀");
         let reparsed = Value::from_json(&original.canonical_string()).expect("round trip");
         assert_eq!(reparsed, original);
+    }
+
+    #[test]
+    fn error_paths_survive_siblings_and_long_nesting_costs_linear_time() {
+        // The path is truncated back after each child, so a float after a
+        // sibling object still reports its own path, not a leftover one.
+        assert_eq!(
+            Value::from_json(r#"{"a":{"b":[1,{"c":2}]},"d":[0,0,1.5]}"#),
+            Err(CanonicalError::Float("$.d[2]".to_string()))
+        );
+        // 128 levels of 4 KiB keys over 20 000 integers is about 600 KB of
+        // input. Copying the 512 KiB path once per integer, as a fresh
+        // `format!` per element did, is ten gigabytes of memcpy; one shared
+        // buffer is a few milliseconds. The bound is loose enough for any CI
+        // machine and still an order of magnitude under the old cost.
+        let key = "k".repeat(4096);
+        let mut text = String::new();
+        for _ in 0..127 {
+            text.push_str(&format!("{{\"{key}\":"));
+        }
+        text.push('[');
+        text.push_str(&vec!["0"; 20_000].join(","));
+        text.push(']');
+        text.push_str(&"}".repeat(127));
+        let started = std::time::Instant::now();
+        assert!(Value::from_json(&text).is_ok());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "parsing took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
