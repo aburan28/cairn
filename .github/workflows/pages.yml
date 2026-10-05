@@ -30,13 +30,14 @@ on:
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
-# Read the repo, write the Pages deployment, and mint the OIDC token the deploy
-# action exchanges. No broader write scope: this job publishes a site and must
-# not be able to push to the repository.
+# Read the repo, and nothing else, by default. Each job asks for what it needs:
+# the build only reads (it runs `npm ci`, cargo build scripts and Next, all
+# third-party code, which must not hold a token that can publish the site),
+# and only the deploy job -- which runs one GitHub action and no dependency of
+# this repository -- may write the Pages deployment and mint the OIDC token it
+# exchanges. Neither can push to the repository.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # One deploy at a time, and never cancel one in flight: a half-replaced site is
 # worse than a slightly stale one.
@@ -47,8 +48,15 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Reading the site's settings is all `configure-pages` needs once Pages
+      # is enabled; enabling it needs an admin anyway (see below).
+      pages: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v7
         with:
@@ -137,6 +145,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}

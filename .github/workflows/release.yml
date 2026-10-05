@@ -500,6 +500,12 @@ jobs:
   updates-key:
     name: update signing keys
     runs-on: macos-latest
+    # The signing secrets are read only by jobs in this environment. GitHub
+    # creates it on first use with no rules, so this changes nothing until the
+    # owner moves CAIRN_UPDATES_KEY and the MACOS_* secrets into it and limits
+    # it to `v*` tags (Settings -> Environments -> release); after that, no
+    # branch, pull request or other job can read them.
+    environment: release
     outputs:
       public_key: ${{ steps.key.outputs.public_key }}
       pq_public_key: ${{ steps.key.outputs.pq_public_key }}
@@ -547,6 +553,7 @@ jobs:
     # release did not arrive.
     if: ${{ !cancelled() && needs.updates-key.result == 'success' }}
     runs-on: macos-latest
+    environment: release
     permissions:
       contents: write
     env:
@@ -692,6 +699,7 @@ jobs:
     needs: [build, installer, linux-packages, macos-dmg]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
     env:
@@ -772,6 +780,7 @@ jobs:
     if: ${{ !cancelled() && needs.macos-dmg.result == 'success' && needs.updates-key.outputs.public_key != '' }}
     # macOS for the same reason as updates-key: an OpenSSL with ML-DSA.
     runs-on: macos-latest
+    environment: release
     permissions:
       contents: write
     steps:

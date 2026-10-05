@@ -167,8 +167,13 @@ Make it once, anywhere:
 
 ```sh
 packaging/macos/updates.sh generate-key > cairn-updates.key   # keep this file somewhere safe
-gh secret set CAIRN_UPDATES_KEY < cairn-updates.key
+gh secret set CAIRN_UPDATES_KEY --env release < cairn-updates.key
 ```
+
+`--env release`: the jobs that read it run in the `release` environment, and a
+secret kept there rather than at the repository is out of reach of every other
+job, branch and pull request. Limit the environment to `v*` tags under
+Settings → Environments → release, and put the `MACOS_*` secrets there too.
 
 Everything else is derived from it: the `updates-key` job computes both
 public halves, and `macos-dmg` writes them into the app. Signing and checking

@@ -54,5 +54,30 @@ RestartSec=10
 # again by whoever draws the slice next.
 TimeoutStopSec=15
 
+# Hardening. A walker reads its job file, talks HTTP to the leader, and
+# writes nothing outside /var/lib/cairn. A GPU walker needs /dev/nvidia*:
+# add `DeviceAllow=` lines (and drop PrivateDevices) for one.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cairn
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+UMask=0077
+
 [Install]
 WantedBy=multi-user.target
