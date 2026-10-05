@@ -533,6 +533,11 @@ const FORBIDDEN: &[Screen] = &[
     },
 ];
 
+/// Why a Lean proof that does not open with `:=` is refused. Shared wording
+/// with the reference implementation, which refuses the same text.
+const LEAN_PROOF_MUST_OPEN_WITH_ASSIGN: &str =
+    "the proof must begin with `:=`; text before it would extend the objective's statement";
+
 /// `native_decide` discharges goals via compiled evaluation, trusting the
 /// compiler and runtime rather than the kernel. A known soundness escape hatch,
 /// allowed only when the objective explicitly opts in.
@@ -1465,6 +1470,20 @@ impl VerifierRegistry {
                     Value::object([("pattern", Value::string(screen.pattern))]),
                 );
             }
+        }
+        // The statement comes from the objective, never the submitter -- and
+        // the proof is appended to it as text, so anything before the
+        // proof's `:=` would continue the pinned header. ` ∨ True :=
+        // Or.inr trivial` after `theorem t : 2 + 2 = 5` proves a different,
+        // easier theorem, with no hole, no axiom and a clean exit. `:=` cannot
+        // continue a term, so a proof that opens with it leaves the header
+        // exactly as the objective wrote it.
+        if !proof.trim_start().starts_with(":=") {
+            return Verdict::new(
+                Status::Reject,
+                LEAN_PROOF_MUST_OPEN_WITH_ASSIGN,
+                Value::object([("pattern", Value::string(r"^\s*:="))]),
+            );
         }
 
         // `project_root` comes from the objective record -- attacker-authored,
@@ -3322,6 +3341,45 @@ mod tests {
             let verdict = registry.run(&spec, &artifact);
             assert_eq!(verdict.status, Status::Reject, "proof: {proof}");
             assert!(verdict.evidence.get("pattern").is_some());
+        }
+    }
+
+    #[test]
+    fn a_proof_that_extends_the_statement_is_rejected_before_lean_runs() {
+        // Appended to `theorem t : 2 + 2 = 5`, each of these makes Lean check
+        // an easier theorem than the pinned one: no hole, no axiom, exit 0.
+        // The toolchain does not exist, so Unavailable would mean the check
+        // had moved below the lookup.
+        let spec = Value::object([
+            ("kind", Value::string("lean")),
+            ("statement", Value::string("theorem t : 2 + 2 = 5")),
+        ]);
+        let registry = VerifierRegistry::new(".").with_lean_binary("lean-does-not-exist-xyz");
+        for widened in [
+            " ∨ True := Or.inr trivial",
+            "→ 2 + 2 = 5 := id",
+            "\n  ∨ True\n:= Or.inr trivial",
+            "|>.symm := rfl",
+            "-- a comment first\n:= rfl",
+        ] {
+            let artifact = Value::object([("proof", Value::string(widened))]);
+            let verdict = registry.run(&spec, &artifact);
+            assert_eq!(
+                verdict.status,
+                Status::Reject,
+                "{widened:?}: {}",
+                verdict.detail
+            );
+            assert_eq!(verdict.detail, LEAN_PROOF_MUST_OPEN_WITH_ASSIGN);
+        }
+        // Leading whitespace is fine: the header is still the objective's.
+        for honest in [":= by decide", "  := by decide", "\n:= by\n  decide"] {
+            let artifact = Value::object([("proof", Value::string(honest))]);
+            assert_eq!(
+                registry.run(&spec, &artifact).status,
+                Status::Unavailable,
+                "{honest:?} should reach the toolchain lookup"
+            );
         }
     }
 
