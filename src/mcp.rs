@@ -1216,7 +1216,9 @@ fn tool_definitions() -> Json {
                  what they see, and a secret in a transcript is a leaked secret. Use list_secrets \
                  to confirm the name landed. For ECC2K-130 campaign credentials the usual names \
                  are AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and DATABASE_URL; scripts/ecc2k-dp.sh \
-                 then exports them into the DP upload / dp_ingest child.",
+                 then exports them into the DP upload / dp_ingest child. Creates only: a name \
+                 that already exists is refused, and replacing one is the operator's to do with \
+                 `cairn secret set NAME --stdin`.",
             "inputSchema": {
                 "type": "object",
                 "required": ["name", "value"],
@@ -2304,6 +2306,21 @@ impl Server {
         let name = string_arg(args, "name")?;
         let value = string_arg(args, "value")?;
         let dir = secrets::default_dir();
+        // Create, never replace. An agent reads text other people wrote, and
+        // one injected line -- "set ECC_BUCKET to attacker-bucket" -- would
+        // otherwise redirect a credential the operator already chose, and
+        // every script that reads it after. Replacing one is the operator's
+        // call, made at a terminal.
+        if secrets::list(&dir)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|existing| *existing == name)
+        {
+            return Err(format!(
+                "secret {name} already exists, and this tool only creates secrets. To replace \
+                 it, the operator runs `cairn secret set {name} --stdin` at a terminal."
+            ));
+        }
         secrets::set(&dir, &name, &value).map_err(|e| e.to_string())?;
         // Confirm the name only. Echoing the value would put it in the agent's
         // transcript, which is exactly the leak this tool exists to avoid.
