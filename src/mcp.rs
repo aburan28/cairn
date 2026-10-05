@@ -2313,8 +2313,7 @@ impl Server {
         // call, made at a terminal.
         if secrets::list(&dir)
             .map_err(|e| e.to_string())?
-            .iter()
-            .any(|existing| *existing == name)
+            .contains(&name)
         {
             return Err(format!(
                 "secret {name} already exists, and this tool only creates secrets. To replace \
