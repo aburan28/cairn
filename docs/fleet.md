@@ -273,7 +273,9 @@ second leader enrolls it with an invite of its own.
   authorization. A payout rail is a separate design, not a setting, and
   nothing here pretends otherwise. What the fleet does is make the leader
   the one identity every settlement names, so that when such a rail exists
-  there is one place to attach it.
+  there is one place to attach it. [design/external-payouts.md](design/external-payouts.md)
+  is the design for one: an escrow per objective, released to the address
+  the leader bound.
 - **No encryption on the HTTP side.** A member's requests are signed, not
   sealed: anyone on the path sees commitments (hashes), claims (public on
   admission anyway, and protected from copying by commit–reveal), heartbeats,

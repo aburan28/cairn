@@ -181,6 +181,7 @@ lines; that is the authority, and this table is the index to it.
 | [orbit-piecework.md](design/orbit-piecework.md) — ECC2K-130: paying per orbit, and the witness that makes one checkable | **built**, with no consensus change; the corpus still does not fit a log |
 | [network-coordination.md](design/network-coordination.md) — live sessions over HTTP, the compute roster, advisory task leases, declared roles | **built** in the node and the reader (`src/p2p/sessions.rs`, `src/lease.rs`, `src/network.rs`); nothing in consensus, by design; gossiped leases and signed heartbeats are not |
 | [fleet-enrollment.md](design/fleet-enrollment.md) — per-machine enrollment in place of network trust, so a rented GPU joins a fleet without a tunnel | Stage 1 built (no consensus change); Stage 2 is a consensus change and is not |
+| [external-payouts.md](design/external-payouts.md) — paying out in Bitcoin or Ethereum: who holds the funds (an escrow per objective, never a custodian), conversion fixed at escrow, payout addresses bound before a result exists, and the legal side | design only; nothing here moves money |
 | [index-calculus-p224.md](design/index-calculus-p224.md) — index calculus as piecework | proposal; nothing here is built |
 | [swarm-targeting.md](design/swarm-targeting.md) — aiming a swarm at one problem, and what ecdsa.fail's nonce grinding teaches | proposal; nothing here is built |
 
