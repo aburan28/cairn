@@ -440,7 +440,10 @@ from any one non-loopback address; a request line or header of at most 8 KiB
 and at most 100 headers; a 1 MiB body (64 MiB for a deposit upload, and only
 once its grant has been checked); and 120 seconds for any connection,
 request and response together, after which it is shut down whatever it is
-doing. An operator exposing this to the open internet should still put it
+doing. After answering, the server shuts its side and reads and drops what the
+client is still sending, for at most 2 seconds and 1 MiB, before closing: a
+refused request's unread bytes would otherwise make the close a reset, and a
+reset can destroy the answer before the client reads it. An operator exposing this to the open internet should still put it
 behind something that does rate limiting, the same as any other small
 service.
 
