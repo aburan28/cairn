@@ -88,6 +88,58 @@ evaluation, trusting the compiler rather than the kernel — allowed only if the
 objective opts in). Every verifier needs its own version of this list, and
 writing it *is* the work of authoring an objective.
 
+A list over text misses what the text does not spell out: `Lean.ofReduceBool`
+named directly instead of through `native_decide`, `sorryAx` instead of
+`sorry`, an axiom a metaprogram adds without the keyword. Worse, compiling the
+claim *runs* the submitter's code — Lean elaboration executes macros, tactics
+and elaborators — and that code can put a declaration into the environment
+without the kernel checking it (`Environment.addDeclCore … (doCheck := false)`
+is public). A proof built on such a declaration compiles with exit 0, no
+`sorry` warning, and an empty `#print axioms`; nothing the claim's own compile
+reports can rule it out. This was shown against Lean 4.34 with a proof that
+opened with `:=` and passed every screen then in force.
+
+So after a clean compile both implementations **replay the claim through the
+kernel** in a process the submitter's code never runs in.
+[`spec/lean/KernelReplay.lean`](../spec/lean/KernelReplay.lean), embedded
+unchanged by both, is run with `lean --run`. The claim and the objective's
+statement (compiled with `:= by sorry`, text no submitter wrote) are both
+compiled to modules under one module name, and the replay:
+
+- reads the claim's module as data, imports only what it imported, and sends
+  every declaration it added back through the kernel — a declaration the
+  kernel refuses is `Reject`;
+- requires every declaration the statement made (the preamble's definitions
+  and axioms) to be in the claim unchanged, values included, and the theorem
+  to be a theorem with exactly the statement's type;
+- reports any axiom the claim's module declares that the statement's did not
+  (a proof may not add axioms: `Reject`, whatever `allowed_axioms` lists, save
+  `native_decide`'s own per-use axioms on an objective that opted in);
+- reports, from the replayed declarations, the axioms the theorem rests on.
+
+The theorem may rest on `propext`, `Classical.choice` and `Quot.sound`; on
+`Lean.ofReduceBool`, `Lean.trustCompiler` and `native_decide`'s per-use axioms
+(`<decl>._native.native_decide.ax_…`, as recent toolchains name them) only with
+`allow_native_decide`; on axioms the statement itself declares, by exact name;
+and on any the spec lists in `allowed_axioms` (exact names). Anything else is
+`Reject`, naming the axiom. A kernel that runs out of time, stack or memory on
+replay, or a replay that never reports, is `Unavailable` (nothing learned,
+nothing paid). The report is read only from lines that begin with a marker
+random per run. The control (below) compiles the statement and replays it
+against itself, so a Lean on which the replay does not run, or does not report
+`sorryAx` for a statement proved by `sorry`, is found as `Unavailable` before
+any proof is judged; the compiled statement is then kept for the process.
+
+The screens still refuse a proof that defines or runs a metaprogram (`macro`,
+`macro_rules`, `elab`, `syntax`, `command_elab`, `run_cmd`, `run_tac`,
+`by_elab`, `initialize`, `#eval`, `#exit`, …) or names `skipKernelTC`, since a
+proof term needs none of them. They are a first line, not the guarantee: the
+replay is what refuses an unchecked declaration however it was spelled.
+`allow_native_decide` keeps its meaning — the objective trusts the compiler,
+and what the compiler asserted is the one thing no replay can check. An
+`example` names no theorem: it is still replayed and held to the statement's
+declarations, but has no axioms to read.
+
 **3. Score invalid input, don't crash on it.** The cap-set evaluator scores a
 non-cap-set as zero rather than raising. An invalid submission is a bad
 artifact; an exception is a broken verifier. Confusing the two decides whether
@@ -332,8 +384,9 @@ the **objective's own statement with a hole** (`:= by sorry`, text no submitter
 wrote) under the same jail. If that does not exit 0, the verdict is
 `Unavailable` with the control's exit code in its evidence, whether the cause is
 this node's toolchain or a statement that does not elaborate; neither is the
-proof's doing. A passed control is remembered for the process, so the cost is
-one extra elaboration per objective, not per claim.
+proof's doing. The control also replays the statement against itself (see
+rule 2), and a passed control is remembered for the process with the compiled
+statement, so the cost is one extra elaboration per objective, not per claim.
 `a_lean_that_cannot_compile_the_statement_alone_is_unavailable_not_a_rejection`
 pins both halves with stand-ins. To run an elan toolchain under the jail, point
 `CAIRN_LEAN` at the real binary (`<prefix>/bin/lean`, where `lean --print-prefix`

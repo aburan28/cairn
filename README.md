@@ -1012,8 +1012,11 @@ So submissions are **sealed**, and opened *without* the submitter:
 ```
 commit    commitment = H(artifact ‖ submitter ‖ nonce)      (unchanged)
           envelope   = ChaCha20-Poly1305(K, the whole signed claim)
-          shares     = Shamir(K, 3-of-5), each sealed by post-quantum KEM
+          shares     = Pedersen VSS(K, 3-of-5), each sealed by post-quantum KEM,
+                       with the dealer's commitments, so every share is checkable
 epoch end ≥3 seats publish `committee_share` records → anyone opens it
+          a seat whose share does not open complains; the dealer answers with
+          that share in the clear, or the submission is disqualified
 ```
 
 You can be offline, jailed, or firewalled and still be paid. It also kills

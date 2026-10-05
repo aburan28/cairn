@@ -75,7 +75,7 @@ pub mod sandbox;
 pub mod workspace;
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -531,7 +531,367 @@ const FORBIDDEN: &[Screen] = &[
         pattern: "@\\[implemented_by",
         why: "replaces an implementation outside the kernel",
     },
+    // The rest guard the axiom audit rather than the proof itself. The audit
+    // appends `#print axioms` after the proof, and a proof may write
+    // commands after its term; one that redefines how `#print axioms` or
+    // `#eval` elaborate, runs metaprograms that do, or stops the file before
+    // the audit, would make the audit say what the proof chose. A proof term
+    // needs none of these.
+    Screen {
+        token: "macro",
+        whole_word: true,
+        pattern: r"\bmacro\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "macro_rules",
+        whole_word: true,
+        pattern: r"\bmacro_rules\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "elab",
+        whole_word: true,
+        pattern: r"\belab\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "elab_rules",
+        whole_word: true,
+        pattern: r"\belab_rules\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "syntax",
+        whole_word: true,
+        pattern: r"\bsyntax\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "command_elab",
+        whole_word: true,
+        pattern: r"\bcommand_elab\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "term_elab",
+        whole_word: true,
+        pattern: r"\bterm_elab\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "run_cmd",
+        whole_word: true,
+        pattern: r"\brun_cmd\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "run_elab",
+        whole_word: true,
+        pattern: r"\brun_elab\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "run_meta",
+        whole_word: true,
+        pattern: r"\brun_meta\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "run_tac",
+        whole_word: true,
+        pattern: r"\brun_tac\b",
+        why: METAPROGRAM,
+    },
+    // A term that runs an elaborator: from inside a proof, it can put a
+    // theorem in the environment the kernel never checked and prove the
+    // objective from it. The kernel replay refuses that whatever spelling
+    // reaches it; this screen refuses the spelling that was shown to.
+    Screen {
+        token: "by_elab",
+        whole_word: true,
+        pattern: r"\bby_elab\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "initialize",
+        whole_word: true,
+        pattern: r"\binitialize\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "builtin_initialize",
+        whole_word: true,
+        pattern: r"\bbuiltin_initialize\b",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "#eval",
+        whole_word: false,
+        pattern: "#eval",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "#exit",
+        whole_word: false,
+        pattern: "#exit",
+        why: METAPROGRAM,
+    },
+    Screen {
+        token: "skipKernelTC",
+        whole_word: false,
+        pattern: "skipKernelTC",
+        why: "turns off the kernel's type check",
+    },
 ];
+
+/// Why a proof that writes or runs metaprograms is refused. Shared wording
+/// with the reference implementation.
+const METAPROGRAM: &str = "defines or runs a metaprogram: a proof term needs none, and one could \
+     put a declaration in the environment the kernel never checked";
+
+/// The axioms every Lean proof may use: the three the core library itself
+/// rests on. Anything else -- `sorryAx`, an axiom a metaprogram added, the
+/// compiler trust `native_decide` brings -- has to be allowed by the
+/// objective.
+const LEAN_STANDARD_AXIOMS: &[&str] = &["propext", "Classical.choice", "Quot.sound"];
+
+/// What `native_decide` rests on, allowed only with `allow_native_decide`:
+/// `Lean.ofReduceBool` and `Lean.trustCompiler` on older toolchains, and on
+/// newer ones an axiom of its own per use, named under the declaration that
+/// used it (see [`is_native_decide_axiom`]).
+const LEAN_NATIVE_AXIOMS: &[&str] = &["Lean.ofReduceBool", "Lean.trustCompiler"];
+
+/// The kernel replay, run by `lean --run` after a claim compiles. The file is
+/// the protocol's: both implementations embed it unchanged, and it says in
+/// its own header what it checks and why.
+const KERNEL_REPLAY: &str = include_str!("../../spec/lean/KernelReplay.lean");
+
+/// The module name a claim and its statement are both compiled as. One name
+/// for both, because `private` declarations are named after their module and
+/// the replay compares the two compiles declaration by declaration.
+const LEAN_MODULE: &str = "CairnProof";
+
+/// Where a word starts in `text`, under the same rule as the screens.
+fn find_word(text: &str, word: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(found) = text[from..].find(word) {
+        let start = from + found;
+        let end = start + word.len();
+        let clear_before = start == 0 || !is_word_byte(bytes[start - 1]);
+        let clear_after = end == bytes.len() || !is_word_byte(bytes[end]);
+        if clear_before && clear_after {
+            return Some(start);
+        }
+        from = start + word.len();
+    }
+    None
+}
+
+/// The identifier that follows position `at`, up to whitespace or the
+/// characters that begin a binder or a type.
+fn lean_identifier_after(text: &str, at: usize) -> Option<String> {
+    let name: String = text[at..]
+        .trim_start()
+        .chars()
+        .take_while(|c| !c.is_whitespace() && !matches!(c, ':' | '(' | '{' | '[' | '⦃'))
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The theorem the replay holds to the statement: the first `theorem` or
+/// `lemma` the objective's statement declares. `None` for an `example`, which
+/// has no name to ask about; the claim is then still replayed and held to the
+/// statement's declarations, but there is no theorem whose axioms to read.
+fn lean_theorem_name(statement: &str) -> Option<String> {
+    let at = ["theorem", "lemma"]
+        .iter()
+        .filter_map(|keyword| find_word(statement, keyword).map(|at| (at, keyword.len())))
+        .min()?;
+    lean_identifier_after(statement, at.0 + at.1)
+}
+
+/// Is `name` an axiom `native_decide` added for one use, as Lean 4.2x and
+/// later name them: `<declaration>._native.native_decide.ax_<i>_<j>`?
+///
+/// Allowed only when the objective allows `native_decide`, and then on the
+/// same footing as `Lean.ofReduceBool`: the objective chose to trust the
+/// compiler, and what the compiler asserted is exactly what nothing here can
+/// check. A metaprogram could plant an axiom under this name; on an objective
+/// that did not opt in it is refused like any other, and one that did opt in
+/// had already accepted code the kernel never sees.
+fn is_native_decide_axiom(name: &str) -> bool {
+    name.contains("._native.native_decide.ax_")
+}
+
+/// A fresh marker for one replay: 128 random bits, so nothing else on the
+/// output can be mistaken for the replay's report.
+fn audit_marker() -> String {
+    use rand_core::RngCore as _;
+    let mut bytes = [0u8; 16];
+    rand_core::OsRng.fill_bytes(&mut bytes);
+    format!("cairn-kernel-replay-{}", crate::hex::encode(&bytes))
+}
+
+/// What the kernel replay reported, read from the lines that start with its
+/// marker.
+#[derive(Debug, PartialEq, Eq)]
+enum KernelReplay {
+    /// No terminal line: the replay did not run here (the driver did not
+    /// elaborate on this Lean, or the process died). A fact about the node.
+    NoReport,
+    /// `fail`: the claim is not what the statement asked for, or the kernel
+    /// refused one of its declarations.
+    Refused(String),
+    /// `unavailable`: the kernel ran out of time, stack or memory replaying
+    /// it. A fact about the node.
+    Unavailable(String),
+    /// `ok`, with what the theorem rests on (`axioms`), the axioms the
+    /// claim's module declared that the statement's did not (`added`), and
+    /// the ones the statement itself declared (`pinned`).
+    Passed {
+        axioms: Vec<String>,
+        added: Vec<String>,
+        pinned: Vec<String>,
+    },
+}
+
+fn read_kernel_replay(output: &str, marker: &str) -> KernelReplay {
+    let (mut axioms, mut added, mut pinned) = (Vec::new(), Vec::new(), Vec::new());
+    for line in output.lines() {
+        let Some(report) = line
+            .strip_prefix(marker)
+            .and_then(|rest| rest.strip_prefix(' '))
+        else {
+            continue;
+        };
+        let (word, rest) = report.split_once(' ').unwrap_or((report, ""));
+        match word {
+            "ok" => {
+                return KernelReplay::Passed {
+                    axioms,
+                    added,
+                    pinned,
+                }
+            }
+            "fail" => return KernelReplay::Refused(rest.to_string()),
+            "unavailable" => return KernelReplay::Unavailable(rest.to_string()),
+            "axiom" => axioms.push(rest.to_string()),
+            "added-axiom" => added.push(rest.to_string()),
+            "pinned" => pinned.push(rest.to_string()),
+            _ => {}
+        }
+    }
+    KernelReplay::NoReport
+}
+
+/// The axioms a proof of this objective may use, or why the spec is
+/// malformed: the standard set, `native_decide`'s when the objective opts
+/// in, and the objective's own `allowed_axioms`. The preamble's own axioms
+/// are added per claim from what the replay reports the statement declared.
+fn lean_allowed_axioms(spec: &Value, allow_native_decide: bool) -> Result<Vec<String>, Verdict> {
+    let mut exact: Vec<String> = LEAN_STANDARD_AXIOMS.iter().map(|a| a.to_string()).collect();
+    if allow_native_decide {
+        exact.extend(LEAN_NATIVE_AXIOMS.iter().map(|a| a.to_string()));
+    }
+    match spec.get("allowed_axioms") {
+        None => {}
+        Some(Value::Array(items)) => {
+            for item in items {
+                match item.as_str() {
+                    Some(name) if !name.trim().is_empty() => exact.push(name.trim().to_string()),
+                    _ => {
+                        return Err(Verdict::invalid_spec(
+                            "allowed_axioms must be a list of axiom names",
+                        ))
+                    }
+                }
+            }
+        }
+        Some(_) => {
+            return Err(Verdict::invalid_spec(
+                "allowed_axioms must be a list of axiom names",
+            ))
+        }
+    }
+    Ok(exact)
+}
+
+/// The verdict once the claim compiled cleanly: the kernel replay decides.
+///
+/// A replay that did not report is Unavailable, not Reject or Accept: it is
+/// this node's check, and when it cannot run nothing is learned about the
+/// proof -- but nothing is paid either.
+fn lean_replay_verdict(
+    replay: KernelReplay,
+    allowed: &[String],
+    allow_native_decide: bool,
+    evidence: Value,
+) -> Verdict {
+    let with = |field: &str, value: Value| -> Value {
+        let mut map = evidence.as_object().cloned().unwrap_or_default();
+        map.insert(field.to_string(), value);
+        Value::Object(map)
+    };
+    match replay {
+        KernelReplay::NoReport => Verdict::new(
+            Status::Unavailable,
+            "the kernel replay did not report: this node's Lean could not run it",
+            evidence,
+        ),
+        KernelReplay::Unavailable(why) => Verdict::new(
+            Status::Unavailable,
+            format!("the kernel replay could not finish here ({why}); that is not a refutation"),
+            evidence,
+        ),
+        KernelReplay::Refused(why) => Verdict::new(
+            Status::Reject,
+            format!("the kernel replay refused the claim: {why}"),
+            evidence,
+        ),
+        KernelReplay::Passed {
+            axioms,
+            added,
+            pinned,
+        } => {
+            let listed = Value::Array(axioms.iter().map(|a| Value::string(a.as_str())).collect());
+            // A proof may not declare an axiom: the `axiom` screen refuses
+            // the keyword, so one here was put there by a metaprogram. The
+            // one exception is what `native_decide` adds, on an objective
+            // that allowed it.
+            if let Some(axiom) = added
+                .iter()
+                .find(|name| !(allow_native_decide && is_native_decide_axiom(name)))
+            {
+                return Verdict::new(
+                    Status::Reject,
+                    format!("the proof declares axiom {axiom}; a proof may not add axioms"),
+                    with("axioms", listed),
+                );
+            }
+            let refused = axioms.iter().find(|name| {
+                !allowed.iter().any(|a| a == *name)
+                    && !pinned.iter().any(|a| a == *name)
+                    && !(allow_native_decide && is_native_decide_axiom(name))
+            });
+            match refused {
+                Some(axiom) => Verdict::new(
+                    Status::Reject,
+                    format!(
+                        "the theorem depends on axiom {axiom}, which the objective does not allow"
+                    ),
+                    with("axioms", listed),
+                ),
+                None => Verdict::new(
+                    Status::Accept,
+                    "kernel accepted the proof",
+                    with("axioms", listed),
+                ),
+            }
+        }
+    }
+}
 
 /// Why a Lean proof that does not open with `:=` is refused. Shared wording
 /// with the reference implementation, which refuses the same text.
@@ -1485,6 +1845,16 @@ impl VerifierRegistry {
                 Value::object([("pattern", Value::string(r"^\s*:="))]),
             );
         }
+        // What the compiled theorem may rest on, read from the spec before the
+        // toolchain lookup like every other spec check.
+        let allowed_axioms = match lean_allowed_axioms(spec, allow_native_decide) {
+            Ok(allowed) => allowed,
+            Err(verdict) => return verdict,
+        };
+        let theorem = lean_theorem_name(statement);
+        // What the replay is told the statement declares. `-` for an
+        // `example`, which declares nothing to hold the claim to by name.
+        let theorem_arg = theorem.as_deref().unwrap_or("-");
 
         // `project_root` comes from the objective record -- attacker-authored,
         // like every other spec field -- and is made readable inside the jail.
@@ -1522,8 +1892,6 @@ impl VerifierRegistry {
         };
 
         let preamble = spec.get("preamble").and_then(Value::as_str).unwrap_or("");
-        let source = format!("{preamble}\n{statement} {proof}\n");
-
         let workdir = match TempDir::new("proofwork-lean") {
             Ok(workdir) => workdir,
             Err(error) => {
@@ -1533,17 +1901,64 @@ impl VerifierRegistry {
 
         let cwd = project_cwd.unwrap_or_else(|| workdir.path().to_path_buf());
 
-        // Lean elaboration runs arbitrary code (macros, `#eval`), and half the
-        // input is submitter-controlled, so this spawn is jailed like any
-        // other. A declared project is read-only: verifier execution must not
-        // persist generated files or modify code seen by later claims. The
-        // scratch directory remains the only writable location.
+        // Lean elaboration runs arbitrary code (macros, tactics, elaborators),
+        // and half the input is submitter-controlled, so every spawn below is
+        // jailed like any other. A declared project is read-only: verifier
+        // execution must not persist generated files or modify code seen by
+        // later claims. The scratch directory remains the only writable
+        // location, and the compiled modules and the replay live there.
         let mut plan = Confinement::new(workdir.path(), &cwd, timeout.as_secs())
             .reading(&binary)
             .scrubbed();
         if let Some(root) = &self.lean_root {
             plan = plan.reading(root);
         }
+        let claim_dir = workdir.path().join("claim");
+        let statement_dir = workdir.path().join("statement");
+        let driver = workdir.path().join("KernelReplay.lean");
+        let setup = fs::create_dir_all(&claim_dir)
+            .and_then(|()| fs::create_dir_all(&statement_dir))
+            .and_then(|()| fs::write(&driver, KERNEL_REPLAY.as_bytes()));
+        if let Err(error) = setup {
+            return Verdict::unavailable(format!("cannot prepare the Lean scratch: {error}"));
+        }
+        let source_name = format!("{LEAN_MODULE}.lean");
+        let olean_name = format!("{LEAN_MODULE}.olean");
+        let statement_olean = statement_dir.join(&olean_name);
+        let compile = |dir: &Path| {
+            sandbox::argv([
+                OsStr::new("-R"),
+                dir.as_os_str(),
+                OsStr::new("-o"),
+                dir.join(&olean_name).as_os_str(),
+                dir.join(&source_name).as_os_str(),
+            ])
+        };
+        let replay = |claim: &Path, marker: &str| {
+            sandbox::argv([
+                OsStr::new("--run"),
+                driver.as_os_str(),
+                claim.as_os_str(),
+                statement_olean.as_os_str(),
+                OsStr::new(theorem_arg),
+                OsStr::new(marker),
+            ])
+        };
+        let run = |args: Vec<OsString>| -> Result<Completed, LeanRun> {
+            let jailed = sandbox::confine(&binary, &args, &plan)
+                .map_err(|sandbox::Unavailable(why)| LeanRun::Jail(why))?;
+            let mut command = jailed.command;
+            run_bounded(&mut command, workdir.path(), None, timeout, plan.limits()).map_err(
+                |failure| match failure {
+                    RunFailure::TimedOut(throttled) => {
+                        LeanRun::TimedOut(timeout.as_secs(), RunFailure::throttle_note(throttled))
+                    }
+                    RunFailure::Spawn(error) | RunFailure::Io(error) => {
+                        LeanRun::Failed(error.to_string())
+                    }
+                },
+            )
+        };
 
         // Control before belief. Below, a non-zero exit is read as the
         // kernel's answer about the proof -- which is only true if Lean can
@@ -1556,51 +1971,47 @@ impl VerifierRegistry {
         // about the proof can be learned here, and the verdict is
         // Unavailable -- whether the cause is this node's jail or a statement
         // that does not elaborate, neither of which is the proof's doing.
-        // Remembered per process once it passes, so the cost is one extra
-        // elaboration per objective rather than per claim.
+        //
+        // That compile is also what the claim is held to: the kernel replay
+        // compares the claim's declarations with it. So the control runs the
+        // replay on the statement itself, which must pass and report
+        // `sorryAx`: a Lean on which the replay does not run, or does not
+        // read axioms, is found here as Unavailable rather than by misjudging
+        // a proof. The compiled statement is remembered per process once this
+        // passes, so the cost is one extra elaboration per objective rather
+        // than per claim.
         let control_key = blobs::address(
             format!(
-                "{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\nkernel-replay {}",
                 binary.display(),
                 cwd.display(),
                 preamble,
-                statement
+                statement,
+                blobs::address(KERNEL_REPLAY.as_bytes()),
             )
             .as_bytes(),
         );
-        if !lean_control_passed(&control_key) {
-            let control = workdir.path().join("Control.lean");
+        if let Some(compiled) = lean_statement_olean(&control_key) {
+            if let Err(error) = fs::write(&statement_olean, compiled) {
+                return Verdict::unavailable(format!(
+                    "cannot write the compiled statement: {error}"
+                ));
+            }
+        } else {
             if let Err(error) = fs::write(
-                &control,
+                statement_dir.join(&source_name),
                 format!("{preamble}\n{statement} := by sorry\n").as_bytes(),
             ) {
                 return Verdict::unavailable(format!("cannot write the Lean source: {error}"));
             }
-            let jailed =
-                match sandbox::confine(&binary, &sandbox::argv([control.as_os_str()]), &plan) {
-                    Ok(jailed) => jailed,
-                    Err(sandbox::Unavailable(why)) => {
-                        return Verdict::unavailable(format!("cannot jail lean: {why}"))
-                    }
-                };
-            let mut command = jailed.command;
-            let completed =
-                match run_bounded(&mut command, workdir.path(), None, timeout, plan.limits()) {
-                    Ok(completed) => completed,
-                    Err(RunFailure::TimedOut(throttled)) => {
-                        return Verdict::unavailable(format!(
-                            "lean exceeded {}s compiling the objective's statement alone{}; \
-                             timeout is not a refutation",
-                            timeout.as_secs(),
-                            RunFailure::throttle_note(throttled)
-                        ))
-                    }
-                    Err(RunFailure::Spawn(error)) | Err(RunFailure::Io(error)) => {
-                        return Verdict::unavailable(format!("cannot run lean: {error}"))
-                    }
-                };
+            let completed = match run(compile(&statement_dir)) {
+                Ok(completed) => completed,
+                Err(failure) => {
+                    return failure.unavailable("compiling the objective's statement alone")
+                }
+            };
             match completed.code {
-                Some(0) => remember_lean_control(&control_key),
+                Some(0) => {}
                 Some(code) => {
                     let output = format!("{}{}", completed.stdout, completed.stderr);
                     return Verdict::new(
@@ -1628,35 +2039,56 @@ impl VerifierRegistry {
                     )
                 }
             }
-        }
-
-        let claim = workdir.path().join("Claim.lean");
-        if let Err(error) = fs::write(&claim, source.as_bytes()) {
-            return Verdict::unavailable(format!("cannot write the Lean source: {error}"));
-        }
-        let jailed = match sandbox::confine(&binary, &sandbox::argv([claim.as_os_str()]), &plan) {
-            Ok(jailed) => jailed,
-            Err(sandbox::Unavailable(why)) => {
-                return Verdict::unavailable(format!("cannot jail lean: {why}"))
-            }
-        };
-        let mut command = jailed.command;
-
-        let completed =
-            match run_bounded(&mut command, workdir.path(), None, timeout, plan.limits()) {
+            let control_marker = audit_marker();
+            let completed = match run(replay(&statement_olean, &control_marker)) {
                 Ok(completed) => completed,
-                // A timeout is not a refutation. The proof may be fine and slow.
-                Err(RunFailure::TimedOut(throttled)) => {
-                    return Verdict::unavailable(format!(
-                        "lean exceeded {}s{}; timeout is not a refutation",
-                        timeout.as_secs(),
-                        RunFailure::throttle_note(throttled)
-                    ))
-                }
-                Err(RunFailure::Spawn(error)) | Err(RunFailure::Io(error)) => {
-                    return Verdict::unavailable(format!("cannot run lean: {error}"))
+                Err(failure) => {
+                    return failure.unavailable("replaying the objective's statement alone")
                 }
             };
+            let output = format!("{}{}", completed.stdout, completed.stderr);
+            match read_kernel_replay(&output, &control_marker) {
+                KernelReplay::Passed { axioms, .. }
+                    if theorem.is_none() || axioms.iter().any(|a| a == "sorryAx") => {}
+                reading => {
+                    return Verdict::new(
+                        Status::Unavailable,
+                        "this node's Lean did not run the kernel replay on the objective's \
+                         statement proved by `sorry`, or did not report it as resting on \
+                         `sorryAx`, so no replay can be trusted here. That is a fact about this \
+                         node's Lean, not the proof",
+                        Value::object([
+                            ("control_replay", Value::string(format!("{reading:?}"))),
+                            (
+                                "control_output_sha256",
+                                Value::string(blobs::address(output.trim().as_bytes())),
+                            ),
+                            ("lean_binary", Value::string(binary.to_string_lossy())),
+                        ]),
+                    );
+                }
+            }
+            match fs::read(&statement_olean) {
+                Ok(compiled) => remember_lean_statement(&control_key, compiled),
+                Err(error) => {
+                    return Verdict::unavailable(format!(
+                        "lean compiled the statement but left no module to replay against: {error}"
+                    ))
+                }
+            }
+        }
+
+        if let Err(error) = fs::write(
+            claim_dir.join(&source_name),
+            format!("{preamble}\n{statement} {proof}\n").as_bytes(),
+        ) {
+            return Verdict::unavailable(format!("cannot write the Lean source: {error}"));
+        }
+        let completed = match run(compile(&claim_dir)) {
+            Ok(completed) => completed,
+            // A timeout is not a refutation. The proof may be fine and slow.
+            Err(failure) => return failure.unavailable("compiling the claim"),
+        };
 
         let output = format!("{}{}", completed.stdout, completed.stderr)
             .trim()
@@ -1694,12 +2126,45 @@ impl VerifierRegistry {
             ),
             Some(_) => {
                 // Lean *warns* rather than errors on a declaration that depends
-                // on `sorryAx`, so a clean exit code is not sufficient.
-                if output.contains("declaration uses 'sorry'") {
-                    Verdict::new(Status::Reject, "proof depends on sorryAx", evidence)
-                } else {
-                    Verdict::new(Status::Accept, "kernel accepted the proof", evidence)
+                // on `sorryAx`, so a clean exit code is not sufficient. Older
+                // toolchains quote the word one way and newer ones the other.
+                if output.contains("declaration uses 'sorry'")
+                    || output.contains("declaration uses `sorry`")
+                {
+                    return Verdict::new(Status::Reject, "proof depends on sorryAx", evidence);
                 }
+                // A clean compile is what the submitter's own code reported:
+                // elaboration ran it, and it can leave a declaration in the
+                // environment the kernel never saw. The replay is a process
+                // that code never ran in, and its answer decides.
+                let marker = audit_marker();
+                let completed = match run(replay(&claim_dir.join(&olean_name), &marker)) {
+                    Ok(completed) => completed,
+                    Err(failure) => return failure.unavailable("replaying the claim"),
+                };
+                let replayed = format!("{}{}", completed.stdout, completed.stderr);
+                let evidence = {
+                    let mut map = evidence.as_object().cloned().unwrap_or_default();
+                    map.insert(
+                        "replay_output_sha256".to_string(),
+                        Value::string(blobs::address(replayed.trim().as_bytes())),
+                    );
+                    Value::Object(map)
+                };
+                if completed.code.is_none() {
+                    return Verdict::new(
+                        Status::Unavailable,
+                        "the kernel replay was killed by a signal; that is a fact about this \
+                         node, not the proof",
+                        evidence,
+                    );
+                }
+                lean_replay_verdict(
+                    read_kernel_replay(&replayed, &marker),
+                    &allowed_axioms,
+                    allow_native_decide,
+                    evidence,
+                )
             }
         }
     }
@@ -2697,28 +3162,61 @@ fn contained_dir(root: &Path, relative: &str) -> Option<PathBuf> {
 /// anything else is searched for on `PATH`. Returning `None` is what turns a
 /// missing toolchain into `Unavailable` instead of a rejection, so this is a
 /// security-relevant function despite looking like plumbing.
-/// Statements whose hole-compilation control passed in this process, by the
-/// key `verify_lean` builds from the binary, cwd, preamble and statement. A
-/// failed control is never remembered: a toolchain installed, or a jail
-/// fixed, after the first claim is found by the next one.
-fn lean_controls() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
-    static CONTROLS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+/// Statements whose control passed in this process, compiled, by the key
+/// `verify_lean` builds from the binary, cwd, preamble, statement and replay
+/// driver. A failed control is never remembered: a toolchain installed, or a
+/// jail fixed, after the first claim is found by the next one. Bounded: a
+/// compiled statement is the module's own declarations, a few kilobytes, and
+/// past the bound the oldest key is dropped and simply compiled again.
+fn lean_statements() -> &'static std::sync::Mutex<BTreeMap<String, Vec<u8>>> {
+    static STATEMENTS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, Vec<u8>>>> =
         std::sync::OnceLock::new();
-    CONTROLS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+    STATEMENTS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
 }
 
-fn lean_control_passed(key: &str) -> bool {
-    lean_controls()
+/// Most compiled statements [`lean_statements`] keeps.
+const MAX_LEAN_STATEMENTS: usize = 256;
+
+fn lean_statement_olean(key: &str) -> Option<Vec<u8>> {
+    lean_statements()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .contains(key)
+        .get(key)
+        .cloned()
 }
 
-fn remember_lean_control(key: &str) {
-    lean_controls()
+fn remember_lean_statement(key: &str, compiled: Vec<u8>) {
+    let mut statements = lean_statements()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(key.to_string());
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if statements.len() >= MAX_LEAN_STATEMENTS && !statements.contains_key(key) {
+        if let Some(first) = statements.keys().next().cloned() {
+            statements.remove(&first);
+        }
+    }
+    statements.insert(key.to_string(), compiled);
+}
+
+/// Why one jailed Lean run produced no output to judge.
+enum LeanRun {
+    Jail(String),
+    TimedOut(u64, String),
+    Failed(String),
+}
+
+impl LeanRun {
+    /// Unavailable, always: none of these is the proof's doing.
+    fn unavailable(self, doing: &str) -> Verdict {
+        match self {
+            LeanRun::Jail(why) => Verdict::unavailable(format!("cannot jail lean: {why}")),
+            LeanRun::TimedOut(seconds, note) => Verdict::unavailable(format!(
+                "lean exceeded {seconds}s {doing}{note}; timeout is not a refutation"
+            )),
+            LeanRun::Failed(error) => {
+                Verdict::unavailable(format!("cannot run lean ({doing}): {error}"))
+            }
+        }
+    }
 }
 
 /// `<binary> --version`'s first line, asked once per resolved path for the
@@ -4965,30 +5463,421 @@ mod tests {
         // that cannot execute the binary exits non-zero too. A `lean` reached
         // through a link the jail showed but could not follow -- here inside
         // the declared project, its target outside it -- came back Reject: the
-        // shell's "not found" read as the kernel refusing the proof. `true`
-        // stands in for Lean and accepts everything, so anything other than
+        // shell's "not found" read as the kernel refusing the proof. The
+        // replaying stand-in accepts an honest proof, so anything other than
         // Accept is the jail's doing.
-        let Some(stand_in) = which("true") else {
+        if !have("sh") || !have("cat") {
             return;
-        };
+        }
         let root = tmpdir("proofwork-symlinked-lean");
         let elsewhere = tmpdir("proofwork-lean-elsewhere");
+        let stand_in = replaying_lean(elsewhere.path());
         let binary = through_alternatives(
             &root.path().join("project/bin"),
             &elsewhere,
-            "true",
+            "lean",
             &stand_in,
         );
         let registry =
             VerifierRegistry::new(root.path()).with_lean_binary(binary.to_string_lossy());
         let spec = Value::object([
             ("kind", Value::string("lean")),
-            ("statement", Value::string("theorem t : True")),
+            ("statement", Value::string("example : True")),
             ("project_root", Value::string("project")),
         ]);
         let artifact = Value::object([("proof", Value::string(":= trivial"))]);
         let verdict = registry.run(&spec, &artifact);
         assert_eq!(verdict.status, Status::Accept, "{}", verdict.detail);
+    }
+
+    /// A stand-in Lean that speaks the replay protocol. Compiling (`-R DIR -o
+    /// OLEAN FILE`) copies the source to the "olean", warning on `sorry` the
+    /// way Lean does; replaying (`--run DRIVER CLAIM STATEMENT THEOREM
+    /// MARKER`) reports from words in the claim's text, so each branch of the
+    /// verdict can be reached without a real toolchain. A real one is
+    /// exercised by `a_real_lean_replays_what_it_compiled`.
+    #[cfg(unix)]
+    fn replaying_lean(dir: &Path) -> PathBuf {
+        replaying_lean_after(dir, "replaying-lean", "")
+    }
+
+    /// The replaying stand-in with `prelude` run first, so a test can make
+    /// some calls answer differently. It stays one file: a jail shows the
+    /// verifier the Lean binary it was given, not that binary's directory,
+    /// so a wrapper that execs a second stand-in beside it exits 127 there.
+    #[cfg(unix)]
+    fn replaying_lean_after(dir: &Path, name: &str, prelude: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let lean = dir.join(name);
+        fs::write(
+            &lean,
+            String::from("#!/bin/sh\n")
+                + prelude
+                + "case \"$1\" in\n\
+             -R)\n\
+               cat \"$5\" > \"$4\" || exit 1\n\
+               case \"$(cat \"$5\")\" in *sorry*) echo \"$5:2:0: warning: declaration uses 'sorry'\";; esac\n\
+               exit 0;;\n\
+             --run)\n\
+               text=$(cat \"$3\"); m=\"$6\"\n\
+               echo \"$m replayed 1\"\n\
+               case \"$text\" in\n\
+               *REPLAY_REFUSES*) echo \"$m fail kernel replay: (kernel) declaration type mismatch\"; exit 1;;\n\
+               *REPLAY_EXHAUSTED*) echo \"$m unavailable kernel replay: (kernel) deep recursion detected\"; exit 1;;\n\
+               esac\n\
+               case \"$text\" in *ADDS_AXIOM*) echo \"$m added-axiom t.added\"; echo \"$m axiom t.added\";; esac\n\
+               case \"$text\" in *NATIVE_AXIOM*) echo \"$m added-axiom t._native.native_decide.ax_1_1\"; echo \"$m axiom t._native.native_decide.ax_1_1\";; esac\n\
+               case \"$text\" in *PINNED_AXIOM*) echo \"$m pinned Assume.choice_free\"; echo \"$m axiom Assume.choice_free\";; esac\n\
+               case \"$text\" in *sorry*) echo \"$m axiom sorryAx\";; esac\n\
+               case \"$text\" in *ofReduceBool*) echo \"$m axiom Lean.ofReduceBool\";; esac\n\
+               [ \"$5\" = \"-\" ] || echo \"$m axiom propext\"\n\
+               echo \"$m ok\"; exit 0;;\n\
+             esac\n\
+             echo \"unexpected arguments: $*\" >&2; exit 2\n",
+        )
+        .expect("write stand-in");
+        fs::set_permissions(&lean, fs::Permissions::from_mode(0o755)).expect("chmod");
+        lean
+    }
+
+    /// What the replay reports decides the verdict: the standard axioms pass,
+    /// an axiom the objective did not allow is refused, the objective can
+    /// allow one by name or with `allow_native_decide`, a proof may not add
+    /// an axiom of its own, and a replay the kernel refused is a rejection
+    /// while one it could not finish is not.
+    #[cfg(unix)]
+    #[test]
+    fn the_kernel_replay_decides_what_a_clean_compile_rests_on() {
+        if !have("sh") || !have("cat") {
+            return;
+        }
+        let root = tmpdir("proofwork-lean-replay");
+        let lean = replaying_lean(root.path());
+        let registry = VerifierRegistry::new(root.path()).with_lean_binary(lean.to_string_lossy());
+        let spec = |extra: Vec<(&str, Value)>| {
+            let mut fields = vec![
+                ("kind", Value::string("lean")),
+                ("statement", Value::string("theorem audited : 2 + 2 = 4")),
+            ];
+            fields.extend(extra);
+            Value::object(fields)
+        };
+        let proof = |text: &str| Value::object([("proof", Value::string(text))]);
+
+        let verdict = registry.run(&spec(vec![]), &proof(":= rfl"));
+        assert_eq!(verdict.status, Status::Accept, "{}", verdict.detail);
+        assert_eq!(
+            verdict.evidence.get("axioms"),
+            Some(&Value::Array(vec![Value::string("propext")]))
+        );
+        assert!(verdict.evidence.get("replay_output_sha256").is_some());
+
+        // `Lean.ofReduceBool` named directly, not through `native_decide`, so
+        // the token screen never saw it. The replay does.
+        let compiler = proof(":= Lean.ofReduceBool _ _ rfl");
+        let verdict = registry.run(&spec(vec![]), &compiler);
+        assert_eq!(verdict.status, Status::Reject, "{}", verdict.detail);
+        assert!(
+            verdict.detail.contains("Lean.ofReduceBool"),
+            "{}",
+            verdict.detail
+        );
+        let opted = registry.run(
+            &spec(vec![("allow_native_decide", Value::Bool(true))]),
+            &compiler,
+        );
+        assert_eq!(opted.status, Status::Accept, "{}", opted.detail);
+        let listed = registry.run(
+            &spec(vec![(
+                "allowed_axioms",
+                Value::Array(vec![Value::string("Lean.ofReduceBool")]),
+            )]),
+            &compiler,
+        );
+        assert_eq!(listed.status, Status::Accept, "{}", listed.detail);
+
+        // What `native_decide` adds on a recent Lean: an axiom per use. Only
+        // an objective that opted in takes it.
+        let native = proof(":= rfl -- NATIVE_AXIOM");
+        let verdict = registry.run(&spec(vec![]), &native);
+        assert_eq!(verdict.status, Status::Reject, "{}", verdict.detail);
+        let opted = registry.run(
+            &spec(vec![("allow_native_decide", Value::Bool(true))]),
+            &native,
+        );
+        assert_eq!(opted.status, Status::Accept, "{}", opted.detail);
+
+        // An axiom the claim's module declared and the statement's did not:
+        // a metaprogram's. Refused even when the objective lists the name,
+        // because a proof may not add axioms at all.
+        let added = proof(":= rfl -- ADDS_AXIOM");
+        for extra in [
+            vec![],
+            vec![(
+                "allowed_axioms",
+                Value::Array(vec![Value::string("t.added")]),
+            )],
+        ] {
+            let verdict = registry.run(&spec(extra), &added);
+            assert_eq!(verdict.status, Status::Reject, "{}", verdict.detail);
+            assert!(
+                verdict.detail.contains("may not add axioms"),
+                "{}",
+                verdict.detail
+            );
+        }
+
+        // The statement's own axiom, reported by the replay as declared by
+        // the statement's compile: the objective's assumption, allowed.
+        let pinned = registry.run(&spec(vec![]), &proof(":= rfl -- PINNED_AXIOM"));
+        assert_eq!(pinned.status, Status::Accept, "{}", pinned.detail);
+
+        // The kernel refused a declaration on replay: the claim's doing.
+        let refused = registry.run(&spec(vec![]), &proof(":= rfl -- REPLAY_REFUSES"));
+        assert_eq!(refused.status, Status::Reject, "{}", refused.detail);
+        assert!(
+            refused.detail.contains("kernel replay refused"),
+            "{}",
+            refused.detail
+        );
+        // The kernel ran out of room on replay: this node's doing.
+        let exhausted = registry.run(&spec(vec![]), &proof(":= rfl -- REPLAY_EXHAUSTED"));
+        assert_eq!(
+            exhausted.status,
+            Status::Unavailable,
+            "{}",
+            exhausted.detail
+        );
+        assert!(!exhausted.status.settles());
+
+        // A malformed allow-list is the objective's fault, found before Lean.
+        let bad = VerifierRegistry::new(root.path()).with_lean_binary("lean-does-not-exist-xyz");
+        let verdict = bad.run(
+            &spec(vec![("allowed_axioms", Value::string("Lean.ofReduceBool"))]),
+            &proof(":= rfl"),
+        );
+        assert_eq!(verdict.status, Status::InvalidSpec, "{}", verdict.detail);
+    }
+
+    /// The replay against a real toolchain, when `CAIRN_TEST_LEAN` names one
+    /// (CI has none; the stand-in above covers every branch there). Honest
+    /// proofs pass with the axioms they really use, the statement's own
+    /// axiom is the objective's to allow, an `example` replays with nothing to
+    /// audit, and `native_decide`'s per-use axiom is taken only with the
+    /// objective's leave.
+    #[test]
+    fn a_real_lean_replays_what_it_compiled() {
+        let Some(lean) = std::env::var_os("CAIRN_TEST_LEAN") else {
+            return;
+        };
+        let root = tmpdir("proofwork-real-lean");
+        let registry = VerifierRegistry::new(root.path()).with_lean_binary(lean.to_string_lossy());
+        let run = |preamble: &str, statement: &str, proof: &str, native: bool| {
+            let spec = Value::object([
+                ("kind", Value::string("lean")),
+                ("preamble", Value::string(preamble)),
+                ("statement", Value::string(statement)),
+                ("allow_native_decide", Value::Bool(native)),
+            ]);
+            registry.run(&spec, &Value::object([("proof", Value::string(proof))]))
+        };
+        let axioms = |verdict: &Verdict| -> Vec<String> {
+            match verdict.evidence.get("axioms") {
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(String::from))
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+
+        let honest = run(
+            "",
+            "theorem pw_add_comm (a b : Nat) : a + b = b + a",
+            ":= Nat.add_comm a b",
+            false,
+        );
+        assert_eq!(honest.status, Status::Accept, "{}", honest.detail);
+        assert!(axioms(&honest).is_empty(), "{:?}", axioms(&honest));
+
+        let classical = run(
+            "",
+            "theorem pw_em (p : Prop) : p ∨ ¬p",
+            ":= Classical.em p",
+            false,
+        );
+        assert_eq!(classical.status, Status::Accept, "{}", classical.detail);
+        assert!(axioms(&classical).iter().any(|a| a == "Classical.choice"));
+
+        let private = run(
+            "private def double : Nat → Nat\n  | 0 => 0\n  | n + 1 => double n + 2",
+            "theorem pw_double (n : Nat) : double n = 2 * n",
+            ":= by induction n with | zero => rfl | succ k ih => simp [double, ih]; omega",
+            false,
+        );
+        assert_eq!(private.status, Status::Accept, "{}", private.detail);
+
+        let assumed = run(
+            "axiom pw_assumption : 1 = 2",
+            "theorem pw_uses : 1 = 2",
+            ":= pw_assumption",
+            false,
+        );
+        assert_eq!(assumed.status, Status::Accept, "{}", assumed.detail);
+
+        let example = run("", "example (a : Nat) : a = a", ":= rfl", false);
+        assert_eq!(example.status, Status::Accept, "{}", example.detail);
+
+        let wrong = run("", "theorem pw_wrong : 2 + 2 = 5", ":= rfl", false);
+        assert_eq!(wrong.status, Status::Reject, "{}", wrong.detail);
+
+        let native = run(
+            "",
+            "theorem pw_native : 10 < 20",
+            ":= by native_decide",
+            true,
+        );
+        assert_eq!(native.status, Status::Accept, "{}", native.detail);
+    }
+
+    /// A Lean on which the replay does not run is found by the control and
+    /// reported Unavailable -- never a verdict about the proof.
+    #[cfg(unix)]
+    #[test]
+    fn a_lean_the_replay_cannot_run_on_is_unavailable() {
+        let Some(silent) = which("true") else {
+            return;
+        };
+        let root = tmpdir("proofwork-lean-silent");
+        let registry =
+            VerifierRegistry::new(root.path()).with_lean_binary(silent.to_string_lossy());
+        let spec = Value::object([
+            ("kind", Value::string("lean")),
+            ("statement", Value::string("theorem silent_replay : True")),
+        ]);
+        let verdict = registry.run(
+            &spec,
+            &Value::object([("proof", Value::string(":= trivial"))]),
+        );
+        assert_eq!(verdict.status, Status::Unavailable, "{}", verdict.detail);
+        assert!(verdict.evidence.get("control_replay").is_some());
+    }
+
+    #[test]
+    fn the_replay_report_is_read_only_from_lines_that_carry_its_marker() {
+        let marker = "cairn-kernel-replay-00ff";
+        // Unmarked lines, and a marker run into another word, are not the
+        // replay: Lean's own warnings share the stream.
+        let report = "warning: unused variable\nok\ncairn-kernel-replay-00ffx ok\n\
+                      cairn-kernel-replay-00ff replayed 3\n\
+                      cairn-kernel-replay-00ff axiom propext\n\
+                      cairn-kernel-replay-00ff pinned Assume.p\n\
+                      cairn-kernel-replay-00ff added-axiom t.native\n\
+                      cairn-kernel-replay-00ff ok\n\
+                      cairn-kernel-replay-00ff fail too late to matter\n";
+        assert_eq!(
+            read_kernel_replay(report, marker),
+            KernelReplay::Passed {
+                axioms: vec!["propext".into()],
+                added: vec!["t.native".into()],
+                pinned: vec!["Assume.p".into()],
+            }
+        );
+        assert_eq!(
+            read_kernel_replay(
+                "cairn-kernel-replay-00ff fail t is a def, not a theorem",
+                marker
+            ),
+            KernelReplay::Refused("t is a def, not a theorem".into())
+        );
+        assert_eq!(
+            read_kernel_replay(
+                "cairn-kernel-replay-00ff unavailable kernel replay: x",
+                marker
+            ),
+            KernelReplay::Unavailable("kernel replay: x".into())
+        );
+        assert_eq!(
+            read_kernel_replay("cairn-kernel-replay-00ff axiom propext\n", marker),
+            KernelReplay::NoReport
+        );
+        assert_eq!(read_kernel_replay("", marker), KernelReplay::NoReport);
+    }
+
+    #[test]
+    fn the_replay_names_the_statements_theorem_and_holds_axiom_names_exactly() {
+        assert_eq!(lean_theorem_name("theorem t : True").as_deref(), Some("t"));
+        assert_eq!(
+            lean_theorem_name("@[simp] theorem Foo.bar (n : Nat) : n = n").as_deref(),
+            Some("Foo.bar")
+        );
+        assert_eq!(
+            lean_theorem_name("lemma l{α : Type} : True").as_deref(),
+            Some("l")
+        );
+        assert_eq!(lean_theorem_name("example : True"), None);
+        // A word that merely contains the keyword is not one.
+        assert_eq!(lean_theorem_name("def theorems : Nat"), None);
+
+        assert!(is_native_decide_axiom("t._native.native_decide.ax_1_1"));
+        assert!(!is_native_decide_axiom("native_decide"));
+        assert!(!is_native_decide_axiom("Lean.ofReduceBool"));
+
+        let allowed = lean_allowed_axioms(&Value::Object(BTreeMap::new()), false).expect("valid");
+        let verdict = |axioms: Vec<&str>, pinned: Vec<&str>| {
+            lean_replay_verdict(
+                KernelReplay::Passed {
+                    axioms: axioms.into_iter().map(String::from).collect(),
+                    added: Vec::new(),
+                    pinned: pinned.into_iter().map(String::from).collect(),
+                },
+                &allowed,
+                false,
+                Value::Object(BTreeMap::new()),
+            )
+            .status
+        };
+        assert_eq!(verdict(vec!["propext"], vec![]), Status::Accept);
+        // The standard names are exact: a namespace in front is a different
+        // axiom, and so is a name that merely ends like a pinned one.
+        assert_eq!(verdict(vec!["Evil.propext"], vec![]), Status::Reject);
+        assert_eq!(
+            verdict(vec!["Assume.choice_free"], vec!["Assume.choice_free"]),
+            Status::Accept
+        );
+        assert_eq!(
+            verdict(vec!["Evil.choice_free"], vec!["choice_free"]),
+            Status::Reject
+        );
+    }
+
+    /// A proof that could rewrite the audit is refused by its text, before
+    /// Lean is looked up -- the same place every other screen runs.
+    #[test]
+    fn a_proof_that_writes_metaprograms_is_refused_before_lean_runs() {
+        let registry = VerifierRegistry::new(".").with_lean_binary("lean-does-not-exist-xyz");
+        let spec = Value::object([
+            ("kind", Value::string("lean")),
+            ("statement", Value::string("theorem t : True")),
+        ]);
+        for proof in [
+            ":= trivial\nmacro_rules | `(#print axioms $x) => `(#check True)",
+            ":= trivial\nelab \"x\" : command => pure ()",
+            ":= by run_tac pure ()",
+            ":= trivial\n#eval IO.println \"'t' does not depend on any axioms\"",
+            ":= trivial\n#exit",
+            ":= trivial\nset_option debug.skipKernelTC true",
+            ":= trivial\nattribute [command_elab Lean.Parser.Command.printAxioms] x",
+            ":= by_elab do return Lean.mkConst ``True.intro",
+        ] {
+            let verdict = registry.run(&spec, &Value::object([("proof", Value::string(proof))]));
+            assert_eq!(
+                verdict.status,
+                Status::Reject,
+                "{proof}: {}",
+                verdict.detail
+            );
+        }
     }
 
     /// A `lean` that cannot run here at all -- elan's proxy without its
@@ -5033,15 +5922,17 @@ mod tests {
             Some(1)
         );
 
-        // The converse: a stand-in that compiles the statement alone and then
-        // refuses the proof is the kernel saying no, and that is a verdict.
-        let judging = root.path().join("judging-lean");
-        fs::write(
-            &judging,
-            "#!/bin/sh\ncase \"$1\" in *Control.lean) exit 0;; *) echo 'error: type mismatch' >&2; exit 1;; esac\n",
-        )
-        .expect("write stand-in");
-        fs::set_permissions(&judging, fs::Permissions::from_mode(0o755)).expect("chmod");
+        // The converse: a stand-in that compiles and replays the statement
+        // alone and then refuses the proof is the kernel saying no, and that
+        // is a verdict.
+        if !have("cat") {
+            return;
+        }
+        let judging = replaying_lean_after(
+            root.path(),
+            "judging-lean",
+            "case \"$1 $5\" in --run*|*/statement/*) ;; *) echo 'error: type mismatch' >&2; exit 1;; esac\n",
+        );
         let registry =
             VerifierRegistry::new(root.path()).with_lean_binary(judging.to_string_lossy());
         let spec = Value::object([

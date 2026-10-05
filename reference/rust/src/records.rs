@@ -446,6 +446,14 @@ impl Commitment {
     }
 
     pub fn from_value(value: &Value) -> Result<Commitment, RecordError> {
+        // An envelope the primary's decoder would refuse is refused here too.
+        // It decides whether a claim may carry an earlier epoch than its
+        // reveal, so storing any value and calling it sealed was a rule the
+        // two implementations applied differently.
+        if let Some(envelope) = value.get("envelope") {
+            crate::envelope::check(envelope)
+                .map_err(|why| RecordError(format!("commitment envelope: {why}")))?;
+        }
         let commitment = Commitment {
             objective_id: text(value, "objective_id")?,
             submitter: text(value, "submitter")?,
@@ -713,6 +721,10 @@ pub struct CommitteeShare {
     pub created_at: String,
     pub identity: String,
     pub signature: Option<String>,
+    /// The AEAD key that opens this seat's sealed share, hex. Optional and
+    /// signed only when present, so older records keep their ids; when present
+    /// the sealed share must open under it to exactly `(x, share)`.
+    pub share_key: Option<String>,
 }
 
 /// Longest share body a committee share may carry, in bytes before hex.
@@ -720,7 +732,7 @@ pub const MAX_SHARE_BYTES: usize = 1024;
 
 impl CommitteeShare {
     pub fn signing_payload(&self) -> Value {
-        Value::object([
+        let mut value = Value::object([
             ("type", Value::string("committee_share")),
             ("commitment", Value::string(self.commitment.clone())),
             ("created_at", Value::string(self.created_at.clone())),
@@ -728,7 +740,36 @@ impl CommitteeShare {
             ("seat", Value::Int(i128::from(self.seat))),
             ("share", Value::string(self.share.clone())),
             ("x", Value::Int(i128::from(self.x))),
-        ])
+        ]);
+        if let (Value::Object(map), Some(key)) = (&mut value, &self.share_key) {
+            map.insert("share_key".to_string(), Value::string(key.clone()));
+        }
+        value
+    }
+
+    /// The share body and key as bytes, when both are well-formed hex.
+    pub fn share_and_key(&self) -> Option<(Vec<u8>, [u8; 32])> {
+        let decode = |text: &str| -> Option<Vec<u8>> {
+            if !text.len().is_multiple_of(2) {
+                return None;
+            }
+            (0..text.len())
+                .step_by(2)
+                .map(|i| {
+                    let pair = &text[i..i + 2];
+                    if pair
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    {
+                        u8::from_str_radix(pair, 16).ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let key: [u8; 32] = decode(self.share_key.as_deref()?)?.try_into().ok()?;
+        Some((decode(&self.share)?, key))
     }
 
     pub fn to_value(&self) -> Value {
@@ -792,6 +833,13 @@ impl CommitteeShare {
         if self.share.len() / 2 > MAX_SHARE_BYTES {
             return Err(RecordError("committee_share share is too long".into()));
         }
+        if let Some(key) = &self.share_key {
+            if key.len() != 64 || !lower_hex(key) {
+                return Err(RecordError(
+                    "committee_share share_key must be 64 lowercase hex".into(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -815,6 +863,179 @@ impl CommitteeShare {
             created_at: text(value, "created_at")?,
             identity: text(value, "identity")?,
             signature: optional_text(value, "signature")?,
+            share_key: optional_text(value, "share_key")?,
+        })
+    }
+}
+
+// -- dealer accountability --------------------------------------------------
+
+/// A seat's statement that the share sealed to it did not open or did not
+/// check against the dealer's commitments. Signed by the seat's holder; the
+/// rules that admit it are the node's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareComplaint {
+    pub commitment: String,
+    pub seat: u8,
+    pub created_at: String,
+    pub identity: String,
+    pub signature: Option<String>,
+}
+
+fn record_id_hex(field: &str) -> bool {
+    let id = field.strip_prefix("sha256:").unwrap_or_default();
+    id.len() == 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn small_field(value: &Value, record: &str, name: &str) -> Result<u8, RecordError> {
+    value
+        .get(name)
+        .and_then(Value::as_i128)
+        .and_then(|n| u8::try_from(n).ok())
+        .ok_or_else(|| RecordError(format!("{record} {name} must be an integer in 0..=255")))
+}
+
+impl ShareComplaint {
+    pub fn signing_payload(&self) -> Value {
+        Value::object([
+            ("type", Value::string("share_complaint")),
+            ("commitment", Value::string(self.commitment.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("identity", Value::string(self.identity.clone())),
+            ("seat", Value::Int(i128::from(self.seat))),
+        ])
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut value = self.signing_payload();
+        if let (Value::Object(map), Some(signature)) = (&mut value, &self.signature) {
+            map.insert("signature".to_string(), Value::string(signature.clone()));
+        }
+        value
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// Always required: a complaint obliges the dealer to answer, and one
+    /// anybody could write would oblige an answer for every seat.
+    pub fn verify_signature(&self) -> Result<(), RecordError> {
+        if signed_submitter(&self.identity).is_none() {
+            return Err(RecordError(format!(
+                "share_complaint identity {:?} is not a public key",
+                self.identity
+            )));
+        }
+        verify_record_signature(
+            "share_complaint",
+            &self.identity,
+            &self.signing_payload(),
+            self.signature.as_deref(),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        if !record_id_hex(&self.commitment) {
+            return Err(RecordError(
+                "share_complaint commitment must be a record id".into(),
+            ));
+        }
+        if self.identity.len() != 64
+            || !self
+                .identity
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(RecordError(
+                "share_complaint identity must be 64 lowercase hex".into(),
+            ));
+        }
+        if self.seat == 0 {
+            return Err(RecordError("share_complaint seat must be 1..=255".into()));
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<ShareComplaint, RecordError> {
+        Ok(ShareComplaint {
+            commitment: text(value, "commitment")?,
+            seat: small_field(value, "share_complaint", "seat")?,
+            created_at: text(value, "created_at")?,
+            identity: text(value, "identity")?,
+            signature: optional_text(value, "signature")?,
+        })
+    }
+}
+
+/// The dealer's answer to a complaint: the seat's share, `s ‖ r`, in the
+/// clear. Unsigned, because the node admits it only if it checks against the
+/// envelope's commitments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareAnswer {
+    pub commitment: String,
+    pub seat: u8,
+    pub share: String,
+    pub created_at: String,
+}
+
+impl ShareAnswer {
+    pub fn to_value(&self) -> Value {
+        Value::object([
+            ("type", Value::string("share_answer")),
+            ("commitment", Value::string(self.commitment.clone())),
+            ("created_at", Value::string(self.created_at.clone())),
+            ("seat", Value::Int(i128::from(self.seat))),
+            ("share", Value::string(self.share.clone())),
+        ])
+    }
+
+    pub fn id(&self) -> String {
+        self.to_value().digest()
+    }
+
+    /// The share's bytes, when it is lowercase hex.
+    pub fn share_bytes(&self) -> Option<Vec<u8>> {
+        let text = self.share.as_str();
+        if !text.len().is_multiple_of(2)
+            || !text
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return None;
+        }
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+            .collect()
+    }
+
+    pub fn validate(&self) -> Result<(), RecordError> {
+        if !record_id_hex(&self.commitment) {
+            return Err(RecordError(
+                "share_answer commitment must be a record id".into(),
+            ));
+        }
+        if self.seat == 0 {
+            return Err(RecordError("share_answer seat must be 1..=255".into()));
+        }
+        if self.share_bytes().map(|bytes| bytes.len()) != Some(64) {
+            return Err(RecordError(
+                "share_answer share must be 128 lowercase hex characters".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn from_value(value: &Value) -> Result<ShareAnswer, RecordError> {
+        Ok(ShareAnswer {
+            commitment: text(value, "commitment")?,
+            seat: small_field(value, "share_answer", "seat")?,
+            share: text(value, "share")?,
+            created_at: text(value, "created_at")?,
         })
     }
 }

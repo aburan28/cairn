@@ -157,6 +157,9 @@ pub struct Config {
     /// Ed25519 identity used to sign MCP submissions. This is deliberately
     /// separate from [`Config::identity`], which is the transport KEM key.
     pub mcp_identity: Option<PathBuf>,
+    /// Total reward agents may fund through MCP `post_objective` while this
+    /// process runs. `None` falls back to `CAIRN_MCP_MAX_SPEND`, then zero.
+    pub mcp_max_spend: Option<u64>,
     /// Ed25519 identity this node's committee seats are registered under: the
     /// one that signed the peer record naming [`Config::identity`]'s transport
     /// id. With it, the node publishes the shares its seats owe for sealed
@@ -208,6 +211,7 @@ impl Config {
             proxy: None,
             mcp: false,
             mcp_identity: None,
+            mcp_max_spend: None,
             committee_identity: None,
             store: None,
             attest_identity: None,
@@ -427,6 +431,9 @@ struct Committee {
     /// Commitments whose share for this seat does not decrypt, already said
     /// once. It stays owed every tick, and the warning is worth one line.
     unopenable: BTreeSet<String>,
+    /// Where this node's own sealed submissions keep their dealer secrets
+    /// (`<log>.dealings`), to answer complaints about them.
+    dealings: PathBuf,
 }
 
 /// Publish owed committee shares and open what has become openable.
@@ -460,6 +467,53 @@ fn committee_tick(node: &mut Node, committee: &mut Committee, now: &str) -> bool
             }
         }
     }
+    // Complaints first: a seat whose share does not open or does not check
+    // says so inside the window, which is what obliges its dealer to answer.
+    if let Some(signer) = &committee.signer {
+        for (commitment, result) in
+            node.post_owed_complaints(&committee.key, signer, now_epoch, now)
+        {
+            match result {
+                Ok(_) => log::warn!(
+                    "committee: our share of {} does not open or does not check; complained, \
+                     and its dealer must answer",
+                    short(&commitment)
+                ),
+                Err(error) => log::debug!(
+                    "committee: complaint about {} refused: {error}",
+                    short(&commitment)
+                ),
+            }
+        }
+    }
+    // Then the answers this node owes as a dealer, and the dealings nothing
+    // can use any more.
+    let dealt = crate::sealed::dealings::load(&committee.dealings);
+    if !dealt.is_empty() {
+        for (commitment, result) in node.post_owed_answers(&dealt, now_epoch, now) {
+            match result {
+                Ok(_) => log::info!(
+                    "dealer: answered a complaint about {} with the seat's share",
+                    short(&commitment)
+                ),
+                Err(error) => log::warn!(
+                    "dealer: could not answer a complaint about {}: {error}",
+                    short(&commitment)
+                ),
+            }
+        }
+        for commitment in dealt.keys() {
+            if node.answer_window_closed(commitment, now_epoch) {
+                if let Err(error) = crate::sealed::dealings::forget(&committee.dealings, commitment)
+                {
+                    log::warn!(
+                        "dealer: cannot delete the dealing for {}: {error}",
+                        short(commitment)
+                    );
+                }
+            }
+        }
+    }
     let failed = &committee.failed;
     let attempts = node.open_due_sealed(now_epoch, now, |commitment, published| {
         failed
@@ -472,13 +526,35 @@ fn committee_tick(node: &mut Node, committee: &mut Committee, now: &str) -> bool
                 log::info!("committee: opened sealed submission {}", short(&commitment));
                 committee.failed.remove(&commitment);
             }
-            Err(error) => {
-                log::warn!("committee: cannot open {} yet: {error}", short(&commitment));
-                committee.failed.insert(commitment, published);
-            }
+            Err(error) => match retry_after(&error, published) {
+                None => log::debug!("committee: {} waits: {error}", short(&commitment)),
+                Some(tried) => {
+                    log::warn!("committee: cannot open {}: {error}", short(&commitment));
+                    committee.failed.insert(commitment, tried);
+                }
+            },
         }
     }
     node.ledger().len() != before
+}
+
+/// What to remember about a sealed submission that did not open, as the
+/// published-share count past which it is worth trying again. `None` forgets
+/// it, so the next tick retries.
+///
+/// A reveal held by the dealing windows clears with time, not with more
+/// shares, so remembering it would skip every retry until a share arrived that
+/// may never come -- and the committee would never reveal it. A disqualified
+/// one opens for no number of shares, so it is never tried again.
+fn retry_after(error: &crate::node::RuleViolation, published: usize) -> Option<usize> {
+    use crate::node::RuleViolation;
+    match error {
+        RuleViolation::AwaitingComplaints { .. } | RuleViolation::AwaitingDealerAnswer { .. } => {
+            None
+        }
+        RuleViolation::DealerDisqualified { .. } => Some(usize::MAX),
+        _ => Some(published),
+    }
 }
 
 fn settle_tick(node: &mut Node, now: &str) -> bool {
@@ -993,6 +1069,7 @@ pub fn run(config: Config) -> Result<(), String> {
                 config.mcp_identity.as_deref(),
                 &config.log,
                 &config.key_path(),
+                crate::mcp::SpendCeiling::from_flag_or_env(config.mcp_max_spend)?,
             )
             .map_err(|error| format!("mcp: {error}"))?,
         )
@@ -1188,6 +1265,7 @@ pub fn run(config: Config) -> Result<(), String> {
         },
         failed: BTreeMap::new(),
         unopenable: BTreeSet::new(),
+        dealings: crate::sealed::dealings::dir_for(&config.log),
     };
     match &committee.signer {
         Some(signer) => log::info!(
@@ -1561,6 +1639,52 @@ fn describe_readiness(report: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_reveal_held_by_the_dealing_windows_is_retried_and_a_disqualified_one_is_not() {
+        use crate::node::RuleViolation;
+        let commitment = String::from("sha256:00");
+        assert_eq!(
+            retry_after(
+                &RuleViolation::AwaitingComplaints {
+                    commitment: commitment.clone()
+                },
+                3
+            ),
+            None
+        );
+        assert_eq!(
+            retry_after(
+                &RuleViolation::AwaitingDealerAnswer {
+                    commitment: commitment.clone(),
+                    seats: vec![1]
+                },
+                3
+            ),
+            None
+        );
+        assert_eq!(
+            retry_after(
+                &RuleViolation::DealerDisqualified {
+                    commitment: commitment.clone(),
+                    seats: vec![1]
+                },
+                3
+            ),
+            Some(usize::MAX)
+        );
+        assert_eq!(
+            retry_after(
+                &RuleViolation::NotEnoughShares {
+                    commitment,
+                    have: 2,
+                    need: 3
+                },
+                2
+            ),
+            Some(2)
+        );
+    }
     use super::*;
     use crate::records::{commitment_hash, Claim, Commitment};
 

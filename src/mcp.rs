@@ -125,6 +125,77 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Bytes of commit–reveal nonce. Never leaves this process.
 const NONCE_BYTES: usize = 32;
 
+/// Environment fallback for the spend ceiling, so `cairn run` and a client
+/// stanza that cannot pass flags can still set one. See [`SpendCeiling`].
+pub const MAX_SPEND_ENV: &str = "CAIRN_MCP_MAX_SPEND";
+
+/// How much of the server identity's balance agents may commit to new
+/// objectives, over this server's lifetime.
+///
+/// `post_objective` funds a reward from whoever the funder is, and with
+/// `--identity` that is the operator's own key. An agent reads text other
+/// people wrote -- objective statements, claim artifacts, web pages -- so one
+/// injected instruction ("fund a 1,000,000 bounty for ...") would otherwise
+/// spend the operator's whole balance on an agent's word. The default is zero:
+/// an objective with no reward can still be posted, a funded one needs the
+/// operator to have said, at launch, how much agents may spend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpendCeiling {
+    limit: u64,
+    spent: u64,
+}
+
+impl SpendCeiling {
+    pub const fn new(limit: u64) -> SpendCeiling {
+        SpendCeiling { limit, spent: 0 }
+    }
+
+    /// The ceiling the operator set: the flag when given, else
+    /// [`MAX_SPEND_ENV`], else zero.
+    pub fn from_flag_or_env(flag: Option<u64>) -> Result<SpendCeiling, String> {
+        if let Some(limit) = flag {
+            return Ok(SpendCeiling::new(limit));
+        }
+        match std::env::var(MAX_SPEND_ENV) {
+            Ok(text) if !text.trim().is_empty() => text
+                .trim()
+                .parse::<u64>()
+                .map(SpendCeiling::new)
+                .map_err(|_| format!("{MAX_SPEND_ENV}={text:?} is not a whole number of units")),
+            _ => Ok(SpendCeiling::new(0)),
+        }
+    }
+
+    /// Room left for `reward`, or why there is none. Nothing is spent here;
+    /// [`SpendCeiling::record`] does that once the post is admitted.
+    fn check(&self, reward: u64) -> Result<(), String> {
+        if reward == 0 {
+            return Ok(());
+        }
+        let after = self.spent.saturating_add(reward);
+        if self.limit == 0 {
+            return Err(format!(
+                "this server may not fund objectives: the operator set no spending ceiling. \
+                 An objective with reward 0 can still be posted; a funded one needs the \
+                 operator to start the server with --max-spend N (or {MAX_SPEND_ENV}=N)"
+            ));
+        }
+        if after > self.limit {
+            return Err(format!(
+                "a reward of {reward} would bring this server's spending to {after}, over the \
+                 operator's ceiling of {}; {} remains. Nothing was recorded",
+                self.limit,
+                self.limit - self.spent
+            ));
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, reward: u64) {
+        self.spent = self.spent.saturating_add(reward);
+    }
+}
+
 /// Run `cairn mcp`: the standalone stdio server, owning its own ledger.
 ///
 /// [`crate::daemon`] uses the same protocol engine with the daemon's
@@ -141,6 +212,7 @@ pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
     let mut root = globals.root;
     let mut identity_path: Option<PathBuf> = None;
     let mut key_file: Option<PathBuf> = globals.key_file;
+    let mut max_spend: Option<u64> = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -160,6 +232,10 @@ pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
                 Some(v) => key_file = Some(PathBuf::from(v)),
                 None => fail("--key-file needs a path"),
             },
+            "--max-spend" => match args.next().map(|v| v.parse::<u64>()) {
+                Some(Ok(units)) => max_spend = Some(units),
+                _ => fail("--max-spend needs a whole number of units"),
+            },
             "--help" | "-h" => {
                 eprintln!(
                     "cairn mcp — MCP server over stdio, on a log of its own\n\n\
@@ -169,7 +245,10 @@ pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
                      --identity  sign submissions with this key; its public half\n\
                                  becomes the submitter, and nobody else can claim it\n\
                      --key-file  at-rest key, if the ledger is sealed (default: the\n\
-                                 CLI's own, so a sealed log opens with no flag)\n\n\
+                                 CLI's own, so a sealed log opens with no flag)\n\
+                     --max-spend total reward agents may fund through post_objective\n\
+                                 while this server runs (default 0: unfunded objectives\n\
+                                 only; also CAIRN_MCP_MAX_SPEND)\n\n\
                      For an agent whose work should reach peers live, configure the\n\
                      client to launch `cairn run` instead: same protocol, one node.\n"
                 );
@@ -211,11 +290,16 @@ pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
         Some(Ok(identity)) => Some(identity),
         Some(Err(why)) => fail(&why),
     };
+    let spend = match SpendCeiling::from_flag_or_env(max_spend) {
+        Ok(spend) => spend,
+        Err(why) => fail(&why),
+    };
     let server = Server::new_with_pending_cipher(
         Node::with_registry(ledger, registry),
         identity,
         pending_cipher,
-    );
+    )
+    .with_spend_ceiling(spend);
 
     eprintln!(
         "cairn mcp {SERVER_VERSION}: ledger {}, root {}",
@@ -234,10 +318,11 @@ pub(crate) fn start_shared_stdio(
     identity_path: Option<&Path>,
     log: &Path,
     key_path: &Path,
+    spend: SpendCeiling,
 ) -> Result<Receiver<()>, String> {
     let identity = identity_path.map(load_identity).transpose()?;
     let cipher = pending_cipher(log, key_path)?;
-    let server = Server::new_shared(state, identity, cipher);
+    let server = Server::new_shared(state, identity, cipher).with_spend_ceiling(spend);
     eprintln!(
         "cairn mcp {SERVER_VERSION}: sharing daemon ledger {}, stdio ready",
         log.display()
@@ -269,6 +354,12 @@ fn pending_cipher(
 }
 
 fn report_identity(server: &Server, flag: &str) {
+    match server.spend.limit {
+        0 => {
+            eprintln!("post_objective: unfunded objectives only (no --max-spend / {MAX_SPEND_ENV})")
+        }
+        limit => eprintln!("post_objective: agents may fund up to {limit} units in total"),
+    }
     match server.identity.as_ref() {
         Some(identity) => eprintln!(
             "signing submissions as {} -- this name is a public key, so it cannot be \
@@ -659,6 +750,8 @@ struct Server {
     /// agent pass a name that disagreed with the signature would produce a
     /// record the rules engine refuses for reasons the agent cannot see.
     identity: Option<Identity>,
+    /// What `post_objective` may still commit. See [`SpendCeiling`].
+    spend: SpendCeiling,
 }
 
 impl Server {
@@ -673,6 +766,12 @@ impl Server {
         pending_cipher: Option<crate::store::atrest::Cipher>,
     ) -> Server {
         Self::new_with_source(NodeSource::Owned(Box::new(node)), identity, pending_cipher)
+    }
+
+    /// The operator's ceiling on what agents may fund. See [`SpendCeiling`].
+    fn with_spend_ceiling(mut self, spend: SpendCeiling) -> Server {
+        self.spend = spend;
+        self
     }
 
     fn new_shared(
@@ -697,6 +796,7 @@ impl Server {
             tainted: BTreeSet::new(),
             pending,
             identity,
+            spend: SpendCeiling::new(0),
         }
     }
 
@@ -1268,6 +1368,13 @@ fn tool_definitions() -> Json {
                     "max_bytes": {
                         "type": "integer",
                         "description": "Optional size cap for this grant; defaults to the deposit's."
+                    },
+                    "size": {
+                        "type": "integer",
+                        "description":
+                            "Optional exact byte length of the body. With digest, an S3 grant is \
+                             presigned for exactly those bytes and the response lists the \
+                             headers the PUT must carry; without both it uploads through this node."
                     },
                     "digest": {
                         "type": "string",
@@ -2283,11 +2390,17 @@ impl Server {
             Some(identity) => objective.funded_by(identity),
             None => objective,
         };
+        // Before the write, and spent only after it is admitted: a refused post
+        // must not use up the ceiling.
+        self.spend
+            .check(objective.reward)
+            .map_err(|why| format!("post refused: {why}"))?;
         let id = self
             .node
             .write()
             .post_objective(&objective, &ts)
             .map_err(|violation| format!("post refused: {violation}. Nothing was recorded."))?;
+        self.spend.record(objective.reward);
         // The statement is now prose this server has rendered back to an
         // agent, and any claim id planted in it must be refusable as a
         // citation -- the same rule `list_objectives` applies.
@@ -2352,16 +2465,16 @@ impl Server {
                 .unwrap_or_else(|| std::path::Path::new(".")),
         );
         let secrets_dir = secrets::default_dir();
-        let grant = deposit::issue_grant(
-            &deposits,
-            &deposit,
-            &submitter,
+        let request = deposit::GrantRequest {
+            deposit: &deposit,
+            submitter: &submitter,
             max_bytes,
+            size: args.get("size").and_then(Json::as_u64),
             digest,
-            None,
-            &secrets_dir,
-        )
-        .map_err(|e| e.to_string())?;
+            requester: None,
+        };
+        let grant = deposit::issue_grant(&deposits, &request, None, &secrets_dir)
+            .map_err(|e| e.to_string())?;
         // Compact JSON the agent can parse; no secret values by construction.
         Ok(grant.public_response(None).to_string())
     }
@@ -2510,11 +2623,18 @@ fn error_response(id: Json, code: i64, message: &str) -> Json {
 mod tests {
     use super::*;
 
+    /// A server whose operator allowed agents to fund objectives, generously:
+    /// most tests here are about what posting does, not whether it may.
+    /// [`server_with_ceiling`] is the default an operator actually gets.
     fn server() -> Server {
+        server_with_ceiling(u64::MAX)
+    }
+
+    fn server_with_ceiling(limit: u64) -> Server {
         let dir = std::env::temp_dir().join(format!("cairn-mcp-test-{}", fresh_nonce()));
         std::fs::create_dir_all(&dir).unwrap();
         let ledger = Ledger::open(dir.join("log.jsonl")).unwrap();
-        Server::new(Node::new(ledger, &dir), None)
+        Server::new(Node::new(ledger, &dir), None).with_spend_ceiling(SpendCeiling::new(limit))
     }
 
     /// A server holding one accepted claim carrying `artifact`.
@@ -2610,7 +2730,8 @@ mod tests {
         let ledger = Ledger::open(dir.join("log.jsonl")).unwrap();
         let identity = Identity::from_secret_bytes([31u8; 32]);
         (
-            Server::new(Node::new(ledger, &dir), Some(identity.clone())),
+            Server::new(Node::new(ledger, &dir), Some(identity.clone()))
+                .with_spend_ceiling(SpendCeiling::new(u64::MAX)),
             identity,
         )
     }
@@ -2629,6 +2750,66 @@ mod tests {
     }
 
     // -- post_objective -----------------------------------------------------
+
+    fn objective_paying(reward: u64, goal: &str) -> Json {
+        json!({
+            "objective": {
+                "goal": goal,
+                "statement": "Find a long Collatz trajectory.",
+                "verifier": {
+                    "kind": "certificate",
+                    "checker": "checkers/never.py",
+                    "checker_sha256": "00".repeat(32),
+                    "entrypoint": "check"
+                },
+                "reward": reward,
+                "funder": "agent-funder"
+            }
+        })
+    }
+
+    /// An agent reads text other people wrote, so "fund a bounty" found in an
+    /// objective statement must not spend the operator's balance. With no
+    /// ceiling set, only an unfunded objective may be posted; with one, the
+    /// total is bounded and a refused post spends nothing.
+    #[test]
+    fn post_objective_spends_only_what_the_operator_allowed() {
+        let mut s = server_with_ceiling(0);
+        let refused = call(&mut s, "post_objective", objective_paying(1, "GOAL-a"));
+        assert!(refused.contains("--max-spend"), "{refused}");
+        assert!(
+            s.node.read().objectives().is_empty(),
+            "a refused post wrote"
+        );
+        let free = call(&mut s, "post_objective", objective_paying(0, "GOAL-free"));
+        assert!(free.starts_with("posted objective"), "{free}");
+
+        let mut s = server_with_ceiling(1000);
+        let first = call(&mut s, "post_objective", objective_paying(600, "GOAL-b"));
+        assert!(first.starts_with("posted objective"), "{first}");
+        let over = call(&mut s, "post_objective", objective_paying(500, "GOAL-c"));
+        assert!(
+            over.contains("ceiling of 1000") && over.contains("400 remains"),
+            "{over}"
+        );
+        let fits = call(&mut s, "post_objective", objective_paying(400, "GOAL-d"));
+        assert!(fits.starts_with("posted objective"), "{fits}");
+        let spent = call(&mut s, "post_objective", objective_paying(1, "GOAL-e"));
+        assert!(spent.contains("0 remains"), "{spent}");
+        assert_eq!(s.node.read().objectives().len(), 2);
+    }
+
+    #[test]
+    fn the_spend_ceiling_reads_the_flag_then_the_environment() {
+        assert_eq!(
+            SpendCeiling::from_flag_or_env(Some(7)).unwrap(),
+            SpendCeiling::new(7)
+        );
+        // The environment is process-wide and other tests run alongside, so
+        // only the parse is checked through it, on a value no test sets.
+        assert!(SpendCeiling::new(0).check(0).is_ok());
+        assert!(SpendCeiling::new(0).check(1).is_err());
+    }
 
     /// An agent can fund a question, and the rest of the toolset sees it.
     ///
@@ -2725,7 +2906,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cairn-mcp-test-{}", fresh_nonce()));
         std::fs::create_dir_all(&dir).unwrap();
         let ledger = Ledger::open(dir.join("log.jsonl")).unwrap();
-        let mut s = Server::new(Node::new(ledger, &dir), Some(identity.clone()));
+        let mut s = Server::new(Node::new(ledger, &dir), Some(identity.clone()))
+            .with_spend_ceiling(SpendCeiling::new(u64::MAX));
         let out = call(
             &mut s,
             "post_objective",

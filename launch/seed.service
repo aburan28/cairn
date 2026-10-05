@@ -61,5 +61,31 @@ RestartSec=5
 # changed anything, so a hard stop loses nothing it had settled.
 TimeoutStopSec=20
 
+# Hardening. The node writes /var/lib/cairn and nothing else, and its verifier
+# jail -- bubblewrap over unprivileged user namespaces -- runs inside all of
+# this. Left out on purpose: RestrictNamespaces (the jail is made of
+# namespaces), MemoryDenyWriteExecute and SystemCallFilter (a verifier
+# toolchain such as Lean may need what they forbid). A Lean toolchain under
+# someone's home is hidden by ProtectHome; point CAIRN_LEAN at one under
+# /opt or /usr, or set ProtectHome=read-only.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cairn
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+UMask=0077
+
 [Install]
 WantedBy=multi-user.target

@@ -505,7 +505,163 @@ const SCREENS: &[(&str, bool, &str)] = &[
         false,
         "uses `@[implemented_by]`: replaces a definition with unverified code",
     ),
+    // A proof term needs none of these, and each runs code during
+    // elaboration -- code that can put a declaration in the environment the
+    // kernel never checked. The kernel replay refuses that whatever spelling
+    // reaches it; these refuse the spellings known to.
+    ("macro", true, METAPROGRAM),
+    ("macro_rules", true, METAPROGRAM),
+    ("elab", true, METAPROGRAM),
+    ("elab_rules", true, METAPROGRAM),
+    ("syntax", true, METAPROGRAM),
+    ("command_elab", true, METAPROGRAM),
+    ("term_elab", true, METAPROGRAM),
+    ("run_cmd", true, METAPROGRAM),
+    ("run_elab", true, METAPROGRAM),
+    ("run_meta", true, METAPROGRAM),
+    ("run_tac", true, METAPROGRAM),
+    ("by_elab", true, METAPROGRAM),
+    ("initialize", true, METAPROGRAM),
+    ("builtin_initialize", true, METAPROGRAM),
+    ("#eval", false, METAPROGRAM),
+    ("#exit", false, METAPROGRAM),
+    ("skipKernelTC", false, "turns off the kernel's type check"),
 ];
+
+/// Shared wording with the primary.
+const METAPROGRAM: &str = "defines or runs a metaprogram: a proof term needs none, and one could \
+     put a declaration in the environment the kernel never checked";
+
+/// The axioms the core library rests on; any other must be allowed by the
+/// objective.
+const STANDARD_AXIOMS: &[&str] = &["propext", "Classical.choice", "Quot.sound"];
+
+/// What `native_decide` brings, allowed only with `allow_native_decide`: these
+/// two on older toolchains, and on newer ones an axiom per use (see
+/// [`is_native_decide_axiom`]).
+const NATIVE_AXIOMS: &[&str] = &["Lean.ofReduceBool", "Lean.trustCompiler"];
+
+/// The kernel replay, the protocol's own file, embedded unchanged by both
+/// implementations. Its header says what it checks.
+const KERNEL_REPLAY: &str = include_str!("../../../spec/lean/KernelReplay.lean");
+
+/// The module name the claim and the statement are both compiled as: a
+/// `private` name carries its module's, and the replay compares the two.
+const LEAN_MODULE: &str = "CairnProof";
+
+/// An axiom `native_decide` added for one use, as recent toolchains name it.
+fn is_native_decide_axiom(name: &str) -> bool {
+    name.contains("._native.native_decide.ax_")
+}
+
+/// Where `word` starts in `text` as a whole word, by [`contains_word`]'s rule.
+fn word_at(text: &str, word: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut from = 0;
+    while let Some(found) = text[from..].find(word) {
+        let start = from + found;
+        let end = start + word.len();
+        if (start == 0 || !is_word(bytes[start - 1]))
+            && (end == bytes.len() || !is_word(bytes[end]))
+        {
+            return Some(start);
+        }
+        from = end;
+    }
+    None
+}
+
+/// The name written after position `at`: up to whitespace, or a character
+/// that opens a binder or a type.
+fn name_after(text: &str, at: usize) -> Option<String> {
+    let name: String = text[at..]
+        .trim_start()
+        .chars()
+        .take_while(|c| !c.is_whitespace() && !matches!(c, ':' | '(' | '{' | '[' | '⦃'))
+        .collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// The theorem the audit asks about: the first `theorem` or `lemma` in the
+/// statement. An `example` names nothing, and the audit is skipped.
+fn theorem_name(statement: &str) -> Option<String> {
+    let mut first: Option<(usize, usize)> = None;
+    for keyword in ["theorem", "lemma"] {
+        if let Some(at) = word_at(statement, keyword) {
+            if first.is_none_or(|(best, _)| at < best) {
+                first = Some((at, keyword.len()));
+            }
+        }
+    }
+    let (at, length) = first?;
+    name_after(statement, at + length)
+}
+
+/// What the kernel replay reported, from the lines carrying its marker.
+#[derive(Debug, PartialEq, Eq)]
+enum Replay {
+    /// No `ok`, `fail` or `unavailable` line: it did not run here.
+    NoReport,
+    Refused(String),
+    Unavailable(String),
+    Passed {
+        axioms: Vec<String>,
+        added: Vec<String>,
+        pinned: Vec<String>,
+    },
+}
+
+fn read_replay(output: &str, marker: &str) -> Replay {
+    let (mut axioms, mut added, mut pinned) = (Vec::new(), Vec::new(), Vec::new());
+    for line in output.lines() {
+        let Some(report) = line
+            .strip_prefix(marker)
+            .and_then(|rest| rest.strip_prefix(' '))
+        else {
+            continue;
+        };
+        let (word, rest) = report.split_once(' ').unwrap_or((report, ""));
+        match word {
+            "ok" => {
+                return Replay::Passed {
+                    axioms,
+                    added,
+                    pinned,
+                }
+            }
+            "fail" => return Replay::Refused(rest.to_string()),
+            "unavailable" => return Replay::Unavailable(rest.to_string()),
+            "axiom" => axioms.push(rest.to_string()),
+            "added-axiom" => added.push(rest.to_string()),
+            "pinned" => pinned.push(rest.to_string()),
+            _ => {}
+        }
+    }
+    Replay::NoReport
+}
+
+/// A marker nothing else on the output can carry. No RNG crate here: the
+/// process, the clock to the nanosecond and a counter, hashed, are not
+/// something a submitter who wrote the proof in advance can know.
+fn audit_marker(proof: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let digest = Sha256::new()
+        .chain_update(std::process::id().to_be_bytes())
+        .chain_update(nanos.to_be_bytes())
+        .chain_update(next_scratch().to_be_bytes())
+        .chain_update(proof.as_bytes())
+        .finalize();
+    let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+    format!("cairn-kernel-replay-{hex}")
+}
 
 /// Screened unless the objective explicitly opts in.
 const NATIVE_DECIDE: (&str, bool, &str) = (
@@ -626,6 +782,35 @@ fn lean_using(binary: &str, root: &Path, spec: &Value, artifact: &Value) -> Verd
             "the proof must begin with `:=`; text before it would extend the objective's statement",
         );
     }
+    // What the theorem may rest on, read from the spec before Lean is.
+    let mut exact: Vec<String> = STANDARD_AXIOMS.iter().map(|a| a.to_string()).collect();
+    if allow_native_decide {
+        exact.extend(NATIVE_AXIOMS.iter().map(|a| a.to_string()));
+    }
+    match spec.get("allowed_axioms") {
+        None => {}
+        Some(Value::Array(items)) => {
+            for item in items {
+                match item.as_str().map(str::trim) {
+                    Some(name) if !name.is_empty() => exact.push(name.to_string()),
+                    _ => {
+                        return Verdict::plain(
+                            Status::InvalidSpec,
+                            "allowed_axioms must be a list of axiom names",
+                        )
+                    }
+                }
+            }
+        }
+        Some(_) => {
+            return Verdict::plain(
+                Status::InvalidSpec,
+                "allowed_axioms must be a list of axiom names",
+            )
+        }
+    }
+    let theorem = theorem_name(statement);
+    let theorem_arg = theorem.clone().unwrap_or_else(|| String::from("-"));
 
     // Attacker-authored, and the primary hands it to the jail as a *writable*
     // bind -- so unconfined, `"/"` would be a pass-through of the filesystem.
@@ -651,8 +836,6 @@ fn lean_using(binary: &str, root: &Path, spec: &Value, artifact: &Value) -> Verd
     }
 
     let preamble = spec.get("preamble").and_then(Value::as_str).unwrap_or("");
-    let source = format!("{preamble}\n{statement} {proof}\n");
-
     let dir = std::env::temp_dir().join(format!(
         "cairn-reference-lean-{}-{}",
         std::process::id(),
@@ -661,11 +844,56 @@ fn lean_using(binary: &str, root: &Path, spec: &Value, artifact: &Value) -> Verd
     if std::fs::create_dir_all(&dir).is_err() {
         return Verdict::plain(Status::Unavailable, "cannot create a working directory");
     }
-    let cwd = match project_cwd {
+    let verdict = lean_in(
+        &LeanRun {
+            binary,
+            dir: &dir,
+            project: project_cwd.as_deref(),
+            theorem: &theorem_arg,
+        },
+        preamble,
+        statement,
+        proof,
+        theorem.is_some(),
+        &exact,
+        allow_native_decide,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    verdict
+}
+
+/// Where one Lean verification runs.
+struct LeanRun<'a> {
+    binary: &'a str,
+    dir: &'a Path,
+    project: Option<&'a Path>,
+    /// What the replay is told the statement declares: its name, or `-`.
+    theorem: &'a str,
+}
+
+/// The compile, the replay and the verdict, in scratch `run.dir`.
+///
+/// First the objective's own statement, compiled with a hole and replayed:
+/// text no submitter wrote. If that does not compile, or the replay does not
+/// run on it and report `sorryAx`, nothing about the proof can be learned
+/// here and the verdict is `Unavailable` -- a fact about this node's Lean or
+/// the objective, never the proof. Then the claim, compiled; a non-zero exit
+/// there is the kernel's answer. Then the claim replayed against the
+/// statement in a process its code never ran in, which decides.
+#[allow(clippy::too_many_arguments)]
+fn lean_in(
+    run: &LeanRun<'_>,
+    preamble: &str,
+    statement: &str,
+    proof: &str,
+    named: bool,
+    allowed: &[String],
+    allow_native_decide: bool,
+) -> Verdict {
+    let cwd = match run.project {
         Some(source) => {
-            let copied = dir.join("project");
-            if let Err(error) = copy_project_tree(&source, &copied) {
-                let _ = std::fs::remove_dir_all(&dir);
+            let copied = run.dir.join("project");
+            if let Err(error) = copy_project_tree(source, &copied) {
                 return Verdict::plain(
                     Status::Unavailable,
                     format!("cannot copy the Lean project into scratch: {error}"),
@@ -673,34 +901,117 @@ fn lean_using(binary: &str, root: &Path, spec: &Value, artifact: &Value) -> Verd
             }
             copied
         }
-        None => dir.clone(),
+        None => run.dir.to_path_buf(),
     };
-    let claim = dir.join("Claim.lean");
-    if std::fs::write(&claim, source.as_bytes()).is_err() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Verdict::plain(Status::Unavailable, "cannot write the Lean source");
+    let claim_dir = run.dir.join("claim");
+    let statement_dir = run.dir.join("statement");
+    let driver = run.dir.join("KernelReplay.lean");
+    let source = format!("{LEAN_MODULE}.lean");
+    let olean = format!("{LEAN_MODULE}.olean");
+    let written = std::fs::create_dir_all(&claim_dir)
+        .and_then(|()| std::fs::create_dir_all(&statement_dir))
+        .and_then(|()| std::fs::write(&driver, KERNEL_REPLAY))
+        .and_then(|()| {
+            std::fs::write(
+                statement_dir.join(&source),
+                format!("{preamble}\n{statement} := by sorry\n"),
+            )
+        })
+        .and_then(|()| {
+            std::fs::write(
+                claim_dir.join(&source),
+                format!("{preamble}\n{statement} {proof}\n"),
+            )
+        });
+    if written.is_err() {
+        return Verdict::plain(Status::Unavailable, "cannot write the Lean sources");
     }
-    let mut command = Command::new(binary);
-    command.arg(&claim).current_dir(&cwd);
-    scrub_environment(&mut command, &dir);
-    let output = command.output();
-    let _ = std::fs::remove_dir_all(&dir);
-    let output = match output {
-        Ok(output) => output,
+    let lean = |args: &[&std::ffi::OsStr]| {
+        let mut command = Command::new(run.binary);
+        command.args(args).current_dir(&cwd);
+        scrub_environment(&mut command, run.dir);
+        command.output()
+    };
+    let compile = |at: &Path| {
+        lean(&[
+            "-R".as_ref(),
+            at.as_os_str(),
+            "-o".as_ref(),
+            at.join(&olean).as_os_str(),
+            at.join(&source).as_os_str(),
+        ])
+    };
+    let statement_olean = statement_dir.join(&olean);
+    let replay = |claim: &Path, marker: &str| {
+        lean(&[
+            "--run".as_ref(),
+            driver.as_os_str(),
+            claim.as_os_str(),
+            statement_olean.as_os_str(),
+            run.theorem.as_ref(),
+            marker.as_ref(),
+        ])
+    };
+    let text = |output: &std::process::Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+
+    // The control.
+    match compile(&statement_dir) {
         // No toolchain is a fact about this node, never about the proof.
         Err(error) => {
             return Verdict::plain(
                 Status::Unavailable,
-                format!("'{binary}' not on PATH ({error}); install a Lean toolchain to verify"),
+                format!(
+                    "'{}' not on PATH ({error}); install a Lean toolchain to verify",
+                    run.binary
+                ),
             )
         }
-    };
+        Ok(output) if output.status.code() == Some(0) => {}
+        Ok(output) => {
+            return Verdict::new(
+                Status::Unavailable,
+                "lean could not compile the objective's statement on its own, so no proof can \
+                 be judged here; that is a fact about this node or the objective, not the proof",
+                Value::object([(
+                    "control_returncode",
+                    output
+                        .status
+                        .code()
+                        .map_or(Value::Null, |c| Value::Int(i128::from(c))),
+                )]),
+            )
+        }
+    }
+    let control_marker = audit_marker(statement);
+    let control = replay(&statement_olean, &control_marker)
+        .map(|output| read_replay(&text(&output), &control_marker));
+    match control {
+        Ok(Replay::Passed { axioms, .. }) if !named || axioms.iter().any(|a| a == "sorryAx") => {}
+        other => {
+            return Verdict::new(
+                Status::Unavailable,
+                "this node's Lean did not run the kernel replay on the objective's statement \
+                 proved by `sorry`, or did not report `sorryAx`; that is a fact about this node, \
+                 not the proof",
+                Value::object([("control_replay", Value::string(format!("{other:?}")))]),
+            )
+        }
+    }
 
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    // The claim.
+    let output = match compile(&claim_dir) {
+        Ok(output) => output,
+        Err(error) => {
+            return Verdict::plain(Status::Unavailable, format!("cannot run lean: {error}"))
+        }
+    };
+    let compiled = text(&output);
     let evidence = Value::object([(
         "returncode",
         match output.status.code() {
@@ -711,20 +1022,98 @@ fn lean_using(binary: &str, root: &Path, spec: &Value, artifact: &Value) -> Verd
     match output.status.code() {
         // The one place a non-zero exit is a verdict: it is the kernel's answer.
         Some(code) if code != 0 => {
-            Verdict::new(Status::Reject, "lean rejected the proof", evidence)
+            return Verdict::new(Status::Reject, "lean rejected the proof", evidence)
         }
         // Killed by a signal -- OOM, or an operator. A fact about this node.
-        None => Verdict::new(
+        None => {
+            return Verdict::new(
+                Status::Unavailable,
+                "lean was killed by a signal; that is a fact about this node, not the proof",
+                evidence,
+            )
+        }
+        Some(_) => {}
+    }
+    // Lean *warns* rather than errors when a declaration depends on
+    // `sorryAx`, so a clean exit is not sufficient on its own. The quote
+    // around the word differs between toolchains.
+    if compiled.contains("declaration uses 'sorry'")
+        || compiled.contains("declaration uses `sorry`")
+    {
+        return Verdict::new(Status::Reject, "proof depends on sorryAx", evidence);
+    }
+    let marker = audit_marker(proof);
+    let replayed =
+        match replay(&claim_dir.join(&olean), &marker) {
+            Ok(output) if output.status.code().is_none() => return Verdict::new(
+                Status::Unavailable,
+                "the kernel replay was killed by a signal; that is a fact about this node, not \
+                 the proof",
+                evidence,
+            ),
+            Ok(output) => read_replay(&text(&output), &marker),
+            Err(error) => {
+                return Verdict::plain(Status::Unavailable, format!("cannot run lean: {error}"))
+            }
+        };
+    replay_verdict(replayed, allowed, allow_native_decide, evidence)
+}
+
+/// What the replay's report decides, by the primary's rules: a refusal is a
+/// rejection, a replay that ran out of room or never reported is not a
+/// verdict, a proof may not add an axiom, and the theorem may rest only on
+/// the standard axioms, the objective's own, and what it allowed.
+fn replay_verdict(
+    replay: Replay,
+    allowed: &[String],
+    allow_native_decide: bool,
+    evidence: Value,
+) -> Verdict {
+    match replay {
+        Replay::NoReport => Verdict::new(
             Status::Unavailable,
-            "lean was killed by a signal; that is a fact about this node, not the proof",
+            "the kernel replay did not report: this node's Lean could not run it",
             evidence,
         ),
-        // Lean *warns* rather than errors on a declaration that depends on
-        // `sorryAx`, so a clean exit code is not sufficient on its own.
-        Some(_) if text.contains("declaration uses 'sorry'") => {
-            Verdict::new(Status::Reject, "proof depends on sorryAx", evidence)
+        Replay::Unavailable(why) => Verdict::new(
+            Status::Unavailable,
+            format!("the kernel replay could not finish here ({why}); that is not a refutation"),
+            evidence,
+        ),
+        Replay::Refused(why) => Verdict::new(
+            Status::Reject,
+            format!("the kernel replay refused the claim: {why}"),
+            evidence,
+        ),
+        Replay::Passed {
+            axioms,
+            added,
+            pinned,
+        } => {
+            let native = |name: &str| allow_native_decide && is_native_decide_axiom(name);
+            if let Some(axiom) = added.iter().find(|name| !native(name)) {
+                return Verdict::new(
+                    Status::Reject,
+                    format!("the proof declares axiom {axiom}; a proof may not add axioms"),
+                    evidence,
+                );
+            }
+            let refused = axioms.iter().find(|name| {
+                !allowed.iter().any(|a| a == *name)
+                    && !pinned.iter().any(|a| a == *name)
+                    && !native(name)
+            });
+            match refused {
+                Some(axiom) => Verdict::new(
+                    Status::Reject,
+                    format!(
+                        "the theorem depends on axiom {axiom}, which the objective does not allow"
+                    ),
+                    evidence,
+                ),
+                None => Verdict::new(Status::Accept, "kernel accepted the proof", evidence),
+            }
         }
-        Some(_) => Verdict::new(Status::Accept, "kernel accepted the proof", evidence),
     }
 }
 
@@ -1545,26 +1934,350 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_exit_code_is_the_kernels_answer() {
-        // Uniquely for this kind, a non-zero exit is a real `Reject` rather
-        // than an infrastructure fact: Lean's exit code *is* its answer about
-        // this proof. Everywhere else in this file a non-zero exit settles
-        // nothing.
-        let rejected = with_fake_lean("nonzero", 1, "error: unsolved goals");
-        assert_eq!(rejected.status, Status::Reject, "{}", rejected.detail);
-
-        let accepted = with_fake_lean("zero", 0, "");
+    fn the_exit_code_is_the_kernels_answer_once_the_statement_compiles() {
+        // A Lean that refuses everything refuses the objective's own
+        // statement too, and that is a fact about this node, not the proof.
+        let broken = with_fake_lean("nonzero", 1, "error: no default toolchain");
+        assert_eq!(broken.status, Status::Unavailable, "{}", broken.detail);
+        // One that exits cleanly and reports nothing has not replayed.
+        let silent = with_fake_lean("zero", 0, "");
+        assert_eq!(silent.status, Status::Unavailable, "{}", silent.detail);
+        // One that compiles and replays the statement and then refuses the
+        // proof: the kernel said no, and that is a verdict.
+        let refused =
+            with_replaying_lean("refuses", lean_spec(vec![]), ":= trivial -- COMPILE_FAILS");
+        assert_eq!(refused.status, Status::Reject, "{}", refused.detail);
+        let accepted = with_replaying_lean("accepts", lean_spec(vec![]), ":= trivial");
         assert_eq!(accepted.status, Status::Accept, "{}", accepted.detail);
+    }
+
+    /// A stand-in that speaks the replay protocol, as the primary's does:
+    /// compiling copies the source to the "olean" (and warns on `sorry`),
+    /// replaying reports from words in the claim, and a claim containing
+    /// `COMPILE_FAILS` does not compile.
+    #[cfg(unix)]
+    fn with_replaying_lean(tag: &str, spec: Value, text: &str) -> Verdict {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!(
+            "cairn-reference-replaylean-{}-{tag}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let binary = dir.join("lean");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             -R)\n\
+               case \"$(cat \"$5\")\" in *COMPILE_FAILS*) echo 'error: type mismatch'; exit 1;; esac\n\
+               cat \"$5\" > \"$4\" || exit 1\n\
+               case \"$(cat \"$5\")\" in *sorry*) echo \"$5:2:0: warning: declaration uses `sorry`\";; esac\n\
+               exit 0;;\n\
+             --run)\n\
+               text=$(cat \"$3\"); m=\"$6\"\n\
+               echo \"$m replayed 1\"\n\
+               case \"$text\" in\n\
+               *REPLAY_REFUSES*) echo \"$m fail kernel replay: (kernel) declaration type mismatch\"; exit 1;;\n\
+               *REPLAY_EXHAUSTED*) echo \"$m unavailable kernel replay: (kernel) deep recursion detected\"; exit 1;;\n\
+               esac\n\
+               case \"$text\" in *ADDS_AXIOM*) echo \"$m added-axiom t.added\"; echo \"$m axiom t.added\";; esac\n\
+               case \"$text\" in *NATIVE_AXIOM*) echo \"$m added-axiom t._native.native_decide.ax_1_1\"; echo \"$m axiom t._native.native_decide.ax_1_1\";; esac\n\
+               case \"$text\" in *PINNED_AXIOM*) echo \"$m pinned Assume.choice_free\"; echo \"$m axiom Assume.choice_free\";; esac\n\
+               case \"$text\" in *sorry*) echo \"$m axiom sorryAx\";; esac\n\
+               case \"$text\" in *ofReduceBool*) echo \"$m axiom Lean.ofReduceBool\";; esac\n\
+               [ \"$5\" = \"-\" ] || echo \"$m axiom propext\"\n\
+               echo \"$m ok\"; exit 0;;\n\
+             esac\n\
+             echo \"unexpected arguments: $*\" >&2; exit 2\n",
+        )
+        .expect("write the stand-in");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = binary.to_str().expect("utf-8 path");
+        let mut verdict = Verdict::plain(Status::Unavailable, "never ran");
+        for attempt in 0..64 {
+            verdict = lean_using(path, root(), &spec, &proof(text));
+            if !verdict.detail.contains("Text file busy") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2 + attempt));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        verdict
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_kernel_replay_decides_what_a_clean_compile_rests_on() {
+        let honest = with_replaying_lean("honest", lean_spec(vec![]), ":= rfl");
+        assert_eq!(honest.status, Status::Accept, "{}", honest.detail);
+
+        let compiler = ":= Lean.ofReduceBool _ _ rfl";
+        let refused = with_replaying_lean("native", lean_spec(vec![]), compiler);
+        assert_eq!(refused.status, Status::Reject, "{}", refused.detail);
+        assert!(
+            refused.detail.contains("Lean.ofReduceBool"),
+            "{}",
+            refused.detail
+        );
+        let opted = with_replaying_lean(
+            "native-opted",
+            lean_spec(vec![("allow_native_decide", Value::Bool(true))]),
+            compiler,
+        );
+        assert_eq!(opted.status, Status::Accept, "{}", opted.detail);
+        let listed = with_replaying_lean(
+            "native-listed",
+            lean_spec(vec![(
+                "allowed_axioms",
+                Value::Array(vec![Value::string("Lean.ofReduceBool")]),
+            )]),
+            compiler,
+        );
+        assert_eq!(listed.status, Status::Accept, "{}", listed.detail);
+
+        // `native_decide`'s per-use axiom on a recent Lean: only with leave.
+        let per_use = ":= rfl -- NATIVE_AXIOM";
+        let refused = with_replaying_lean("per-use", lean_spec(vec![]), per_use);
+        assert_eq!(refused.status, Status::Reject, "{}", refused.detail);
+        let opted = with_replaying_lean(
+            "per-use-opted",
+            lean_spec(vec![("allow_native_decide", Value::Bool(true))]),
+            per_use,
+        );
+        assert_eq!(opted.status, Status::Accept, "{}", opted.detail);
+
+        // A proof may not add an axiom, listed or not.
+        for (tag, extra) in [
+            ("added", vec![]),
+            (
+                "added-listed",
+                vec![(
+                    "allowed_axioms",
+                    Value::Array(vec![Value::string("t.added")]),
+                )],
+            ),
+        ] {
+            let added = with_replaying_lean(tag, lean_spec(extra), ":= rfl -- ADDS_AXIOM");
+            assert_eq!(added.status, Status::Reject, "{}", added.detail);
+            assert!(
+                added.detail.contains("may not add axioms"),
+                "{}",
+                added.detail
+            );
+        }
+
+        let pinned = with_replaying_lean("pinned", lean_spec(vec![]), ":= rfl -- PINNED_AXIOM");
+        assert_eq!(pinned.status, Status::Accept, "{}", pinned.detail);
+
+        let refused = with_replaying_lean(
+            "replay-refuses",
+            lean_spec(vec![]),
+            ":= rfl -- REPLAY_REFUSES",
+        );
+        assert_eq!(refused.status, Status::Reject, "{}", refused.detail);
+        let exhausted = with_replaying_lean(
+            "replay-exhausted",
+            lean_spec(vec![]),
+            ":= rfl -- REPLAY_EXHAUSTED",
+        );
+        assert_eq!(
+            exhausted.status,
+            Status::Unavailable,
+            "{}",
+            exhausted.detail
+        );
+
+        // An `example` names nothing to audit, and still replays.
+        let unnamed = with_replaying_lean(
+            "example",
+            lean_spec(vec![("statement", Value::string("example : True"))]),
+            ":= trivial",
+        );
+        assert_eq!(unnamed.status, Status::Accept, "{}", unnamed.detail);
+    }
+
+    /// Against a real toolchain when `CAIRN_TEST_LEAN` names one; the primary
+    /// runs the same cases, so the two are held to one Lean.
+    #[test]
+    fn a_real_lean_replays_what_it_compiled() {
+        let Ok(lean) = std::env::var("CAIRN_TEST_LEAN") else {
+            return;
+        };
+        let run = |preamble: &str, statement: &str, text: &str, native: bool| {
+            let spec = lean_spec(vec![
+                ("preamble", Value::string(preamble)),
+                ("statement", Value::string(statement)),
+                ("allow_native_decide", Value::Bool(native)),
+            ]);
+            lean_using(&lean, root(), &spec, &proof(text))
+        };
+        for (preamble, statement, text, native, expected) in [
+            (
+                "",
+                "theorem pw_add_comm (a b : Nat) : a + b = b + a",
+                ":= Nat.add_comm a b",
+                false,
+                Status::Accept,
+            ),
+            (
+                "",
+                "theorem pw_em (p : Prop) : p ∨ ¬p",
+                ":= Classical.em p",
+                false,
+                Status::Accept,
+            ),
+            (
+                "private def double : Nat → Nat\n  | 0 => 0\n  | n + 1 => double n + 2",
+                "theorem pw_double (n : Nat) : double n = 2 * n",
+                ":= by induction n with | zero => rfl | succ k ih => simp [double, ih]; omega",
+                false,
+                Status::Accept,
+            ),
+            (
+                "axiom pw_assumption : 1 = 2",
+                "theorem pw_uses : 1 = 2",
+                ":= pw_assumption",
+                false,
+                Status::Accept,
+            ),
+            (
+                "",
+                "example (a : Nat) : a = a",
+                ":= rfl",
+                false,
+                Status::Accept,
+            ),
+            (
+                "",
+                "theorem pw_wrong : 2 + 2 = 5",
+                ":= rfl",
+                false,
+                Status::Reject,
+            ),
+            (
+                "",
+                "theorem pw_native : 10 < 20",
+                ":= by native_decide",
+                true,
+                Status::Accept,
+            ),
+        ] {
+            let verdict = run(preamble, statement, text, native);
+            assert_eq!(verdict.status, expected, "{statement}: {}", verdict.detail);
+        }
+    }
+
+    #[test]
+    fn the_replay_report_is_read_only_from_lines_that_carry_its_marker() {
+        let marker = "cairn-kernel-replay-00ff";
+        let report = "warning: unused variable\nok\ncairn-kernel-replay-00ffx ok\n\
+                      cairn-kernel-replay-00ff replayed 3\n\
+                      cairn-kernel-replay-00ff axiom propext\n\
+                      cairn-kernel-replay-00ff pinned Assume.p\n\
+                      cairn-kernel-replay-00ff added-axiom t.native\n\
+                      cairn-kernel-replay-00ff ok\n\
+                      cairn-kernel-replay-00ff fail too late to matter\n";
+        assert_eq!(
+            read_replay(report, marker),
+            Replay::Passed {
+                axioms: vec!["propext".into()],
+                added: vec!["t.native".into()],
+                pinned: vec!["Assume.p".into()],
+            }
+        );
+        assert_eq!(
+            read_replay(
+                "cairn-kernel-replay-00ff fail t is a def, not a theorem",
+                marker
+            ),
+            Replay::Refused("t is a def, not a theorem".into())
+        );
+        assert_eq!(
+            read_replay(
+                "cairn-kernel-replay-00ff unavailable kernel replay: x",
+                marker
+            ),
+            Replay::Unavailable("kernel replay: x".into())
+        );
+        assert_eq!(
+            read_replay("cairn-kernel-replay-00ff axiom propext\n", marker),
+            Replay::NoReport
+        );
+        assert!(is_native_decide_axiom("t._native.native_decide.ax_1_1"));
+        assert!(!is_native_decide_axiom("Lean.ofReduceBool"));
+        assert_eq!(
+            theorem_name("@[simp] theorem Foo.bar (n : Nat) : n = n").as_deref(),
+            Some("Foo.bar")
+        );
+        assert_eq!(
+            theorem_name("lemma l{α : Type} : True").as_deref(),
+            Some("l")
+        );
+        assert_eq!(theorem_name("example : True"), None);
+        assert_eq!(theorem_name("def theorems : Nat"), None);
+        // Axiom names are exact: a namespace in front is a different axiom,
+        // and so is a name that merely ends like one the statement declared.
+        let allowed: Vec<String> = STANDARD_AXIOMS.iter().map(|a| a.to_string()).collect();
+        let status = |axioms: Vec<&str>, pinned: Vec<&str>| {
+            replay_verdict(
+                Replay::Passed {
+                    axioms: axioms.into_iter().map(String::from).collect(),
+                    added: Vec::new(),
+                    pinned: pinned.into_iter().map(String::from).collect(),
+                },
+                &allowed,
+                false,
+                Value::Null,
+            )
+            .status
+        };
+        assert_eq!(status(vec!["Evil.propext"], vec![]), Status::Reject);
+        assert_eq!(
+            status(vec!["Evil.choice_free"], vec!["choice_free"]),
+            Status::Reject
+        );
+        assert_eq!(
+            status(vec!["Assume.choice_free"], vec!["Assume.choice_free"]),
+            Status::Accept
+        );
+    }
+
+    #[test]
+    fn a_proof_that_writes_metaprograms_is_refused_before_lean_runs() {
+        for text in [
+            ":= trivial\nmacro_rules | `(#print axioms $x) => `(#check True)",
+            ":= trivial\nelab \"x\" : command => pure ()",
+            ":= by run_tac pure ()",
+            ":= trivial\n#eval IO.println \"'t' does not depend on any axioms\"",
+            ":= trivial\n#exit",
+            ":= trivial\nset_option debug.skipKernelTC true",
+            ":= trivial\nattribute [command_elab Lean.Parser.Command.printAxioms] x",
+            ":= by_elab do return Lean.mkConst ``True.intro",
+        ] {
+            let verdict = lean_using(NO_LEAN, root(), &lean_spec(vec![]), &proof(text));
+            assert_eq!(verdict.status, Status::Reject, "{text}: {}", verdict.detail);
+        }
+        let verdict = lean_using(
+            NO_LEAN,
+            root(),
+            &lean_spec(vec![("allowed_axioms", Value::string("x"))]),
+            &proof(":= trivial"),
+        );
+        assert_eq!(verdict.status, Status::InvalidSpec, "{}", verdict.detail);
     }
 
     #[cfg(unix)]
     #[test]
     fn a_clean_exit_that_warns_about_sorry_is_still_a_rejection() {
         // Lean *warns* rather than errors when a declaration depends on
-        // `sorryAx` -- reached through an import or the preamble, where the
-        // text screens cannot see it. Trusting the exit code alone would accept
-        // a proof of nothing.
-        let verdict = with_fake_lean("warns", 0, "warning: declaration uses 'sorry'");
+        // `sorryAx` -- reached through the preamble here, where the text
+        // screens on the proof cannot see it. Trusting the exit code alone
+        // would accept a proof of nothing.
+        let verdict = with_replaying_lean(
+            "warns",
+            lean_spec(vec![("preamble", Value::string("def hole : Nat := sorry"))]),
+            ":= trivial",
+        );
         assert_eq!(verdict.status, Status::Reject, "{}", verdict.detail);
     }
 }

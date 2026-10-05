@@ -109,6 +109,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::kem::{Bundle, Encapsulated, KemError, Leg, SecretBundle, Suite, SUITES};
 use super::shamir::{self, Share};
+use super::vss;
 use crate::canonical::Value;
 
 /// Wire type tag. Present so a record decoder cannot confuse an envelope with
@@ -124,7 +125,23 @@ const RECORD_TYPE: &str = "sealed_envelope";
 /// speaks — so it is refused rather than half-read. No envelope has ever been
 /// written to a log (`SealedSubmission` reached no record kind until the
 /// committee reveal did), so nothing in existence is orphaned by that.
-const VERSION: i128 = 2;
+///
+/// `3` because the content key stopped being split by plain Shamir over
+/// GF(2^8) and started being shared by Pedersen VSS ([`super::vss`]): the
+/// envelope carries the dealer's commitments, a sealed share's plaintext is
+/// `x ‖ s ‖ r` with `x` the member's index, and the content key is derived
+/// from the shared scalar. Version 2 still decodes and opens, because records
+/// carrying it exist; [`crate::node`] refuses to admit a new one, because its
+/// shares cannot be checked and its degree cannot be bounded.
+const VERSION: i128 = 3;
+
+/// The previous wire version: Shamir over GF(2^8), no commitments.
+const LEGACY_VERSION: i128 = 2;
+
+/// Domain of the version-3 content key, derived from the VSS secret: the
+/// AEAD key is `SHA-256(domain ‖ scalar)`, so the 252-bit scalar the
+/// committee reconstructs never keys a cipher directly.
+const CONTENT_KDF_DOMAIN: &[u8] = b"proofwork/censorship/envelope/content-key/v3";
 
 /// Domain separator for the share key derivation.
 ///
@@ -274,6 +291,15 @@ pub enum EnvelopeError {
     DuplicateShareIndex { index: u8 },
     /// Decoding: a version this build cannot interpret.
     UnsupportedVersion { version: i128 },
+    /// A version-3 envelope's commitments are absent, not one per threshold
+    /// share, or not canonical group elements.
+    InvalidCommitments,
+    /// A version-3 member index of zero: the index is the share's abscissa,
+    /// and `f(0)` is the secret itself.
+    ZeroMemberIndex,
+    /// Fewer shares that check against the commitments than the threshold.
+    /// Unlike Shamir, VSS can say so: each share is checked on its own.
+    NotEnoughValidShares { valid: usize, threshold: usize },
 }
 
 impl fmt::Display for EnvelopeError {
@@ -344,6 +370,17 @@ impl fmt::Display for EnvelopeError {
             EnvelopeError::UnsupportedVersion { version } => {
                 write!(f, "unsupported sealed envelope version {version}")
             }
+            EnvelopeError::InvalidCommitments => f.write_str(
+                "the envelope's commitments must be one canonical Ristretto point per \
+                 threshold share",
+            ),
+            EnvelopeError::ZeroMemberIndex => {
+                f.write_str("a committee member index must be non-zero: it is the share's abscissa")
+            }
+            EnvelopeError::NotEnoughValidShares { valid, threshold } => write!(
+                f,
+                "{valid} shares check against the dealer's commitments; {threshold} are needed"
+            ),
         }
     }
 }
@@ -482,6 +519,23 @@ impl CommitteeKey {
     /// them apart from the ciphertext, and pretending otherwise would invent a
     /// distinction the cryptography does not support.
     pub fn open_share(&self, envelope: &SealedEnvelope, index: u8) -> Result<Share, EnvelopeError> {
+        self.open_share_keyed(envelope, index)
+            .map(|(share, _)| share)
+    }
+
+    /// [`CommitteeKey::open_share`], with the per-share AEAD key it used.
+    ///
+    /// The key is what makes a published share checkable by anyone: with it,
+    /// [`SealedEnvelope::share_opens`] decrypts the sealed share from the
+    /// envelope and compares. It opens this one share and nothing else -- it
+    /// is derived for this seat, this envelope and these encapsulations, and
+    /// the share it opens is being published beside it anyway -- so handing
+    /// it out costs nothing that publishing the share did not.
+    pub fn open_share_keyed(
+        &self,
+        envelope: &SealedEnvelope,
+        index: u8,
+    ) -> Result<(Share, [u8; KEY_LEN]), EnvelopeError> {
         let sealed = envelope
             .sealed_share(index)
             .ok_or(EnvelopeError::UnknownShare { index })?;
@@ -517,10 +571,18 @@ impl CommitteeKey {
         let (x, body) = plaintext
             .split_first()
             .ok_or(EnvelopeError::MalformedShare { index })?;
-        Ok(Share {
-            index: *x,
-            data: body.to_vec(),
-        })
+        // On a version-3 envelope the abscissa *is* the member's index, and
+        // the body is two scalars: a share sealed otherwise is malformed.
+        if envelope.is_verifiable() && (*x != index || body.len() != vss::SHARE_LEN) {
+            return Err(EnvelopeError::MalformedShare { index });
+        }
+        Ok((
+            Share {
+                index: *x,
+                data: body.to_vec(),
+            },
+            *key.expose(),
+        ))
     }
 }
 
@@ -625,6 +687,76 @@ pub struct SealedEnvelope {
     ciphertext: Vec<u8>,
     sealed_shares: Vec<SealedShare>,
     aad: String,
+    /// The dealer's Pedersen commitments, one per threshold share, on a
+    /// version-3 envelope; `None` on a version-2 one, which has none.
+    commitments: Option<Vec<[u8; vss::COMMITMENT_LEN]>>,
+}
+
+/// What the dealer of a version-3 envelope keeps: the 32-byte seed the whole
+/// sharing is derived from. Exactly as sensitive as the content key, which it
+/// determines, and wiped on drop.
+///
+/// Kept so that a submitter can answer a complaint -- publish the share a seat
+/// says it could not open, which anyone checks against the envelope's
+/// commitments -- without having stored every share. See [`crate::node`].
+pub struct DealerSecret {
+    seed: Zeroizing<[u8; 32]>,
+    threshold: u8,
+}
+
+impl fmt::Debug for DealerSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DealerSecret")
+            .field("threshold", &self.threshold)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DealerSecret {
+    /// Rebuild from a stored seed and the envelope's threshold.
+    pub fn from_seed(seed: [u8; 32], threshold: u8) -> DealerSecret {
+        DealerSecret {
+            seed: Zeroizing::new(seed),
+            threshold,
+        }
+    }
+
+    /// The seed, for the dealer to store. Handle as the content key.
+    pub fn seed(&self) -> &[u8; 32] {
+        &self.seed
+    }
+
+    pub fn threshold(&self) -> u8 {
+        self.threshold
+    }
+
+    fn dealer(&self) -> Option<vss::Dealer> {
+        vss::Dealer::from_seed(&self.seed, self.threshold)
+    }
+
+    /// The share dealt to the member at `index`: `s ‖ r` at abscissa `index`.
+    pub fn share(&self, index: u8) -> Option<Share> {
+        let share = self.dealer()?.share(index)?;
+        Some(Share {
+            index,
+            data: share.to_vec(),
+        })
+    }
+
+    /// The content key the payload is sealed under.
+    pub fn content_key(&self) -> Option<Secret32> {
+        self.dealer().map(|dealer| content_key_of(&dealer.secret()))
+    }
+}
+
+/// The version-3 content key: `SHA-256(domain ‖ secret)`.
+fn content_key_of(secret: &curve25519_dalek::scalar::Scalar) -> Secret32 {
+    let mut hasher = Sha256::new();
+    hasher.update(CONTENT_KDF_DOMAIN);
+    hasher.update(secret.as_bytes());
+    let mut key = Secret32::zeroed();
+    key.0.copy_from_slice(&hasher.finalize());
+    key
 }
 
 impl SealedEnvelope {
@@ -669,48 +801,104 @@ impl SealedEnvelope {
         threshold: u8,
         rng: &mut R,
     ) -> Result<(SealedEnvelope, Secret32), EnvelopeError> {
-        if committee.is_empty() {
-            return Err(EnvelopeError::EmptyCommittee);
-        }
-        if committee.len() > MAX_COMMITTEE {
-            return Err(EnvelopeError::CommitteeTooLarge {
-                size: committee.len(),
-            });
-        }
-        if threshold == 0 || usize::from(threshold) > committee.len() {
-            return Err(EnvelopeError::InvalidThreshold {
+        let (envelope, dealer) =
+            SealedEnvelope::seal_dealing(payload, aad, committee, threshold, rng)?;
+        let key = dealer
+            .content_key()
+            .ok_or(EnvelopeError::InvalidThreshold {
                 threshold,
                 committee: committee.len(),
-            });
-        }
-        // A duplicate index makes a share unaddressable; a duplicate key means
-        // one entity holds two shares, which quietly lowers the threshold the
-        // rest of the system believes it has. Both are caller bugs worth
-        // refusing loudly (docs/censorship.md §2 on collusion cost).
-        //
-        // Ids are hashed once up front: each is a SHA-256 over the 261 KB
-        // McEliece leg, and computing it inside the pairwise loop cost a
-        // gigabyte of hashing per seal at a 64-seat committee.
-        let ids: Vec<_> = committee.iter().map(|member| member.id()).collect();
-        for (i, member) in committee.iter().enumerate() {
-            for (j, other) in committee.iter().enumerate().skip(i + 1) {
-                if member.index == other.index {
-                    return Err(EnvelopeError::DuplicateMemberIndex {
-                        index: member.index,
-                    });
-                }
-                // By id, not by bundle. The id is `sha256` of the McEliece leg,
-                // so two members with the same mandatory key are the same
-                // entity however their optional legs differ -- and comparing
-                // whole bundles would let one entity dodge this rule by
-                // publishing a second bundle that reuses its McEliece key and
-                // adds an ML-KEM one. Cheaper too: 32 bytes rather than 261 KB.
-                if ids[i] == ids[j] {
-                    return Err(EnvelopeError::DuplicateMemberKey { index: other.index });
-                }
-            }
+            })?;
+        Ok((envelope, key))
+    }
+
+    /// [`SealedEnvelope::seal`], keeping the [`DealerSecret`]: what a
+    /// submitter needs to answer a complaint about a seat's share, and as
+    /// sensitive as the content key.
+    ///
+    /// The sharing is Pedersen VSS ([`vss`]): a seed drawn from `rng`
+    /// determines two polynomials of degree `threshold - 1`, the envelope
+    /// carries their commitments, the member at index `i` gets `f(i) ‖ g(i)`,
+    /// and the content key is derived from `f(0)`. So every share is
+    /// checkable against the envelope alone, and any `threshold` checked
+    /// shares open it.
+    pub fn seal_dealing<R: RngCore + CryptoRng>(
+        payload: &[u8],
+        aad: &str,
+        committee: &[CommitteeMember],
+        threshold: u8,
+        rng: &mut R,
+    ) -> Result<(SealedEnvelope, DealerSecret), EnvelopeError> {
+        check_committee(committee, threshold)?;
+        // The index is the share's abscissa, and `f(0)` is the secret.
+        if committee.iter().any(|member| member.index == 0) {
+            return Err(EnvelopeError::ZeroMemberIndex);
         }
 
+        let mut seed = Zeroizing::new([0u8; 32]);
+        rng.fill_bytes(seed.as_mut_slice());
+        let secret = DealerSecret { seed, threshold };
+        let dealer = secret.dealer().ok_or(EnvelopeError::InvalidThreshold {
+            threshold,
+            committee: committee.len(),
+        })?;
+        let content_key = content_key_of(&dealer.secret());
+        let commitments = dealer.commitments();
+
+        let mut nonce = [0u8; NONCE_LEN];
+        rng.fill_bytes(&mut nonce);
+        let ciphertext = cipher_for(&content_key)
+            .encrypt(
+                &Nonce::from(nonce),
+                Payload {
+                    msg: payload,
+                    aad: aad.as_bytes(),
+                },
+            )
+            .map_err(|_| EnvelopeError::Encrypt { context: "payload" })?;
+
+        let mut sealed_shares = Vec::with_capacity(committee.len());
+        for member in committee {
+            let body = dealer
+                .share(member.index)
+                .ok_or(EnvelopeError::ZeroMemberIndex)?;
+            let mut share = Share {
+                index: member.index,
+                data: body.to_vec(),
+            };
+            let sealed = seal_share(member, &share, aad, rng);
+            share.data.zeroize();
+            sealed_shares.push(sealed?);
+        }
+
+        Ok((
+            SealedEnvelope {
+                threshold,
+                nonce,
+                ciphertext,
+                sealed_shares,
+                aad: aad.to_string(),
+                commitments: Some(commitments),
+            },
+            secret,
+        ))
+    }
+
+    /// A version-2 envelope: plain Shamir over GF(2^8), no commitments.
+    ///
+    /// Kept so that tests and tooling can produce the records that already
+    /// exist, and for nothing else: [`crate::node`] refuses to admit one,
+    /// because nothing in it lets a share be checked or the sharing's degree
+    /// be bounded.
+    #[doc(hidden)]
+    pub fn seal_legacy<R: RngCore + CryptoRng>(
+        payload: &[u8],
+        aad: &str,
+        committee: &[CommitteeMember],
+        threshold: u8,
+        rng: &mut R,
+    ) -> Result<SealedEnvelope, EnvelopeError> {
+        check_committee(committee, threshold)?;
         let content_key = Secret32::random(rng);
         let mut nonce = [0u8; NONCE_LEN];
         rng.fill_bytes(&mut nonce);
@@ -757,16 +945,14 @@ impl SealedEnvelope {
             return Err(e);
         }
 
-        Ok((
-            SealedEnvelope {
-                threshold,
-                nonce,
-                ciphertext,
-                sealed_shares,
-                aad: aad.to_string(),
-            },
-            content_key,
-        ))
+        Ok(SealedEnvelope {
+            threshold,
+            nonce,
+            ciphertext,
+            sealed_shares,
+            aad: aad.to_string(),
+            commitments: None,
+        })
     }
 
     /// Reconstruct the content key from published shares and decrypt.
@@ -782,9 +968,47 @@ impl SealedEnvelope {
     /// A failure means one of: too few shares, a corrupt or forged share, shares
     /// from a different envelope, or a tampered ciphertext. All of them are
     /// [`EnvelopeError::Authentication`] and none of them can be distinguished.
+    ///
+    /// **Version 3 can tell.** There every share is checked against the
+    /// dealer's commitments first, a share that does not check is skipped,
+    /// and the first `threshold` that do are interpolated -- any such set
+    /// gives the same key, because the commitments bound the polynomial's
+    /// degree. Too few checking shares is
+    /// [`EnvelopeError::NotEnoughValidShares`].
     pub fn open_with_shares(&self, shares: &[Share]) -> Result<Vec<u8>, EnvelopeError> {
         if shares.is_empty() {
             return Err(EnvelopeError::NoShares);
+        }
+        if let Some(encoded) = &self.commitments {
+            let commitments =
+                vss::Commitments::decode(encoded).ok_or(EnvelopeError::InvalidCommitments)?;
+            let threshold = commitments.threshold();
+            let mut chosen: Vec<(u8, curve25519_dalek::scalar::Scalar)> =
+                Vec::with_capacity(threshold);
+            for share in shares {
+                if chosen.len() == threshold {
+                    break;
+                }
+                if chosen.iter().any(|(x, _)| *x == share.index)
+                    || !commitments.verify(share.index, &share.data)
+                {
+                    continue;
+                }
+                if let Some((secret_part, _)) = vss::share_scalars(&share.data) {
+                    chosen.push((share.index, secret_part));
+                }
+            }
+            if chosen.len() < threshold {
+                return Err(EnvelopeError::NotEnoughValidShares {
+                    valid: chosen.len(),
+                    threshold,
+                });
+            }
+            let secret = vss::reconstruct(&chosen).ok_or(EnvelopeError::NotEnoughValidShares {
+                valid: chosen.len(),
+                threshold,
+            })?;
+            return self.open_with_content_key(&content_key_of(&secret));
         }
         let combined = Zeroizing::new(
             shamir::combine(shares).map_err(|e| EnvelopeError::Shamir(format!("{e:?}")))?,
@@ -832,6 +1056,36 @@ impl SealedEnvelope {
         self.threshold
     }
 
+    /// The wire version this envelope encodes as: 3 with commitments, 2
+    /// without.
+    pub fn version(&self) -> i128 {
+        if self.commitments.is_some() {
+            VERSION
+        } else {
+            LEGACY_VERSION
+        }
+    }
+
+    /// Whether each share can be checked on its own: a version-3 envelope.
+    pub fn is_verifiable(&self) -> bool {
+        self.commitments.is_some()
+    }
+
+    /// The dealer's commitments, on a version-3 envelope.
+    pub fn commitments(&self) -> Option<&[[u8; vss::COMMITMENT_LEN]]> {
+        self.commitments.as_deref()
+    }
+
+    /// Does the share `(x, data)` check against the dealer's commitments?
+    ///
+    /// `None` on a version-2 envelope, which commits to nothing; `Some(false)`
+    /// for a share that is not on the committed polynomials. A share that
+    /// checks is one the dealer is bound to -- whoever published it.
+    pub fn verify_share(&self, x: u8, data: &[u8]) -> Option<bool> {
+        let encoded = self.commitments.as_ref()?;
+        Some(vss::Commitments::decode(encoded).is_some_and(|c| c.verify(x, data)))
+    }
+
     pub fn nonce(&self) -> &[u8; NONCE_LEN] {
         &self.nonce
     }
@@ -853,10 +1107,33 @@ impl SealedEnvelope {
         self.sealed_shares.iter().find(|s| s.index == index)
     }
 
+    /// Does `share_key` open the share sealed at `index` to exactly the
+    /// Shamir point `(x, data)`?
+    ///
+    /// What lets anyone check a published share on its own, with no
+    /// verifiable-secret-sharing scheme and so no discrete-log assumption: the
+    /// member publishes the AEAD key it derived, and the sealed share on the
+    /// log either decrypts under it to that point or it does not. A member
+    /// cannot find a different key the dealer's ciphertext authenticates
+    /// under, so a share that passes is the one the dealer sealed.
+    pub fn share_opens(&self, index: u8, share_key: &[u8; KEY_LEN], x: u8, data: &[u8]) -> bool {
+        let Some(sealed) = self.sealed_share(index) else {
+            return false;
+        };
+        let cipher = cipher_for(&Secret32(*share_key));
+        let Ok(plaintext) =
+            cipher.decrypt(&Nonce::from(sealed.nonce), sealed.ciphertext.as_slice())
+        else {
+            return false;
+        };
+        let plaintext = Zeroizing::new(plaintext);
+        plaintext.split_first() == Some((&x, data))
+    }
+
     pub fn to_value(&self) -> Value {
-        Value::object([
+        let mut value = Value::object([
             ("type", Value::string(RECORD_TYPE)),
-            ("version", Value::Int(VERSION)),
+            ("version", Value::Int(self.version())),
             ("threshold", Value::Int(i128::from(self.threshold))),
             ("nonce", Value::string(hex_encode(&self.nonce))),
             ("ciphertext", Value::string(hex_encode(&self.ciphertext))),
@@ -865,7 +1142,18 @@ impl SealedEnvelope {
                 "sealed_shares",
                 Value::array(self.sealed_shares.iter().map(SealedShare::to_value)),
             ),
-        ])
+        ]);
+        if let (Value::Object(map), Some(commitments)) = (&mut value, &self.commitments) {
+            map.insert(
+                "commitments".to_string(),
+                Value::array(
+                    commitments
+                        .iter()
+                        .map(|point| Value::string(hex_encode(point))),
+                ),
+            );
+        }
+        value
     }
 
     pub fn from_value(value: &Value) -> Result<SealedEnvelope, EnvelopeError> {
@@ -890,7 +1178,7 @@ impl SealedEnvelope {
                 field: "version",
                 expected: "an integer",
             })?;
-        if version != VERSION {
+        if version != VERSION && version != LEGACY_VERSION {
             return Err(EnvelopeError::UnsupportedVersion { version });
         }
 
@@ -934,12 +1222,65 @@ impl SealedEnvelope {
             });
         }
 
+        // Version 3 carries exactly one canonical commitment per threshold
+        // share and addresses no share at index zero; version 2 carries none.
+        // Each shape is the only one its version can have, so an envelope has
+        // one encoding.
+        let commitments = match (version, value.get("commitments")) {
+            (LEGACY_VERSION, None) => None,
+            (LEGACY_VERSION, Some(_)) => {
+                return Err(EnvelopeError::InvalidField {
+                    field: "commitments",
+                    expected: "absent on a version-2 envelope",
+                })
+            }
+            (_, None) => {
+                return Err(EnvelopeError::MissingField {
+                    field: "commitments",
+                })
+            }
+            (_, Some(raw)) => {
+                let items = raw.as_array().ok_or(EnvelopeError::InvalidField {
+                    field: "commitments",
+                    expected: "an array",
+                })?;
+                let mut points = Vec::with_capacity(items.len());
+                for item in items {
+                    let text = item.as_str().ok_or(EnvelopeError::InvalidField {
+                        field: "commitments",
+                        expected: "an array of hex strings",
+                    })?;
+                    let bytes = hex_decode(text, "commitments")?;
+                    let point: [u8; vss::COMMITMENT_LEN] =
+                        bytes
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| EnvelopeError::WrongLength {
+                                field: "commitments",
+                                expected: vss::COMMITMENT_LEN,
+                                actual: bytes.len(),
+                            })?;
+                    points.push(point);
+                }
+                if points.len() != usize::from(threshold)
+                    || vss::Commitments::decode(&points).is_none()
+                {
+                    return Err(EnvelopeError::InvalidCommitments);
+                }
+                if sealed_shares.iter().any(|share| share.index == 0) {
+                    return Err(EnvelopeError::ZeroMemberIndex);
+                }
+                Some(points)
+            }
+        };
+
         Ok(SealedEnvelope {
             threshold,
             nonce,
             ciphertext,
             sealed_shares,
             aad,
+            commitments,
         })
     }
 
@@ -956,6 +1297,52 @@ impl SealedEnvelope {
 }
 
 // -- internals -------------------------------------------------------------
+
+/// The committee rules every seal enforces.
+fn check_committee(committee: &[CommitteeMember], threshold: u8) -> Result<(), EnvelopeError> {
+    if committee.is_empty() {
+        return Err(EnvelopeError::EmptyCommittee);
+    }
+    if committee.len() > MAX_COMMITTEE {
+        return Err(EnvelopeError::CommitteeTooLarge {
+            size: committee.len(),
+        });
+    }
+    if threshold == 0 || usize::from(threshold) > committee.len() {
+        return Err(EnvelopeError::InvalidThreshold {
+            threshold,
+            committee: committee.len(),
+        });
+    }
+    // A duplicate index makes a share unaddressable; a duplicate key means
+    // one entity holds two shares, which quietly lowers the threshold the
+    // rest of the system believes it has. Both are caller bugs worth
+    // refusing loudly (docs/censorship.md §2 on collusion cost).
+    //
+    // Ids are hashed once up front: each is a SHA-256 over the 261 KB
+    // McEliece leg, and computing it inside the pairwise loop cost a
+    // gigabyte of hashing per seal at a 64-seat committee.
+    let ids: Vec<_> = committee.iter().map(|member| member.id()).collect();
+    for (i, member) in committee.iter().enumerate() {
+        for (j, other) in committee.iter().enumerate().skip(i + 1) {
+            if member.index == other.index {
+                return Err(EnvelopeError::DuplicateMemberIndex {
+                    index: member.index,
+                });
+            }
+            // By id, not by bundle. The id is `sha256` of the McEliece leg,
+            // so two members with the same mandatory key are the same
+            // entity however their optional legs differ -- and comparing
+            // whole bundles would let one entity dodge this rule by
+            // publishing a second bundle that reuses its McEliece key and
+            // adds an ML-KEM one. Cheaper too: 32 bytes rather than 261 KB.
+            if ids[i] == ids[j] {
+                return Err(EnvelopeError::DuplicateMemberKey { index: other.index });
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Seal one Shamir share to one member.
 fn seal_share<R: RngCore + CryptoRng>(
@@ -1187,6 +1574,30 @@ mod tests {
     /// these bytes are what any other implementation of ChaCha20-Poly1305
     /// produces, which is the property a second reader of a sealed envelope
     /// actually needs.
+    /// A published share is checkable on its own once its key is published:
+    /// the sealed share decrypts under it to exactly that point, and to nothing
+    /// else under any other key, index or coordinate.
+    #[test]
+    fn a_share_key_opens_exactly_the_share_it_was_derived_for() {
+        let (keys, members) = committee(4);
+        let envelope = SealedEnvelope::seal(b"payload", AAD, &members, 3, &mut OsRng).unwrap();
+        for (i, key) in keys.iter().enumerate() {
+            let seat = u8::try_from(i + 1).unwrap();
+            let (share, share_key) = key.open_share_keyed(&envelope, seat).unwrap();
+            assert!(envelope.share_opens(seat, &share_key, share.index, &share.data));
+            let mut data = share.data.clone();
+            data[0] ^= 1;
+            assert!(!envelope.share_opens(seat, &share_key, share.index, &data));
+            assert!(!envelope.share_opens(seat, &share_key, share.index ^ 1, &share.data));
+            let other_seat = if seat == 1 { 2 } else { 1 };
+            assert!(!envelope.share_opens(other_seat, &share_key, share.index, &share.data));
+            let mut other_key = share_key;
+            other_key[31] ^= 1;
+            assert!(!envelope.share_opens(seat, &other_key, share.index, &share.data));
+            assert!(!envelope.share_opens(99, &share_key, share.index, &share.data));
+        }
+    }
+
     #[test]
     fn the_aead_matches_the_rfc_8439_vector() {
         use chacha20poly1305::aead::{Aead, Payload};
@@ -1328,11 +1739,31 @@ d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6\
 
         let shares = open_all(&keys, &envelope);
         let two: Vec<Share> = shares.iter().take(2).map(clone_share).collect();
+        // Version 3 checks each share, so it can say what is missing.
         match envelope.open_with_shares(&two) {
-            Err(EnvelopeError::Authentication { .. }) => {}
-            Err(other) => panic!("expected authentication failure, got {other:?}"),
+            Err(EnvelopeError::NotEnoughValidShares {
+                valid: 2,
+                threshold: 3,
+            }) => {}
+            Err(other) => panic!("expected too few valid shares, got {other:?}"),
             Ok(plaintext) => panic!("t-1 shares returned {} bytes", plaintext.len()),
         }
+
+        // Version 2 cannot: Shamir reconstructs *a* key from any points, and
+        // only the payload tag says it is the wrong one.
+        let legacy = SealedEnvelope::seal_legacy(b"secret artifact", AAD, &members, 3, &mut OsRng)
+            .expect("seal succeeds");
+        let shares = open_all(&keys, &legacy);
+        let two: Vec<Share> = shares.iter().take(2).map(clone_share).collect();
+        assert!(matches!(
+            legacy.open_with_shares(&two),
+            Err(EnvelopeError::Authentication { .. })
+        ));
+        let three: Vec<Share> = shares.iter().take(3).map(clone_share).collect();
+        assert_eq!(
+            legacy.open_with_shares(&three).expect("t shares open"),
+            b"secret artifact"
+        );
     }
 
     #[test]
@@ -1344,7 +1775,7 @@ d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6\
         let one: Vec<Share> = shares.iter().take(1).map(clone_share).collect();
         assert!(matches!(
             envelope.open_with_shares(&one),
-            Err(EnvelopeError::Authentication { .. })
+            Err(EnvelopeError::NotEnoughValidShares { valid: 1, .. })
         ));
     }
 
@@ -1481,9 +1912,16 @@ d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6\
             let index = u8::try_from(i + 1).expect("fits");
             shares.push(key.open_share(&b, index).expect("share decrypts"));
         }
+        // The lifted share decrypts -- same member, same `aad` -- but it is a
+        // point on `a`'s polynomials, not `b`'s, so it does not check against
+        // `b`'s commitments and is never interpolated.
+        assert_eq!(
+            b.verify_share(shares[0].index, &shares[0].data),
+            Some(false)
+        );
         assert!(matches!(
             b.open_with_shares(&shares),
-            Err(EnvelopeError::Authentication { .. })
+            Err(EnvelopeError::NotEnoughValidShares { valid: 1, .. })
         ));
     }
 
@@ -1757,6 +2195,108 @@ d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6\
     }
 
     #[test]
+    fn a_version_3_envelope_decodes_only_in_its_one_shape() {
+        let (_keys, members) = committee(3);
+        let envelope =
+            SealedEnvelope::seal(b"payload", AAD, &members, 2, &mut OsRng).expect("seal succeeds");
+        let good = envelope.to_value();
+        assert_eq!(good.get("version").and_then(Value::as_i128), Some(3));
+        assert_eq!(
+            SealedEnvelope::from_value(&good).expect("round trip"),
+            envelope
+        );
+        let rebuild = |mutate: &dyn Fn(&mut std::collections::BTreeMap<String, Value>)| {
+            let mut map = good.as_object().expect("object").clone();
+            mutate(&mut map);
+            SealedEnvelope::from_value(&Value::Object(map))
+        };
+        let commitments = good.get("commitments").cloned().expect("commitments");
+        let first = commitments.as_array().expect("array")[0].clone();
+
+        assert_eq!(
+            rebuild(&|m| {
+                m.remove("commitments");
+            }),
+            Err(EnvelopeError::MissingField {
+                field: "commitments"
+            })
+        );
+        // One per threshold share: not one short, not one over.
+        assert_eq!(
+            rebuild(&|m| {
+                m.insert("commitments".into(), Value::Array(vec![first.clone()]));
+            }),
+            Err(EnvelopeError::InvalidCommitments)
+        );
+        assert_eq!(
+            rebuild(&|m| {
+                m.insert(
+                    "commitments".into(),
+                    Value::Array(vec![first.clone(), first.clone(), first.clone()]),
+                );
+            }),
+            Err(EnvelopeError::InvalidCommitments)
+        );
+        // A point encoding with the top bit set is never canonical.
+        let bad_point = format!("{}80", "00".repeat(31));
+        assert_eq!(
+            rebuild(&|m| {
+                m.insert(
+                    "commitments".into(),
+                    Value::Array(vec![first.clone(), Value::string(bad_point.clone())]),
+                );
+            }),
+            Err(EnvelopeError::InvalidCommitments)
+        );
+        // Commitments on a version-2 envelope are not a version-2 envelope.
+        assert!(matches!(
+            rebuild(&|m| {
+                m.insert("version".into(), Value::Int(2));
+            }),
+            Err(EnvelopeError::InvalidField {
+                field: "commitments",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_dealer_secret_reproduces_every_share_and_the_content_key() {
+        let (keys, members) = committee(5);
+        let (envelope, dealer) =
+            SealedEnvelope::seal_dealing(b"dealt", AAD, &members, 3, &mut OsRng).expect("seal");
+        assert!(envelope.is_verifiable());
+        // What each member decrypts is exactly what the dealer can produce
+        // again from the seed, and it checks against the commitments.
+        for (key, member) in keys.iter().zip(&members) {
+            let opened = key.open_share(&envelope, member.index).expect("decrypts");
+            let dealt = dealer.share(member.index).expect("non-zero index");
+            assert_eq!(opened.index, member.index);
+            assert_eq!(opened.data, dealt.data);
+            assert_eq!(envelope.verify_share(dealt.index, &dealt.data), Some(true));
+        }
+        // A share answered from the stored seed alone opens it with any two
+        // members', and the content key opens it alone.
+        let rebuilt = DealerSecret::from_seed(*dealer.seed(), dealer.threshold());
+        let mut shares = vec![rebuilt.share(4).expect("x")];
+        shares.extend(open_all(&keys, &envelope).into_iter().take(2));
+        assert_eq!(envelope.open_with_shares(&shares).expect("opens"), b"dealt");
+        assert_eq!(
+            envelope
+                .open_with_content_key(&rebuilt.content_key().expect("t > 0"))
+                .expect("opens"),
+            b"dealt"
+        );
+        // A member index of zero is refused: it is the secret's abscissa.
+        let mut zeroed = members.clone();
+        zeroed[0].index = 0;
+        assert_eq!(
+            SealedEnvelope::seal(b"x", AAD, &zeroed, 2, &mut OsRng).err(),
+            Some(EnvelopeError::ZeroMemberIndex)
+        );
+    }
+
+    #[test]
     fn decoder_rejects_malformed_values() {
         let (_keys, members) = committee(3);
         let envelope =
@@ -1783,12 +2323,12 @@ d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6\
             }),
             Err(EnvelopeError::MissingField { field: "nonce" })
         );
-        // Both directions. `3` is a version this build predates; `1` is the
+        // Both directions. `4` is a version this build predates; `1` is the
         // X25519 envelope, whose shares are sealed to a scheme this build no
         // longer speaks -- refused outright rather than partially read, because
         // half-decoding it would produce shares nothing can open and an error
         // pointing at the wrong layer.
-        for version in [1, 3] {
+        for version in [1, 4] {
             assert_eq!(
                 rebuild(&|m| {
                     m.insert("version".into(), Value::Int(version));

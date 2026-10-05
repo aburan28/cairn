@@ -193,10 +193,17 @@ pub fn discover(timeout: Duration) -> io::Result<Vec<String>> {
     let mut buffer = [0u8; 4096];
     while Instant::now() < deadline {
         match socket.recv_from(&mut buffer) {
-            Ok((read, _from)) => {
+            Ok((read, from)) => {
                 let text = String::from_utf8_lossy(&buffer[..read]);
                 if let Some(location) = parse_ssdp_location(&text) {
-                    if !locations.iter().any(|known| known == &location) {
+                    // Only a description on the host that answered. Anyone on
+                    // the segment can answer an M-SEARCH, and a LOCATION naming
+                    // some other host -- a cloud metadata address, a service
+                    // only this machine can reach -- would have this node send
+                    // HTTP wherever the answer pointed.
+                    if location_is_on(&location, from.ip())
+                        && !locations.iter().any(|known| known == &location)
+                    {
                         locations.push(location);
                     }
                 }
@@ -222,6 +229,18 @@ fn m_search(st: &str) -> String {
          ST: {st}\r\n\
          \r\n"
     )
+}
+
+/// Is `url`'s host the IPv4 literal `responder`? A name is refused: it would
+/// be resolved by whoever this host's resolver asks, which is not the device
+/// that answered.
+pub fn location_is_on(url: &str, responder: std::net::IpAddr) -> bool {
+    let std::net::IpAddr::V4(responder) = responder else {
+        return false;
+    };
+    parse_url(url)
+        .and_then(|(host, _, _)| host.parse::<Ipv4Addr>().ok())
+        .is_some_and(|host| host == responder)
 }
 
 /// The `LOCATION` header of an SSDP response, if it is an HTTP URL.
@@ -364,6 +383,12 @@ pub fn parse_description(xml: &str, location: &str, host: Ipv4Addr) -> Result<Ga
         let Some(control_url) = resolve_url(&base, control) else {
             continue;
         };
+        // The control endpoint is on the gateway itself. A description (or
+        // its `URLBase`) naming another host would have this node POST its
+        // port-mapping requests wherever the document said.
+        if !location_is_on(&control_url, std::net::IpAddr::V4(host)) {
+            continue;
+        }
         if best.as_ref().is_none_or(|(known, _)| rank < *known) {
             best = Some((
                 rank,
@@ -731,6 +756,53 @@ mod tests {
     </deviceList>
   </device>
 </root>"#;
+
+    #[test]
+    fn a_location_or_control_url_off_the_responding_host_is_not_followed() {
+        let gateway: std::net::IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(location_is_on(
+            "http://192.168.1.1:5000/rootDesc.xml",
+            gateway
+        ));
+        assert!(!location_is_on(
+            "http://169.254.169.254/latest/meta-data/",
+            gateway
+        ));
+        assert!(!location_is_on(
+            "http://192.168.1.2:5000/rootDesc.xml",
+            gateway
+        ));
+        assert!(!location_is_on(
+            "http://router.lan:5000/rootDesc.xml",
+            gateway
+        ));
+        assert!(!location_is_on(
+            "http://192.168.1.1:5000/",
+            "::1".parse().unwrap()
+        ));
+
+        // A description whose control URL points elsewhere names no gateway.
+        let elsewhere = "<root><device><serviceList><service>\
+            <serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>\
+            <controlURL>http://169.254.169.254/ctl</controlURL>\
+            </service></serviceList></device></root>";
+        assert!(parse_description(
+            elsewhere,
+            "http://192.168.1.1:5000/rootDesc.xml",
+            "192.168.1.1".parse().unwrap()
+        )
+        .is_err());
+        let based = "<root><URLBase>http://10.0.0.9:80/</URLBase><device><serviceList><service>\
+            <serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>\
+            <controlURL>/ctl</controlURL>\
+            </service></serviceList></device></root>";
+        assert!(parse_description(
+            based,
+            "http://192.168.1.1:5000/rootDesc.xml",
+            "192.168.1.1".parse().unwrap()
+        )
+        .is_err());
+    }
 
     #[test]
     fn ssdp_locations_are_read_case_insensitively_and_only_over_http() {

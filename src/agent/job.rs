@@ -603,12 +603,21 @@ fn run_engine(
         .spawn()
         .map_err(|e| format!("{}: {e}", engine.path.display()))?;
     let deadline = Instant::now() + job.timeout;
+    let captures = [receipt.stdout.clone(), receipt.stderr.clone()];
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break status;
         }
-        if Instant::now() >= deadline {
-            receipt.timed_out = true;
+        // A job's output lands in files this host keeps and reports, so it is
+        // bounded like its memory: past the lab's cap the container is
+        // stopped and the capture cut.
+        let over = crate::lab::exec::captures_over_limit(&[&captures[0], &captures[1]]);
+        if over || Instant::now() >= deadline {
+            if over {
+                receipt.limit_exceeded = true;
+            } else {
+                receipt.timed_out = true;
+            }
             // Kill the container by name rather than the client: the client
             // dying leaves the container running under `--rm`'s promise to
             // nobody.
@@ -623,6 +632,8 @@ fn run_engine(
         }
         std::thread::sleep(Duration::from_millis(200));
     };
+    let cut = crate::lab::exec::cut_captures(&[&captures[0], &captures[1]]);
+    receipt.notes.extend(cut);
     let code = status.code().map(i64::from);
     // An engine reports a container the runtime could not start as 125/126/127
     // and says why on stderr. That is the host failing, not the program.
