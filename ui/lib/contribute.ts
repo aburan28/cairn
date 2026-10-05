@@ -11,7 +11,35 @@
  * live -- change both together.
  */
 
+import type { Bridge } from "./draft";
+
 export type RoleId = "experimenter" | "compute" | "validator" | "relay" | "funder";
+
+/**
+ * A role Cairn.app can turn on from this page: one toggle in its Settings ▸
+ * Roles each, named here as `PageRole` in `gui/macos-app` names it. The app
+ * writes the setting and restarts the node, after confirming natively --
+ * a page is scriptable, and two of these open a port while the third
+ * stakes money -- so a button here is a request, never the change itself.
+ */
+export type AppRole = "validator" | "relay" | "worker-host";
+
+/** A sheet of Cairn.app's that a page may open (`PageSheet`). */
+export type AppSheet = "agents" | "work" | "peers" | "settings" | "new-challenge";
+
+/** The messages the app reads; `PageRequest.swift` parses exactly these. */
+export type RoleRequest = { kind: "set-role"; role: AppRole; on: boolean };
+export type OpenRequest = { kind: "open"; sheet: AppSheet; objective?: string };
+
+/**
+ * What the page does for a role when it is inside Cairn.app: flip the
+ * app's toggle, open the app's sheet, or both. A browser tab has no app
+ * to ask and gets `start.app` and `start.cli` instead.
+ */
+export type InApp = {
+  role?: AppRole;
+  open?: { sheet: AppSheet; label: string };
+};
 
 export type Pay = "paid" | "bonded" | "unpaid" | "pays";
 
@@ -27,7 +55,14 @@ export type RoleInfo = {
   risk: string;
   /** The `CAIRN_ROLES` name a node declares for this, if any. */
   declares: "coordinator" | "executor" | "verifier" | "relay" | null;
-  start: { app?: string; cli?: string; page?: { href: string; label: string } };
+  start: {
+    /** Where it is in Cairn.app, for a browser tab that cannot press it. */
+    app?: string;
+    cli?: string;
+    page?: { href: string; label: string };
+    /** The button(s) this page shows inside Cairn.app. */
+    inApp?: InApp;
+  };
 };
 
 export const ROLES: RoleInfo[] = [
@@ -44,6 +79,7 @@ export const ROLES: RoleInfo[] = [
       app: "Node ▸ Connect an Agent…",
       cli: "cairn try <objective> --submitter <you> --artifact answer.json",
       page: { href: "/objectives", label: "Open objectives" },
+      inApp: { open: { sheet: "agents", label: "Connect an agent…" } },
     },
   },
   {
@@ -56,8 +92,9 @@ export const ROLES: RoleInfo[] = [
     risk: "Power and wear. A machine that finds nothing earns nothing.",
     declares: "executor",
     start: {
-      app: "Settings ▸ Roles ▸ Worker host, then run cairn work on each machine",
+      app: "Node ▸ Work on This Mac…; Settings ▸ Roles ▸ Worker host for other machines",
       cli: "cairn work --node <url> --objective <id> --worker <name> -- ./solver",
+      inApp: { role: "worker-host", open: { sheet: "work", label: "Work on this Mac…" } },
     },
   },
   {
@@ -72,6 +109,7 @@ export const ROLES: RoleInfo[] = [
     start: {
       app: "Settings ▸ Roles ▸ Validator",
       cli: "cairn run --attest-identity validator.identity.json",
+      inApp: { role: "validator" },
     },
   },
   {
@@ -86,6 +124,7 @@ export const ROLES: RoleInfo[] = [
     start: {
       app: "Settings ▸ Roles ▸ Relay",
       cli: "cairn run --listen 0.0.0.0:9000",
+      inApp: { role: "relay" },
     },
   },
   {
@@ -100,6 +139,48 @@ export const ROLES: RoleInfo[] = [
     start: { page: { href: "/submit", label: "Post a challenge" } },
   },
 ];
+
+/**
+ * The `CAIRN_ROLES` name a node declares once an app role is on, so the
+ * page can read "on here" from `GET /network` rather than from a setting
+ * it cannot see. The same mapping as `NodeSettings.declaredRoles`.
+ */
+export const DECLARED_BY_ROLE: Record<AppRole, "executor" | "verifier" | "relay"> = {
+  "worker-host": "executor",
+  validator: "verifier",
+  relay: "relay",
+};
+
+/** What the toggle button says, by what the node declares now. */
+export const ROLE_TOGGLE: Record<AppRole, { on: string; off: string }> = {
+  validator: { on: "Stop checking", off: "Check answers here" },
+  relay: { on: "Stop relaying", off: "Relay here" },
+  "worker-host": { on: "Stop sharing", off: "Share on my network" },
+};
+
+/**
+ * Ask Cairn.app to turn a role on or off. Resolves once the person has
+ * confirmed and the node is restarting -- the app reloads this page when
+ * it is back -- and throws the app's own reason otherwise, including
+ * "Cancelled." when they declined.
+ */
+export async function setRole(bridge: Bridge, role: AppRole, on: boolean): Promise<void> {
+  try {
+    await bridge.postMessage({ kind: "set-role", role, on } satisfies RoleRequest);
+  } catch (cause) {
+    throw new Error(cause instanceof Error ? cause.message : String(cause));
+  }
+}
+
+/** Ask Cairn.app to open one of its sheets, on an objective when given. */
+export async function openSheet(bridge: Bridge, sheet: AppSheet, objective?: string): Promise<void> {
+  const request: OpenRequest = objective ? { kind: "open", sheet, objective } : { kind: "open", sheet };
+  try {
+    await bridge.postMessage(request);
+  } catch (cause) {
+    throw new Error(cause instanceof Error ? cause.message : String(cause));
+  }
+}
 
 export const PAY_LABEL: Record<Pay, string> = {
   paid: "Paid",

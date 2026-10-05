@@ -44,6 +44,12 @@ final class Node: ObservableObject {
     @Published var presentNewChallenge = false
     @Published var presentConnectivity = false
     @Published var presentAgents = false
+    @Published var presentWork = false
+    /// What Work on This Mac… opens on: the objective the reader's page asked
+    /// for, or nil from the menu and the toolbar.
+    private(set) var workObjective: String?
+    /// The one `cairn work` this app runs, against this node or another.
+    let worker = Worker()
     /// What New Challenge… opens with: the description the reader's Post a
     /// challenge page handed over, or nil from the menu and the toolbar.
     private(set) var challengeBrief: String?
@@ -51,6 +57,14 @@ final class Node: ObservableObject {
     /// Where the node keeps its log, keys and queue.
     var dataDir: URL { settings.dataFolder }
     var logFile: URL { dataDir.appendingPathComponent("node.log") }
+    var workLogFile: URL { dataDir.appendingPathComponent("work.log") }
+    /// The node's HTTP side as a worker dials it: the reader's origin
+    /// without its path. Nil until the node is up.
+    var httpOrigin: String? {
+        guard case .running(let url) = state, let host = url.host else { return nil }
+        let scheme = url.scheme ?? "http"
+        return url.port.map { "\(scheme)://\(host):\($0)" } ?? "\(scheme)://\(host)"
+    }
     var identityFile: URL { dataDir.appendingPathComponent("node.identity.json") }
     var hasIdentity: Bool { FileManager.default.fileExists(atPath: identityFile.path) }
     /// True when Settings points at an existing node rather than spawning one.
@@ -86,11 +100,86 @@ final class Node: ObservableObject {
         }
         guard case .running = state else { return "The node is not running." }
         // SwiftUI shows one sheet at a time; a second is dropped silently.
-        if presentNewChallenge || presentTasks || presentPeers || presentSecrets || presentConnectivity || presentAgents {
-            return "Close the sheet that is open in Cairn.app first."
-        }
+        if sheetIsOpen { return "Close the sheet that is open in Cairn.app first." }
         newChallenge(brief: brief)
         return nil
+    }
+
+    /// Whether any of the window's sheets is up.
+    var sheetIsOpen: Bool {
+        presentNewChallenge || presentTasks || presentPeers || presentSecrets
+            || presentConnectivity || presentAgents || presentWork
+    }
+
+    /// Open Work on This Mac…, on `objective` when the page named one.
+    func work(on objective: String? = nil) {
+        workObjective = objective
+        presentWork = true
+    }
+
+    /// The reader's Contribute page turning a role on or off: the same
+    /// UserDefaults key the Settings toggle writes, then the restart that
+    /// Settings would ask for. Returns why not, in words the page shows.
+    ///
+    /// The page's button has already been confirmed natively by the time
+    /// this runs (`PageBridge`), because a page is scriptable and two of
+    /// these open a port to the network while the third stakes money.
+    func setRole(fromPage role: PageRole, on: Bool) -> String? {
+        // Attached to the launchd agent is still this app's node: `restart`
+        // rewrites its plist from these settings. Attached to anything else
+        // is somebody else's.
+        if isAttached, !runsInBackground {
+            return "This window is showing a node Cairn.app does not run, so its roles are set where it runs."
+        }
+        let defaults = UserDefaults.standard
+        switch role {
+        case .validator:
+            defaults.set(on, forKey: NodeSettings.Key.validator)
+        case .relay:
+            defaults.set(on ? NodeSettings.anyHost : NodeSettings.loopbackHost, forKey: NodeSettings.Key.p2pHost)
+        case .workerHost:
+            defaults.set(on, forKey: NodeSettings.Key.shareHTTP)
+        }
+        restart()
+        return nil
+    }
+
+    /// The reader's pages opening one of this window's sheets. Settings is
+    /// the app's own window and is opened by the delegate, not here.
+    func open(fromPage sheet: PageSheet, objective: String?) -> String? {
+        if sheetIsOpen { return "Close the sheet that is open in Cairn.app first." }
+        switch sheet {
+        case .agents:
+            presentAgents = true
+        case .work:
+            work(on: objective)
+        case .peers:
+            presentPeers = true
+        case .newChallenge:
+            if isAttached {
+                return "This window is showing a node Cairn.app does not run, so there is nowhere here to write its checker."
+            }
+            newChallenge()
+        case .settings:
+            return "Settings opens from the Cairn menu."
+        }
+        return nil
+    }
+
+    /// Start `cairn work` as the sheet asked, with the key it is paid to
+    /// made first if this Mac has none yet. Returns why not, or nil.
+    func startWork(_ plan: WorkPlan) -> String? {
+        guard let binary = binary ?? Self.locateBinary() else { return "No cairn command was found." }
+        if let identity = plan.identity, !FileManager.default.fileExists(atPath: identity) {
+            try? FileManager.default.createDirectory(
+                at: URL(fileURLWithPath: identity).deletingLastPathComponent(), withIntermediateDirectories: true)
+            let made = Self.runCairn(binary, ["identity", "--out", identity])
+            if made.status != 0 {
+                return "Could not create the worker's key at \(identity): "
+                    + (made.err.isEmpty ? "cairn identity exited \(made.status)" : made.err)
+            }
+        }
+        return worker.start(plan, binary: binary, environment: Self.childEnvironment(settings), logFile: workLogFile)
     }
 
     // MARK: finding the binary
@@ -815,7 +904,7 @@ final class Node: ObservableObject {
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
-    private struct CairnRun: Sendable {
+    struct CairnRun: Sendable {
         var status: Int32
         var out: String
         var err: String
@@ -846,7 +935,7 @@ final class Node: ObservableObject {
         return nil
     }
 
-    nonisolated private static func runCairn(_ binary: URL, _ args: [String]) -> CairnRun {
+    nonisolated static func runCairn(_ binary: URL, _ args: [String]) -> CairnRun {
         let p = Process()
         p.executableURL = binary
         p.arguments = args

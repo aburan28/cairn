@@ -68,8 +68,9 @@ explicit grant ([Verifiers](#verifiers) below).
   seed (`launch/seeds.json`), or a LAN beacon, and not enough to be one.
   Settings can bind `0.0.0.0` instead, and the toolbar's status button says
   which. The HTTP side stays on loopback unless Settings shares the node on
-  your network, which is what lets another machine there run `cairn work`
-  against it; the window reads it on `127.0.0.1` either way. A seed that does not answer is named in
+  your network, which is what lets another machine there work for it (its
+  own Cairn.app's Work on This Mac…, or `cairn work`); the window reads it
+  on `127.0.0.1` either way. A seed that does not answer is named in
   `node.log` once a minute. Launching with `open --env CAIRN_SEEDS=<file>`
   points the node at another list and `CAIRN_SEEDS=off` at none.
 - **Bootstrap** files are optional dial hints, chosen in Settings. Without
@@ -327,6 +328,43 @@ submissions are signed and its public key is the submitter name nobody else
 can claim. For Claude Code the sheet also shows the `claude mcp add` command
 that writes the stanza itself.
 
+## Work on this Mac
+
+**Node → Work on This Mac…** (⇧⌘W), or **Work** in the toolbar: put this
+Mac to work on one objective with a solver of your own, which is what
+`cairn work` does from a terminal. The sheet's fields are that command's
+flags -- the node's address (this node's by default, or another's), the
+objective (read from that node's `/objectives`), the machine's roster name
+(this Mac's hostname, cleaned the way `cairn work` requires) and the solver
+with its arguments -- and **Start** runs it, with the node's `PATH`. Each
+round the solver gets its slice of the work as one line of JSON on stdin and
+prints candidate answers, one JSON object per line; the worker commits them,
+reveals them after the epoch turns and reports in, so the Mac shows as
+*working now* on the challenge page. What it prints goes to `work.log` in
+the data folder, and the sheet shows the tail.
+
+The worker is paid to `worker.identity.json` in the data folder, made by
+`cairn identity` on the first start, so the earnings land on a key this Mac
+holds rather than on a name anyone could use. It never names a fleet
+leader as the submitter: a worker on the leader's own Mac is on loopback,
+which a fleet of invited machines does not trust, and would be refused every
+round. One worker at a time; it keeps running when the sheet closes and
+stops with the app.
+
+## The reader's buttons
+
+The reader's **Contribute** page (and the challenge page's *Join this
+challenge* box) has a button for every role when it is shown in this
+window, so nothing there asks for a terminal: **Connect an agent…** and
+**Work on this Mac…** open the sheets above, and **Check answers here**,
+**Relay here** and **Share on my network** flip the matching toggle in
+Settings ▸ Roles and restart the node. Each toggle asks first, with a
+native alert naming what opens or what is staked: a page is scriptable,
+and two of the three open a port while the third stakes money, so the click
+that counts is the alert's. The same page in a browser tab, where there is
+no app to ask, says where each control is in the app and prints the
+command (`ui/lib/contribute.ts`, `PageRequest.swift`).
+
 ## Settings
 
 ⌘, or the gear in the toolbar. How much of this Mac the node's work may take,
@@ -364,9 +402,11 @@ exactly how each one works. In short:
   the cap. Replay commands and Lean proofs have never had a memory cap.
 - **Share on my network**: binds the node's HTTP side -- the reader, the log
   and the routes a worker calls -- to every interface, so a machine on the
-  LAN can open `http://<this Mac>:<port>/ui/` and join with `cairn work`.
-  The reader's Contribute page prints the exact command, with the address
-  the node found. Anyone on the network can read the log and post answers
+  LAN can open `http://<this Mac>:<port>/ui/` and join: from its own
+  Cairn.app (Contribute ▸ Work on This Mac…, with this node's address) or
+  with `cairn work`. The reader's Contribute page has a button for the
+  first and prints the exact command for the second, with the address the
+  node found. Anyone on the network can read the log and post answers
   and heartbeats; nobody can change what has settled. Each machine is paid
   under its own name; *Lead a fleet* (below) is the same opening with the
   pay landing on this Mac instead.

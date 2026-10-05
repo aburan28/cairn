@@ -274,6 +274,13 @@ struct NodeSettings: Equatable {
         dataFolder.appendingPathComponent("validator.identity.json")
     }
 
+    /// The key Work on This Mac… signs with, so what a worker here earns
+    /// lands on a key this Mac holds rather than on a name anyone could
+    /// use. Made by `cairn identity` on the first start, never overwritten.
+    var workerIdentity: URL {
+        dataFolder.appendingPathComponent("worker.identity.json")
+    }
+
     /// The roles this node declares (`CAIRN_ROLES`), read off the settings
     /// that actually give each one a duty, so a declaration here can never
     /// name a role the node is not set up to do. `GET /network` publishes
