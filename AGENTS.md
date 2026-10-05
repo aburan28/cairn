@@ -204,6 +204,11 @@ unsolvable**. Keep it honest. If you add an attack surface, add a row; if you
 implement a mitigation, move the row and say what remains. Overstating what is
 defended is the one thing this repository cannot afford.
 
+**Commit messages are read by release-please.** The PR title carries the
+changelog line, so give it a type (`feat(scope): ...`). Branch commits use
+`chore:`, `refactor:` or `test:`, or no type, or the line is listed twice. See
+[CONTRIBUTING.md](CONTRIBUTING.md), "Commit messages".
+
 ---
 
 # B. Working *for* the network as a contributor

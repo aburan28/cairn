@@ -94,6 +94,24 @@ Use `!` (or a `BREAKING CHANGE:` footer) for anything that moves a record id,
 a hash, an encoding, or the published root. Those are migrations, not edits —
 see [AGENTS.md](AGENTS.md).
 
+**One changelog line per pull request.** release-please reads every commit that
+reaches `main`, so a merge commit and each branch commit behind it would be a
+line apiece. The PR title is the line, and the commits behind it stay out of
+the changelog:
+
+- Give the **PR title** a type. It is the merge commit's body (or a squash
+  commit's subject), and it is what the changelog says.
+- Give **branch commits** a type release-please hides (`chore:`, `refactor:`,
+  `test:`) or none. One typed `feat:` is listed a second time.
+- A merge or squash message names the title **once**, as subject or as body,
+  never both.
+- When squashing a one-commit PR, check the message. GitHub fills it from that
+  commit, which is hidden, and the change would be missing from the release.
+
+A duplicate is noise; a missing type is a missing line. The reasoning, and the
+settings that look like fixes and are not, are in the comment in
+[`release-please.yml`](.github/workflows/release-please.yml).
+
 The body is unchanged and still matters more: explain *why*, and why the
 obvious alternative was not taken.
 
