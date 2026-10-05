@@ -12565,6 +12565,7 @@ mod tests {
             "decode",
             "peer",
             "identity",
+            "lean-compile",
             "keygen",
             "secret",
             "deposit",
