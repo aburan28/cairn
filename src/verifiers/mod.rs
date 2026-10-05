@@ -5498,12 +5498,22 @@ mod tests {
     /// exercised by `a_real_lean_replays_what_it_compiled`.
     #[cfg(unix)]
     fn replaying_lean(dir: &Path) -> PathBuf {
+        replaying_lean_after(dir, "replaying-lean", "")
+    }
+
+    /// The replaying stand-in with `prelude` run first, so a test can make
+    /// some calls answer differently. It stays one file: a jail shows the
+    /// verifier the Lean binary it was given, not that binary's directory,
+    /// so a wrapper that execs a second stand-in beside it exits 127 there.
+    #[cfg(unix)]
+    fn replaying_lean_after(dir: &Path, name: &str, prelude: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let lean = dir.join("replaying-lean");
+        let lean = dir.join(name);
         fs::write(
             &lean,
-            "#!/bin/sh\n\
-             case \"$1\" in\n\
+            String::from("#!/bin/sh\n")
+                + prelude
+                + "case \"$1\" in\n\
              -R)\n\
                cat \"$5\" > \"$4\" || exit 1\n\
                case \"$(cat \"$5\")\" in *sorry*) echo \"$5:2:0: warning: declaration uses 'sorry'\";; esac\n\
@@ -5918,17 +5928,11 @@ mod tests {
         if !have("cat") {
             return;
         }
-        let replaying = replaying_lean(root.path());
-        let judging = root.path().join("judging-lean");
-        fs::write(
-            &judging,
-            format!(
-                "#!/bin/sh\ncase \"$1 $5\" in --run*|*/statement/*) exec '{}' \"$@\";; *) echo 'error: type mismatch' >&2; exit 1;; esac\n",
-                replaying.display()
-            ),
-        )
-        .expect("write stand-in");
-        fs::set_permissions(&judging, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let judging = replaying_lean_after(
+            root.path(),
+            "judging-lean",
+            "case \"$1 $5\" in --run*|*/statement/*) ;; *) echo 'error: type mismatch' >&2; exit 1;; esac\n",
+        );
         let registry =
             VerifierRegistry::new(root.path()).with_lean_binary(judging.to_string_lossy());
         let spec = Value::object([
