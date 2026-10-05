@@ -30,8 +30,11 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Read-only by default. The jobs that upload or edit the release ask for
+# `contents: write` themselves; `ui` and `updates-key`, which run npm and
+# Homebrew, never hold it.
 permissions:
-  contents: write
+  contents: read
 
 env:
   # `github.ref_name` is the *branch* on a dry run, and a branch name may
@@ -66,6 +69,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -126,12 +131,20 @@ jobs:
           # and a node that verifies objective-authored code *without* one is
           # the configuration `CAIRN_REQUIRE_SANDBOX` exists to refuse.
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
         with:
+          persist-credentials: false
+      # Pinned by commit, as every third-party action in a job holding a
+      # write token is. A pinned rust-toolchain reads the toolchain from
+      # `toolchain:` rather than from the ref.
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
 
@@ -319,8 +332,12 @@ jobs:
   installer:
     name: install.sh
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       # A syntax error in the installer is only discoverable by running it, and
       # by the time an operator runs it the release is already published. `sh -n`
@@ -380,8 +397,12 @@ jobs:
             arch: arm64
             target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         with:
@@ -484,6 +505,12 @@ jobs:
       pq_public_key: ${{ steps.key.outputs.pq_public_key }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Homebrew runs its own Ruby and may update itself; it does so before
+      # the update seed is anywhere in the environment.
+      - name: OpenSSL with ML-DSA
+        run: brew list --versions openssl@3 >/dev/null 2>&1 || brew install openssl@3
       - id: key
         env:
           CAIRN_UPDATES_KEY: ${{ secrets.CAIRN_UPDATES_KEY }}
@@ -495,7 +522,6 @@ jobs:
             echo "pq_public_key=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          brew list --versions openssl@3 >/dev/null 2>&1 || brew install openssl@3
           PUBLIC_KEY="$(packaging/macos/updates.sh public-key)"
           PQ_PUBLIC_KEY="$(packaging/macos/updates.sh pq-public-key)"
           echo "SUPublicEDKey $PUBLIC_KEY"
@@ -521,6 +547,8 @@ jobs:
     # release did not arrive.
     if: ${{ !cancelled() && needs.updates-key.result == 'success' }}
     runs-on: macos-latest
+    permissions:
+      contents: write
     env:
       # `secrets` cannot be read in a step's `if:`, so whether there is a
       # certificate is decided here, once, as a plain string.
@@ -532,6 +560,8 @@ jobs:
       CAIRN_UPDATES_PQ_PUBLIC_KEY: ${{ needs.updates-key.outputs.pq_public_key }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         with:
@@ -662,10 +692,14 @@ jobs:
     needs: [build, installer, linux-packages, macos-dmg]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       HAVE_DEVELOPER_ID: ${{ secrets.MACOS_CERTIFICATES_P12 != '' }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: write the install section under the changelog
         if: startsWith(github.ref, 'refs/tags/')
@@ -738,12 +772,18 @@ jobs:
     if: ${{ !cancelled() && needs.macos-dmg.result == 'success' && needs.updates-key.outputs.public_key != '' }}
     # macOS for the same reason as updates-key: an OpenSSL with ML-DSA.
     runs-on: macos-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: macos-dmg
           path: dist
+      - name: OpenSSL with ML-DSA
+        run: brew list --versions openssl@3 >/dev/null 2>&1 || brew install openssl@3
       - name: write and check the feed
         env:
           CAIRN_UPDATES_KEY: ${{ secrets.CAIRN_UPDATES_KEY }}
@@ -752,7 +792,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          brew list --versions openssl@3 >/dev/null 2>&1 || brew install openssl@3
           DMG="dist/cairn-${VERSION}-macos-universal.dmg"
           : > notes.html
           if [ "${{ github.ref_type }}" = "tag" ]; then
@@ -788,6 +827,16 @@ jobs:
           # every installed app, where it would sit until the next release.
           # The versioned copy above is unconditional; this one yields to a
           # newer feed already there. Same version (a re-run) overwrites.
+          # A pre-release tag is never the fixed feed: its feed carries the
+          # bare version (1.16.0 for v1.16.0-rc.1), so an RC finishing after
+          # the final would replace it and leave every app that took the RC
+          # unable to see the final, which has the same number.
+          case "$VERSION" in
+            *-*)
+              echo "$VERSION is a pre-release; the fixed updates feed is for releases"
+              exit 0
+              ;;
+          esac
           current=""
           if gh release download updates --pattern appcast.xml --dir current --repo "$REPO" 2>/dev/null; then
             current="$(sed -n 's/.*<sparkle:version>\([^<]*\)<.*/\1/p' current/appcast.xml | head -n 1)"
@@ -832,6 +881,8 @@ jobs:
           && (needs.appcast.result == 'success'
               || (needs.appcast.result == 'skipped' && needs.updates-key.outputs.public_key == '')) }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: promote the release
         env:

@@ -101,7 +101,16 @@ jobs:
           # One file per objective, named exactly as the UI fetches it. The
           # list of ids comes from the node's own answer, not from a second
           # source that could drift.
-          ids="$(python3 -c 'import json; print("\n".join(o["id"] for o in json.load(open("ui/out/node/objectives"))["objectives"]))')"
+          # Each id becomes a file name under the published site, and the
+          # list comes from a node over plain http. `../../index.html` would
+          # overwrite the site's own page, so an id that is not a digest stops
+          # the sync rather than being written anywhere.
+          ids="$(python3 -c 'import json, re, sys
+          ids = [o["id"] for o in json.load(open("ui/out/node/objectives"))["objectives"]]
+          bad = [i for i in ids if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(i))]
+          if bad:
+              sys.exit("refusing objective ids that are not sha256 digests: %r" % bad[:3])
+          print("\n".join(ids))')" || exit 1
           for id in $ids; do
             curl -fsS --max-time 30 -o "$DEST/objective/$id" "$SEED_NODE/objective/$id"
           done
