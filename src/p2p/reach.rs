@@ -68,6 +68,13 @@ use crate::time::format_iso8601_utc;
 /// The environment variable that chooses a mode. See [`Mode::parse`].
 pub const ENV: &str = "CAIRN_PORTMAP";
 
+/// The environment variable that forwards the HTTP port as well. Off unless
+/// set: a forwarded HTTP side makes this node reachable from the internet, a
+/// public seed's surface, which a fleet leader behind a home router wants so
+/// that rented machines can join it (`docs/design/fleet-enrollment.md` §12)
+/// and nobody else should get by default. See [`decide_http`].
+pub const HTTP_ENV: &str = "CAIRN_PORTMAP_HTTP";
+
 /// How long to wait before asking again after nothing granted a mapping.
 ///
 /// Five minutes. A router that is not there will not appear in the next
@@ -140,6 +147,42 @@ pub struct Decision {
     /// Set when `mode` is [`Mode::Off`]: the reason, for the log and the
     /// roster. Also set when an unknown value was corrected to `auto`.
     pub note: Option<String>,
+}
+
+/// Decide whether to forward the HTTP port, from `CAIRN_PORTMAP_HTTP` and the
+/// address the HTTP side listens on. The opposite default to [`decide`]:
+/// unset, empty or unreadable is off, because this is an opt-in to being
+/// reachable and a typo should not open a port.
+pub fn decide_http(env: Option<&str>, listen: IpAddr) -> Decision {
+    let off = |note: String| Decision {
+        mode: Mode::Off,
+        note: Some(note),
+    };
+    let raw = match env.map(str::trim) {
+        None | Some("") => {
+            return off(format!(
+                "off: {HTTP_ENV} is unset; `{HTTP_ENV}=on` forwards the HTTP port, which makes \
+                 this node reachable from the internet"
+            ))
+        }
+        Some(raw) => raw,
+    };
+    let mode = match Mode::parse(raw) {
+        Some(Mode::Off) => return off(format!("off ({HTTP_ENV})")),
+        Some(mode) => mode,
+        None => {
+            return off(format!(
+                "off: {HTTP_ENV}={raw:?} is not on, off, natpmp or upnp"
+            ))
+        }
+    };
+    if listen.is_loopback() {
+        return off(format!(
+            "off: the HTTP side listens on {listen}, which nothing outside this host can be \
+             forwarded to; --serve 0.0.0.0:<port> to be reachable"
+        ));
+    }
+    Decision { mode, note: None }
 }
 
 /// Decide from the environment value, the listen address and whether dials
@@ -781,6 +824,28 @@ fn announce(mapped: &Mapped) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_http_port_is_forwarded_only_when_asked_and_only_from_a_reachable_listen() {
+        let wildcard: IpAddr = "0.0.0.0".parse().unwrap();
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        for unset in [None, Some(""), Some("  ")] {
+            let decision = decide_http(unset, wildcard);
+            assert_eq!(decision.mode, Mode::Off, "{unset:?}");
+            assert!(decision.note.unwrap().contains(HTTP_ENV));
+        }
+        assert_eq!(decide_http(Some("on"), wildcard).mode, Mode::Auto);
+        assert_eq!(decide_http(Some("upnp"), wildcard).mode, Mode::Upnp);
+        assert_eq!(decide_http(Some("off"), wildcard).mode, Mode::Off);
+        assert_eq!(
+            decide_http(Some("yes please"), wildcard).mode,
+            Mode::Off,
+            "a typo opens no port"
+        );
+        let local = decide_http(Some("on"), loopback);
+        assert_eq!(local.mode, Mode::Off);
+        assert!(local.note.unwrap().contains("--serve"));
+    }
 
     const ROUTE: &str =
         "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\

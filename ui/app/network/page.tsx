@@ -15,6 +15,8 @@ import {
   describeReachability,
   fetchNetwork,
   fetchSessions,
+  fleetMembers,
+  fleetSigning,
   fleetTotals,
   formatMemory,
   formatUptime,
@@ -30,6 +32,7 @@ import {
   Box,
   EmptyState,
   Hash,
+  MemberBadge,
   NodePicker,
   Note,
   PageHeader,
@@ -343,11 +346,12 @@ function Dashboard({
                 <dd>
                   <div className="flex flex-wrap items-baseline gap-2">
                     <span className="mono">{node.fleet.sources.join(", ")}</span>
-                    <span className="text-[12px] text-ink-2">
-                      unsigned records from these networks that name this node are signed here, as
-                    </span>
+                    <span className="text-[12px] text-ink-2">{fleetSigning(node.fleet)}</span>
                     <Hash value={node.fleet.signs_as} chars={12} />
                   </div>
+                  {fleetMembers(node.fleet) && (
+                    <div className="mt-1 text-[12px] text-ink-2">{fleetMembers(node.fleet)}</div>
+                  )}
                 </dd>
               </>
             )}
@@ -373,6 +377,27 @@ function Dashboard({
                       {reach.label}
                     </Badge>
                     {reach.detail && <span className="text-[12px] text-ink-2">{reach.detail}</span>}
+                  </div>
+                </dd>
+              </>
+            )}
+            {node.reach?.external && node.reach.external.status !== "off" && (
+              <>
+                <dt>HTTP from outside</dt>
+                <dd>
+                  <div className="flex flex-wrap items-baseline gap-2">
+                    <Badge
+                      tone={node.reach.external.status === "mapped" && node.reach.external.public ? "accent" : "warn"}
+                      title="CAIRN_PORTMAP_HTTP: the router's claim, checked only by use"
+                    >
+                      {node.reach.external.status}
+                    </Badge>
+                    {node.reach.external.address && (
+                      <span className="mono">http://{node.reach.external.address}</span>
+                    )}
+                    {node.reach.external.detail && (
+                      <span className="text-[12px] text-ink-2">{node.reach.external.detail}</span>
+                    )}
                   </div>
                 </dd>
               </>
@@ -974,6 +999,7 @@ function WorkerLine({ worker }: { worker: FleetWorker }) {
     <tr className="align-top hover:bg-surface-2">
       <td className="mono px-4 py-2.5 text-ink">
         {worker.worker}
+        <MemberBadge member={worker.member} />
         {worker.client && <div className="text-[11px] text-ink-3">{worker.client}</div>}
       </td>
       <td className="px-3 py-2.5">
@@ -1020,6 +1046,7 @@ function HostLine({ row }: { row: HostRow }) {
     <tr className="align-top hover:bg-surface-2">
       <td className="mono px-4 py-2.5 text-ink">
         {row.host}
+        <MemberBadge member={row.member} />
         <div className="text-[11px] text-ink-3">
           {row.roles.length > 0 ? row.roles.join(", ") : "no role declared"}
           {row.agent ? ` · ${row.agent}` : ""}

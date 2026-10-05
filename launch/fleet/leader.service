@@ -15,8 +15,13 @@
 #   sudo systemctl daemon-reload && sudo systemctl enable --now cairn-leader
 #   curl -s http://127.0.0.1:8080/network | python3 -c 'import json,sys; print(json.load(sys.stdin)["node"]["fleet"])'
 #
-# The last line prints the networks this leader signs for and the id it signs
-# as. Workers submit under that id -- `signs_as` -- and are paid to it.
+# The last line prints whom this leader signs for and the id it signs as.
+# Then invite each machine that will work for it, and hand the token over out
+# of band (docs/fleet.md):
+#
+#   sudo -u cairn CAIRN_DATA=/var/lib/cairn /usr/local/bin/cairn fleet invite \
+#       --identity /var/lib/cairn/leader.identity.json --prefix rented --uses 16 \
+#       --member-ttl 12h --node http://THIS-HOST:8080
 
 [Unit]
 Description=cairn fleet leader (signs the fleet's records; serves workers on the private network)
@@ -28,11 +33,14 @@ User=cairn
 WorkingDirectory=/var/lib/cairn
 Environment=CAIRN_DATA=/var/lib/cairn
 Environment=CAIRN_LOG_LEVEL=info
-# Whose unsigned records this node signs as itself: the private networks the
-# workers live on. `private` is 10/8, 172.16/12, 192.168/16, loopback and IPv6
-# unique-local; name a tunnel's own range instead when the fleet crosses the
-# internet (WireGuard: the wg0 subnet; SSH -L: `loopback`).
-Environment=CAIRN_FLEET=private
+# Whose unsigned records this node signs as itself. `enrolled`: the machines
+# you invited with `cairn fleet invite`, each proving its own key on every
+# request, from any address -- a rented GPU needs no tunnel, and a stranger on
+# the network gets nothing signed. Networks are the older way, kept for
+# compatibility: `private` (10/8, 172.16/12, 192.168/16, loopback, IPv6
+# unique-local), `loopback`, or CIDRs trust every address inside them with no
+# proof, and `enrolled,loopback` adds this host's own tools to the members.
+Environment=CAIRN_FLEET=enrolled
 # The ed25519 identity the fleet is paid to. Kept here, on the leader, and
 # nowhere else: a worker never holds it.
 Environment=CAIRN_FLEET_IDENTITY=/var/lib/cairn/leader.identity.json
@@ -44,12 +52,14 @@ Environment=CAIRN_SEEDS=off
 Environment=CAIRN_BEACON_PORT=off
 Environment=CAIRN_PORTMAP=off
 Environment=CAIRN_ROLES=coordinator,verifier
-# --no-mcp: stdin belongs to systemd. --serve on the wildcard so workers on the
-# private network reach the HTTP side; the firewall or security group decides
-# who else can, and the HTTP side is plaintext by policy, so that must be the
-# private network alone. --listen on loopback: this leader peers with nobody
-# over p2p; bind 0.0.0.0:9000 and add --bootstrap files to peer with a fleet
-# node in another region.
+# --no-mcp: stdin belongs to systemd. --serve on the wildcard so workers reach
+# the HTTP side. With `enrolled` alone it may face the internet: what anyone
+# can do there is what they can do at any public seed, and nothing gets signed
+# for them. With a network in CAIRN_FLEET, the firewall or security group must
+# keep the HTTP side to that network, because the address is the credential.
+# --listen on loopback: this leader peers with nobody over p2p; bind
+# 0.0.0.0:9000 and add --bootstrap files to peer with a fleet node in another
+# region.
 ExecStart=/usr/local/bin/cairn run --no-mcp \
     --listen 127.0.0.1:9000 \
     --serve 0.0.0.0:8080 \

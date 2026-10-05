@@ -58,6 +58,12 @@ jobs:
       # reveals after the epoch turns, and is paid by the node's verifier.
       # The only check of the generic worker against a real node.
       - run: ./scripts/work-demo.sh
+      # A fleet of enrolled members: a leader that trusts no network refuses a
+      # stranger on loopback, mints an invite, enrolls a member over HTTP, and
+      # signs as itself what `cairn work --fleet` commits and reveals; the
+      # settlement names the leader, the journal names the member, and one
+      # `cairn fleet revoke` stops it at its next request.
+      - run: ./scripts/fleet-demo.sh
       # `try` and `scaffold`: the one command that waits on a real epoch
       # boundary, and the generated challenge that has to be postable. Neither
       # can be checked from a fixture timestamp.

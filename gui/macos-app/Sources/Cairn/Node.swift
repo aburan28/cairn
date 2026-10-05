@@ -778,6 +778,43 @@ final class Node: ObservableObject {
         }
     }
 
+    /// Run `cairn fleet ARGS…` against this node's own member registry --
+    /// beside its log, in the data folder -- and hand back what it printed,
+    /// or why it refused. Membership changes only through these files and the
+    /// node's join route, so this works whether or not the node is running.
+    /// Completion is on the main actor.
+    func fleet(_ args: [String], completion: @escaping (_ output: String?, _ problem: String?) -> Void) {
+        guard let binary = binary ?? Self.locateBinary() else {
+            completion(nil, "No cairn command was found.")
+            return
+        }
+        let full = ["--data-dir", NodeSettings.current().dataFolder.path, "fleet"] + args
+        DispatchQueue.global(qos: .userInitiated).async {
+            let run = Self.runCairn(binary, full)
+            DispatchQueue.main.async {
+                if run.status == 0 {
+                    completion(run.out, nil)
+                } else {
+                    let said = run.err.replacingOccurrences(of: "cairn fleet: ", with: "")
+                    completion(nil, said.isEmpty ? "cairn fleet exited with status \(run.status)" : said)
+                }
+            }
+        }
+    }
+
+    /// `GET /network` from the node this window runs, or nil when it is not
+    /// up. For the Fleet settings: which members are live, and the address a
+    /// machine elsewhere would dial.
+    func networkFacts() async -> [String: Any]? {
+        guard case .running(let reader) = state,
+              let url = URL(string: "/network", relativeTo: reader)?.absoluteURL else { return nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 3
+        guard let (data, response) = try? await URLSession(configuration: config).data(from: url),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
     private struct CairnRun: Sendable {
         var status: Int32
         var out: String

@@ -17,6 +17,7 @@ struct SettingsView: View {
     @AppStorage(NodeSettings.Key.backgroundService) private var background = false
     @AppStorage(NodeSettings.Key.leadFleet) private var leadFleet = false
     @AppStorage(NodeSettings.Key.fleetNetworks) private var fleetNetworks = NodeSettings.defaultFleetNetworks
+    @AppStorage(NodeSettings.Key.fleetJoin) private var fleetJoin = NodeSettings.FleetJoin.invited.rawValue
     @State private var backgroundBusy = false
     @State private var backgroundError: String?
     @AppStorage(NodeSettings.Key.limitMemory) private var limitMemory = true
@@ -134,13 +135,14 @@ struct SettingsView: View {
                 Text("Fleet")
             } footer: {
                 Caption("""
-                    Lead a fleet and this node serves its HTTP side on every interface, so \
-                    workers and GPU boxes on your network can reach it, and signs the records \
-                    they hand it with an identity kept here and nowhere else — their work is \
-                    paid to this node. Only the networks listed are members; `private` is every \
-                    home and office range. The HTTP side is plaintext, so the list must mean a \
-                    network you run: turn this off before joining one you do not, or lead from \
-                    a Linux host instead. docs/fleet.md has the whole arrangement.
+                    Lead a fleet and this node serves its HTTP side on every interface and signs \
+                    the records its machines hand it with an identity kept here and nowhere \
+                    else — their work is paid to this node. Machines I invite each get a token \
+                    and their own key, and prove it on every request from wherever they are, \
+                    so a rented GPU joins without a tunnel and a stranger on your Wi-Fi gets \
+                    nothing signed. Anything on my network is the older way: every address on \
+                    the listed networks is a member with no proof, so the list must mean a \
+                    network you run. docs/fleet.md has the whole arrangement.
                     """)
             }
 
@@ -227,13 +229,23 @@ struct SettingsView: View {
 
     private var fleet: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Lead a fleet: accept workers from my network and sign their submissions", isOn: $leadFleet)
+            Toggle("Lead a fleet: sign the submissions of machines that work for this Mac", isOn: $leadFleet)
             if leadFleet {
-                TextField("Member networks: CIDRs, or private, or loopback", text: $fleetNetworks)
-                    .font(.body.monospaced())
+                Picker("Who may join", selection: $fleetJoin) {
+                    Text("Machines I invite").tag(NodeSettings.FleetJoin.invited.rawValue)
+                    Text("Anything on my network").tag(NodeSettings.FleetJoin.network.rawValue)
+                }
+                .pickerStyle(.radioGroup)
+                if fleetJoin == NodeSettings.FleetJoin.network.rawValue {
+                    TextField("Member networks: CIDRs, or private, or loopback", text: $fleetNetworks)
+                        .font(.body.monospaced())
+                    Text("Anything at these addresses has its records signed as this Mac, with no proof: a guest on the Wi-Fi included.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let id = node.leaderId {
                     HStack(spacing: 8) {
-                        Text("Workers submit as").font(.caption).foregroundStyle(.secondary)
+                        Text("The fleet is paid to").font(.caption).foregroundStyle(.secondary)
                         Text(id)
                             .font(.caption.monospaced())
                             .textSelection(.enabled)
@@ -249,6 +261,9 @@ struct SettingsView: View {
                     Text("The fleet identity is created the next time the node starts. Its id appears here, and as node.fleet.signs_as on GET /network.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                if fleetJoin == NodeSettings.FleetJoin.invited.rawValue {
+                    FleetMembersView(node: node)
                 }
             }
         }

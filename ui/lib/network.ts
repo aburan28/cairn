@@ -120,6 +120,8 @@ export type FleetWorker = {
   steps_per_second: number | null;
   epoch: number | null;
   units: { first: number; end: number } | null;
+  /** Its last heartbeat was signed by an enrolled fleet member. */
+  member?: boolean;
 };
 
 export type Sum = {
@@ -168,6 +170,8 @@ export type HostRow = {
   usable_sandboxes: string[];
   jobs: { running?: number; capacity?: number; completed?: number; failed?: number };
   objectives: string[];
+  /** Registered by an enrolled fleet member. */
+  member?: boolean;
 };
 
 /**
@@ -235,10 +239,16 @@ export type NodeFacts = {
   accepts_submissions: boolean;
   runs_p2p: boolean;
   /** Where this node's HTTP side answers. Absent on a node older than it. */
-  reach?: { bound: string | null; lan: boolean; urls?: string[] };
+  reach?: {
+    bound: string | null;
+    lan: boolean;
+    urls?: string[];
+    /** The router's forwarding of the HTTP port (`CAIRN_PORTMAP_HTTP`). */
+    external?: External;
+  };
   /**
-   * The fleet this node leads, when it leads one: the networks whose
-   * unsigned records naming `signs_as` the node signs before queuing them.
+   * The fleet this node leads, when it leads one: whom it signs unsigned
+   * records naming `signs_as` for -- `enrolled` members, networks, or both.
    * Absent on a node older than the field; null when it leads none.
    */
   fleet?: FleetFacts | null;
@@ -247,9 +257,32 @@ export type NodeFacts = {
 };
 
 export type FleetFacts = {
+  /** `enrolled` first when members are signed for, then any networks. */
   sources: string[];
   signs_as: string;
+  /** Counts only, never names; null when the fleet takes no members. */
+  members?: { enrolled: number; live: number } | null;
 };
+
+/** What a leader's signing rule means, in a sentence for the Network page. */
+export function fleetSigning(fleet: FleetFacts): string {
+  const networks = fleet.sources.filter((source) => source !== "enrolled");
+  const enrolled = fleet.sources.includes("enrolled");
+  if (enrolled && networks.length === 0) {
+    return "unsigned records that name this node are signed here, from any address, only for members it enrolled, as";
+  }
+  if (enrolled) {
+    return `unsigned records that name this node are signed here for enrolled members, and for anything on ${networks.join(", ")}, as`;
+  }
+  return "unsigned records from these networks that name this node are signed here, as";
+}
+
+/** The members line under it: counts only, never names. */
+export function fleetMembers(fleet: FleetFacts): string | null {
+  if (!fleet.members) return null;
+  const { enrolled, live } = fleet.members;
+  return `${enrolled} enrolled member${enrolled === 1 ? "" : "s"}, ${live} heard from in the last few minutes; \`cairn fleet list\` on the leader names them`;
+}
 
 export type PeersPolicy = {
   policy: "open" | "allowlist" | string;

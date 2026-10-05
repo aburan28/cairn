@@ -38,6 +38,19 @@ struct NodeSettings: Equatable {
         static let backgroundService = "backgroundService"
         static let leadFleet = "leadFleet"
         static let fleetNetworks = "fleetNetworks"
+        /// Who may join a fleet this node leads: `invited` or `network`.
+        /// See `FleetJoin`. Never registered as a default: its absence is how
+        /// `current()` tells a fleet led before invitations existed.
+        static let fleetJoin = "fleetJoin"
+    }
+
+    /// Who may join a fleet this node leads.
+    enum FleetJoin: String {
+        /// Machines invited with `cairn fleet invite`, each proving its own
+        /// key on every request, from any address: `CAIRN_FLEET=enrolled`.
+        case invited
+        /// Anything on the networks in `fleetNetworks`, with no proof.
+        case network
     }
 
     /// The node's own default cap, 4096 MiB, so a person who never opens
@@ -92,9 +105,18 @@ struct NodeSettings: Equatable {
     /// can reach it, and sign their records with `leaderIdentity` so their
     /// work is paid to this node. `docs/fleet.md`.
     var leadFleet: Bool = false
-    /// `CAIRN_FLEET`: the networks whose unsigned records naming the leader
-    /// are signed. `private` is every RFC 1918 block, loopback and IPv6 ULA.
+    /// The networks whose unsigned records naming the leader are signed when
+    /// `fleetJoin` is `.network`. `private` is every RFC 1918 block, loopback
+    /// and IPv6 ULA.
     var fleetNetworks: String = NodeSettings.defaultFleetNetworks
+    /// Invitations by default: the setting `docs/design/fleet-enrollment.md`
+    /// recommends, and the one a new fleet starts with.
+    var fleetJoin: FleetJoin = .invited
+
+    /// `CAIRN_FLEET` for this fleet.
+    var fleetSources: String {
+        fleetJoin == .invited ? "enrolled" : fleetNetworks
+    }
 
     static let defaultFleetNetworks = "private"
 
@@ -159,6 +181,15 @@ struct NodeSettings: Equatable {
 
     static func current(_ defaults: UserDefaults = .standard) -> NodeSettings {
         defaults.register(defaults: registeredDefaults)
+        // A fleet led before invitations existed keeps trusting the networks
+        // its operator chose, as it did; only a new fleet starts with
+        // invitations. Written once, so the choice is then a setting like any
+        // other and this never runs again.
+        if defaults.object(forKey: Key.fleetJoin) == nil {
+            defaults.set(
+                (defaults.bool(forKey: Key.leadFleet) ? FleetJoin.network : FleetJoin.invited).rawValue,
+                forKey: Key.fleetJoin)
+        }
         let path = defaults.string(forKey: Key.dataFolder) ?? ""
         let cpus = defaults.integer(forKey: Key.cpus)
         let host = defaults.string(forKey: Key.p2pHost) ?? loopbackHost
@@ -187,7 +218,8 @@ struct NodeSettings: Equatable {
                 let text = (defaults.string(forKey: Key.fleetNetworks) ?? "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 return text.isEmpty ? defaultFleetNetworks : text
-            }()
+            }(),
+            fleetJoin: FleetJoin(rawValue: defaults.string(forKey: Key.fleetJoin) ?? "") ?? .invited
         )
     }
 
@@ -262,7 +294,7 @@ struct NodeSettings: Equatable {
         // its own seed list (`CAIRN_SEEDS=path`) keeps it when this is off.
         if offline { env["CAIRN_SEEDS"] = "off" }
         if !declaredRoles.isEmpty { env["CAIRN_ROLES"] = declaredRoles.joined(separator: ",") }
-        if leadFleet { env["CAIRN_FLEET"] = fleetNetworks }
+        if leadFleet { env["CAIRN_FLEET"] = fleetSources }
         return env
     }
 

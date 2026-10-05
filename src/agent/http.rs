@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use super::AgentError;
 use crate::canonical::Value;
+use crate::fleet::auth::MemberFile;
 
 /// Largest answer this client reads from a node, in bytes.
 const MAX_RESPONSE_BYTES: u64 = 16 << 20;
@@ -128,7 +129,7 @@ impl Response {
 }
 
 pub fn get(url: &NodeUrl, path: &str, timeout: Duration) -> Result<Response, AgentError> {
-    request(url, "GET", path, None, timeout)
+    request(url, "GET", path, None, None, timeout)
 }
 
 pub fn post_json(
@@ -137,7 +138,21 @@ pub fn post_json(
     body: &Value,
     timeout: Duration,
 ) -> Result<Response, AgentError> {
-    request(url, "POST", path, Some(body), timeout)
+    request(url, "POST", path, Some(body), None, timeout)
+}
+
+/// [`post_json`], signed as a fleet member when `member` is given: an
+/// `Authorization: CairnMember` header over this method, this request-target
+/// and these exact body bytes, for the member file's own leader and no other
+/// (`docs/design/fleet-enrollment.md` §6). Nothing secret is sent.
+pub fn post_json_as(
+    url: &NodeUrl,
+    path: &str,
+    body: &Value,
+    member: Option<&MemberFile>,
+    timeout: Duration,
+) -> Result<Response, AgentError> {
+    request(url, "POST", path, Some(body), member, timeout)
 }
 
 fn request(
@@ -145,6 +160,7 @@ fn request(
     method: &str,
     path: &str,
     body: Option<&Value>,
+    member: Option<&MemberFile>,
     timeout: Duration,
 ) -> Result<Response, AgentError> {
     let mut stream = url.resolve(timeout)?;
@@ -161,6 +177,15 @@ fn request(
         head.push_str(&format!(
             "content-type: application/json\r\ncontent-length: {}\r\n",
             encoded.len()
+        ));
+    }
+    if let Some(member) = member {
+        // The request-target exactly as the request line above writes it.
+        let target = format!("{}{path}", url.base);
+        let body = encoded.as_deref().unwrap_or_default().as_bytes();
+        head.push_str(&format!(
+            "authorization: {}\r\n",
+            member.authorize(crate::time::unix_seconds(), method, &target, body)
         ));
     }
     head.push_str("\r\n");

@@ -168,12 +168,12 @@ OID=$("$RUST" --log "$LOG" --root . post examples/capset_progressive/objective.j
   | head -1 | awk '{print $2}')
 echo "  $OID"
 
-# This node also leads a fleet of one network -- loopback, which is where the
-# smoke's requests come from -- signing with an identity made here. Checked
-# below, after the routes; it changes nothing about the rest of the run.
+# This node also leads a fleet of enrolled members, signing with an identity
+# made here; the smoke enrolls one and signs as it. Checked below, after the
+# routes; it changes nothing about the rest of the run.
 "$RUST" identity --out "$A/leader.json" >/dev/null
 LEADER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["public"])' "$A/leader.json")
-CAIRN_FLEET=loopback CAIRN_FLEET_IDENTITY="$A/leader.json" \
+CAIRN_FLEET=enrolled CAIRN_FLEET_IDENTITY="$A/leader.json" \
 "$RUST" --log "$LOG" --root . p2p \
   --identity "$A/id.json" --root-key "$A/rk.json" --checkpoint "$A/cp.json" \
   --listen "127.0.0.1:$P2P_PORT" \
@@ -193,12 +193,19 @@ for path in /health /objectives /chain /chain.html /checkpoint "/objective/$OID"
   echo "  GET $path -> 200"
 done
 
-rule "a fleet leader signs its workers' records and declares it"
+rule "a fleet leader signs its members' records and declares it"
 SIGNS_AS=$(curl -s "http://127.0.0.1:$HTTP/network" | python3 -c '
 import json, sys
 print(json.load(sys.stdin)["node"]["fleet"]["signs_as"])')
 [ "$SIGNS_AS" = "$LEADER" ] || fail "GET /network says the leader signs as $SIGNS_AS, not $LEADER"
 echo "  node.fleet.signs_as is the identity made for it"
+# Enrolled before the epoch-sensitive part below: an invite written beside
+# the log, a join over HTTP, a member file this side keeps.
+TOKEN=$("$RUST" --log "$LOG" fleet invite --identity "$A/leader.json" --name smoke-member --json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+"$RUST" fleet join --node "http://127.0.0.1:$HTTP" --out "$A/member.json" "$TOKEN" >/dev/null \
+  || { cat "$A/node.log" >&2; fail "cairn fleet join could not enroll with the leader"; }
+echo "  smoke-member joined with an invite"
 # Posted just after an epoch boundary, as submit() posts, so the daemon's next
 # tick admits both in the epoch they declare rather than refusing them as
 # stale -- and then waited for. The 202's signed_as says the leader signed the
@@ -210,11 +217,16 @@ LEADER_HASH=sha256:0000000000000000000000000000000000000000000000000000000000000
 WORKER_HASH=sha256:0000000000000000000000000000000000000000000000000000000000000003
 epoch_start
 NOW=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
-SIGNED=$(curl -s -H 'content-type: application/json' \
-  -d "{\"type\":\"commitment\",\"objective_id\":\"$OID\",\"submitter\":\"$LEADER\",\"hash\":\"$LEADER_HASH\",\"created_at\":\"$NOW\"}" \
-  "http://127.0.0.1:$HTTP/submit?kind=commitment" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("signed_as"))')
-[ "$SIGNED" = "$LEADER" ] || fail "an unsigned commitment naming the leader was not signed (signed_as=$SIGNED)"
-echo "  POST /submit from the fleet network -> signed_as the leader"
+BODY="{\"type\":\"commitment\",\"objective_id\":\"$OID\",\"submitter\":\"$LEADER\",\"hash\":\"$LEADER_HASH\",\"created_at\":\"$NOW\"}"
+STRANGER=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
+  -d "$BODY" "http://127.0.0.1:$HTTP/submit?kind=commitment")
+[ "$STRANGER" = "403" ] || fail "an unsigned request naming the leader from loopback answered $STRANGER, not 403"
+echo "  the same record with no member signature -> 403: loopback is no credential"
+AUTH=$(printf '%s' "$BODY" | "$RUST" fleet sign --member "$A/member.json" --target "/submit?kind=commitment")
+SIGNED=$(curl -s -H 'content-type: application/json' -H "authorization: $AUTH" \
+  -d "$BODY" "http://127.0.0.1:$HTTP/submit?kind=commitment" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("signed_as"))')
+[ "$SIGNED" = "$LEADER" ] || fail "a member's commitment naming the leader was not signed (signed_as=$SIGNED)"
+echo "  POST /submit signed by the member -> signed_as the leader"
 PLAIN=$(curl -s -H 'content-type: application/json' \
   -d "{\"type\":\"commitment\",\"objective_id\":\"$OID\",\"submitter\":\"smoke-worker\",\"hash\":\"$WORKER_HASH\",\"created_at\":\"$NOW\"}" \
   "http://127.0.0.1:$HTTP/submit?kind=commitment" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("signed_as"))')

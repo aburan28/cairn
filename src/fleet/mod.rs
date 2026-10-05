@@ -15,13 +15,17 @@
 //! Two switches make that private, and they are deliberately separate,
 //! because they bound different things:
 //!
-//! - [`Fleet`] (`CAIRN_FLEET`): the networks whose records this node will
-//!   **sign as itself**. A worker inside them submits a commitment or a claim
-//!   whose `submitter` is the leader's own key and leaves the signature off;
-//!   the leader adds it before the record is queued, so the record settles to
-//!   the leader and the worker never holds the key. The same request from
-//!   outside those networks is refused with `403` rather than queued to fail
-//!   at drain time, where the worker would never hear why.
+//! - [`Fleet`] (`CAIRN_FLEET`): whose records this node will **sign as
+//!   itself**. A worker submits a commitment or a claim whose `submitter` is
+//!   the leader's own key and leaves the signature off; the leader adds it
+//!   before the record is queued, so the record settles to the leader and the
+//!   worker never holds the key. `enrolled` signs for [`members`] -- machines
+//!   the operator invited, each with its own key, proving it on every request
+//!   ([`auth`]) from any address, which is how a rented GPU joins without a
+//!   tunnel. Networks (`private`, `loopback`, CIDRs) sign for any request
+//!   from inside them, as before enrollment existed. Anyone else is refused
+//!   with `403` rather than queued to fail at drain time, where the worker
+//!   would never hear why.
 //! - [`PeerPolicy`] (`CAIRN_PEERS`): whom this node will talk to over the
 //!   authenticated transport. `open`, the default, is the network as it has
 //!   always been; `bootstrap`, or a list of peer ids, makes the node refuse
@@ -44,6 +48,10 @@
 //! Money is the network's own unit of account, credited to the submitter the
 //! settlement names. No external currency rail exists in this repository;
 //! `docs/fleet.md` says so in as many words.
+
+pub mod auth;
+pub mod cli;
+pub mod members;
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -174,22 +182,29 @@ fn mask128(bits: u8) -> u128 {
     }
 }
 
-/// The networks a leader signs for.
+/// Whom a leader signs for: enrolled members, networks, or both.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Fleet {
+    /// Networks whose requests are signed for with no further proof.
     pub sources: Vec<Cidr>,
+    /// Whether members enrolled in the registry beside the log are signed
+    /// for, from any address, on a request that proves the member's key.
+    pub enrolled: bool,
 }
 
 impl Fleet {
-    /// Networks separated by commas or spaces. Two words stand for sets:
-    /// `private` is every RFC 1918 block, loopback and IPv6 unique-local, and
-    /// `loopback` is this host alone -- the case where the workers are
-    /// processes beside the node, or arrive through an SSH tunnel that ends
-    /// here.
+    /// Sources separated by commas or spaces. `enrolled` is the members of
+    /// this leader's registry, from anywhere. Two words stand for sets of
+    /// networks: `private` is every RFC 1918 block, loopback and IPv6
+    /// unique-local, and `loopback` is this host alone -- the case where the
+    /// workers are processes beside the node, or arrive through an SSH tunnel
+    /// that ends here.
     pub fn parse(text: &str) -> Result<Fleet, FleetError> {
         let mut sources = Vec::new();
+        let mut enrolled = false;
         for item in text.split([',', ' ']).filter(|s| !s.trim().is_empty()) {
             match item.trim().to_ascii_lowercase().as_str() {
+                "enrolled" => enrolled = true,
                 "private" => {
                     for block in [
                         "10.0.0.0/8",
@@ -209,14 +224,15 @@ impl Fleet {
                 _ => sources.push(Cidr::parse(item)?),
             }
         }
-        if sources.is_empty() {
+        if sources.is_empty() && !enrolled {
             return Err(FleetError::Malformed {
                 text: text.to_string(),
-                why: "names no network; `private`, `loopback`, or CIDRs such as 10.0.0.0/8"
+                why: "names nobody to sign for; `enrolled` (machines you invite), \
+                      `private`, `loopback`, or CIDRs such as 10.0.0.0/8"
                     .to_string(),
             });
         }
-        Ok(Fleet { sources })
+        Ok(Fleet { sources, enrolled })
     }
 
     /// `CAIRN_FLEET`, or `None` when unset or empty.
@@ -232,18 +248,41 @@ impl Fleet {
         }
     }
 
-    /// Whether a request from `ip` is a fleet member's.
+    /// Whether a request from `ip` is signed for by its address alone.
     pub fn admits(&self, ip: IpAddr) -> bool {
         self.sources.iter().any(|cidr| cidr.contains(ip))
     }
 
+    /// Whether any address is trusted with no proof: the setting the leader
+    /// says out loud at start, because a network is not a credential.
+    pub fn trusts_networks(&self) -> bool {
+        !self.sources.is_empty()
+    }
+
+    /// `enrolled` first when it is on, then the networks: what a worker
+    /// reads at `GET /network` before it joins.
     pub fn to_value(&self) -> Value {
         Value::Array(
-            self.sources
-                .iter()
-                .map(|cidr| Value::string(cidr.to_string()))
+            self.enrolled
+                .then(|| Value::string("enrolled"))
+                .into_iter()
+                .chain(
+                    self.sources
+                        .iter()
+                        .map(|cidr| Value::string(cidr.to_string())),
+                )
                 .collect(),
         )
+    }
+
+    /// The sources as an operator wrote them, for messages.
+    pub fn describe(&self) -> String {
+        let mut words: Vec<String> = Vec::new();
+        if self.enrolled {
+            words.push("enrolled members".to_string());
+        }
+        words.extend(self.sources.iter().map(|cidr| cidr.to_string()));
+        words.join(", ")
     }
 }
 
@@ -398,6 +437,23 @@ mod tests {
         assert!(loopback.admits(ip("127.0.0.1")));
         assert!(loopback.admits(ip("::1")));
         assert!(!loopback.admits(ip("192.168.1.1")));
+
+        let enrolled = Fleet::parse("enrolled").unwrap();
+        assert!(enrolled.enrolled);
+        assert!(!enrolled.trusts_networks());
+        assert!(
+            !enrolled.admits(ip("127.0.0.1")),
+            "membership is proved, not located"
+        );
+        assert_eq!(
+            enrolled.to_value(),
+            Value::Array(vec![Value::string("enrolled")])
+        );
+        let both = Fleet::parse("Enrolled, loopback").unwrap();
+        assert!(both.enrolled && both.admits(ip("127.0.0.1")));
+        assert_eq!(both.to_value().as_array().unwrap().len(), 3);
+        assert_eq!(both.describe(), "enrolled members, 127.0.0.0/8, ::1/128");
+        assert!(!Fleet::parse("private").unwrap().enrolled);
 
         assert_eq!(Fleet::from_setting(None).unwrap(), None);
         assert_eq!(Fleet::from_setting(Some("")).unwrap(), None);

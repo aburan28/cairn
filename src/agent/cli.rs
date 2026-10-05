@@ -19,6 +19,7 @@ use super::sandbox::{Names, Preference, Sandboxes};
 use super::service::{self, Install};
 use super::{AgentError, DATA_ENV, DEFAULT_DATA_DIR, DEFAULT_INTERVAL_SECONDS};
 use crate::canonical::Value;
+use crate::fleet::auth::MemberFile;
 
 pub const NODES_ENV: &str = "CAIRN_AGENT_NODES";
 pub const NAME_ENV: &str = "CAIRN_AGENT_NAME";
@@ -43,6 +44,8 @@ USAGE
         [--name HOST] [--roles R,R] run jobs dropped into <data>/jobs/queue, each under
         [--data-dir DIR]            gVisor or Kata; the loop a service runs
         [--interval SECONDS] [--sandbox PREF] [--parallel N] [--once]
+        [--fleet FILE]              as an enrolled fleet member (`cairn fleet join`):
+                                    requests to its leader are signed, from any address
     exec (--image IMAGE | --rootfs DIR) [--sandbox PREF] [--cpus N] [--memory MB]
          [--gpus N] [--pids N] [--timeout SECONDS] [--network] [--env K=V]...
          [--input SRC[:TARGET]]... [--cwd DIR] [--objective ID --task T]
@@ -52,8 +55,11 @@ USAGE
     jobs [--data-dir DIR] [--json]  queued, running and finished jobs, with receipts
     install --node URL [--node URL]... [--name HOST] [--roles R,R] [--user USER]
             [--data-dir DIR] [--sandbox PREF] [--interval S] [--parallel N]
-            [--print] [--no-start]  write cairn-agent.service and its environment file,
-                                    create the user, enable and start it (root)
+            [--fleet FILE] [--print] [--no-start]
+                                    write cairn-agent.service and its environment file,
+                                    create the user, enable and start it (root); a member
+                                    file is handed over with LoadCredential=, never put
+                                    in the environment
     uninstall [--data-dir DIR] [--purge]
                                     stop, disable and remove the service; --purge also
                                     removes the data directory
@@ -69,6 +75,7 @@ ENVIRONMENT  (flags win; these are what the service's environment file sets)
     CAIRN_AGENT_ROLES      declared roles (executor)      CAIRN_AGENT_DATA       /var/lib/cairn-agent
     CAIRN_AGENT_SANDBOX    preference (auto)              CAIRN_AGENT_INTERVAL   seconds (60)
     CAIRN_AGENT_PARALLEL   jobs at once (1)
+    CAIRN_FLEET_FILE       a fleet member file, as --fleet
     CAIRN_AGENT_KATA_RUNTIME / CAIRN_AGENT_RUNSC_RUNTIME   the engine's names for them
     CAIRN_AGENT_ENGINE     prefer docker, podman or nerdctl when several answer
 
@@ -101,15 +108,15 @@ pub fn main(args: Vec<String>) -> i32 {
 // -- argument parsing -------------------------------------------------------------
 
 #[derive(Default, Debug)]
-struct Parsed {
+pub(crate) struct Parsed {
     values: BTreeMap<String, Vec<String>>,
     switches: Vec<String>,
-    positional: Vec<String>,
-    trailing: Vec<String>,
+    pub(crate) positional: Vec<String>,
+    pub(crate) trailing: Vec<String>,
 }
 
 impl Parsed {
-    fn one(&self, flag: &str) -> Option<&str> {
+    pub(crate) fn one(&self, flag: &str) -> Option<&str> {
         self.values
             .get(flag)
             .and_then(|v| v.last())
@@ -120,7 +127,7 @@ impl Parsed {
         self.values.get(flag).cloned().unwrap_or_default()
     }
 
-    fn switch(&self, flag: &str) -> bool {
+    pub(crate) fn switch(&self, flag: &str) -> bool {
         self.switches.iter().any(|s| s == flag)
     }
 
@@ -140,7 +147,11 @@ impl Parsed {
     }
 }
 
-fn parse(args: &[String], with_values: &[&str], switches: &[&str]) -> Result<Parsed, AgentError> {
+pub(crate) fn parse(
+    args: &[String],
+    with_values: &[&str],
+    switches: &[&str],
+) -> Result<Parsed, AgentError> {
     let mut parsed = Parsed::default();
     let mut items = args.iter();
     while let Some(item) = items.next() {
@@ -214,6 +225,41 @@ fn preference(parsed: &Parsed) -> Result<Preference, AgentError> {
 
 fn host_name(parsed: &Parsed, inventory: &Inventory) -> String {
     env_or(parsed.one("name"), NAME_ENV).unwrap_or_else(|| inventory.hostname.clone())
+}
+
+/// `--fleet FILE` or `$CAIRN_FLEET_FILE`, loaded: the member file's path and
+/// its contents.
+fn member_file(parsed: &Parsed) -> Result<Option<(PathBuf, MemberFile)>, AgentError> {
+    let Some(path) = env_or(parsed.one("fleet"), crate::fleet::cli::FILE_ENV) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    let file = MemberFile::load(&path).map_err(AgentError::Invalid)?;
+    Ok(Some((path, file)))
+}
+
+/// The nodes and the host name a member registers with: its leader is among
+/// the nodes (it is the only one when none is named), and the name is the
+/// member's own, which is the only one its leader lets it register under.
+fn as_member(
+    parsed: &Parsed,
+    member: &MemberFile,
+    mut nodes: Vec<NodeUrl>,
+) -> Result<(Vec<NodeUrl>, NodeUrl, String), AgentError> {
+    let leader = NodeUrl::parse(&member.node)?;
+    if !nodes.contains(&leader) {
+        nodes.push(leader.clone());
+    }
+    if let Some(name) = env_or(parsed.one("name"), NAME_ENV) {
+        if name != member.name {
+            return Err(AgentError::Invalid(format!(
+                "--name {name:?} is not this member's name; a fleet member registers as \
+                 {:?}, the name it joined under",
+                member.name
+            )));
+        }
+    }
+    Ok((nodes, leader, member.name.clone()))
 }
 
 fn roles(parsed: &Parsed) -> Result<Vec<String>, AgentError> {
@@ -382,6 +428,8 @@ struct Running {
 struct Loop {
     nodes: Vec<NodeUrl>,
     node_ok: Vec<bool>,
+    /// The fleet membership requests to its own leader are signed with.
+    member: Option<Member>,
     name: String,
     roles: Vec<String>,
     data: PathBuf,
@@ -395,7 +443,23 @@ struct Loop {
     failed: u64,
 }
 
+/// A member file and the leader URL it was issued for, parsed once.
+struct Member {
+    file: MemberFile,
+    node: NodeUrl,
+}
+
 impl Loop {
+    /// The member file to sign a request to `node` with: its own leader
+    /// only. A member key means nothing to another node, which would answer
+    /// a signed request with 401 rather than take it as anonymous.
+    fn signer(&self, node: &NodeUrl) -> Option<&MemberFile> {
+        self.member
+            .as_ref()
+            .filter(|member| member.node == *node)
+            .map(|member| &member.file)
+    }
+
     fn registration(&self) -> Value {
         let objectives: std::collections::BTreeSet<String> = self
             .running
@@ -433,7 +497,7 @@ impl Loop {
         let body = self.registration();
         let mut accepted = 0;
         for (index, node) in self.nodes.iter().enumerate() {
-            match http::post_json(node, "/hosts", &body, NODE_TIMEOUT) {
+            match http::post_json_as(node, "/hosts", &body, self.signer(node), NODE_TIMEOUT) {
                 Ok(response) if response.ok() => {
                     accepted += 1;
                     if !self.node_ok[index] {
@@ -494,7 +558,7 @@ impl Loop {
         };
         let mut held_on = Vec::new();
         for (index, node) in self.nodes.iter().enumerate() {
-            match http::post_json(node, "/lease", &body, NODE_TIMEOUT) {
+            match http::post_json_as(node, "/lease", &body, self.signer(node), NODE_TIMEOUT) {
                 Ok(response) if response.ok() => {
                     held_on.push(index);
                     if response.body.get("held") == Some(&Value::Bool(false)) {
@@ -536,7 +600,13 @@ impl Loop {
         ]);
         for index in on {
             if let Some(node) = self.nodes.get(*index) {
-                if let Err(error) = http::post_json(node, "/lease/release", &body, NODE_TIMEOUT) {
+                if let Err(error) = http::post_json_as(
+                    node,
+                    "/lease/release",
+                    &body,
+                    self.signer(node),
+                    NODE_TIMEOUT,
+                ) {
                     log::debug!("agent: release: {error}");
                 }
             }
@@ -736,11 +806,18 @@ fn run_loop(args: &[String], out: &mut impl io::Write) -> Result<i32, AgentError
     let parsed = parse(
         args,
         &[
-            "node", "name", "roles", "data-dir", "interval", "sandbox", "parallel",
+            "node", "name", "roles", "data-dir", "interval", "sandbox", "parallel", "fleet",
         ],
         &["once"],
     )?;
-    let nodes = nodes(&parsed)?;
+    let inventory = Inventory::probe();
+    let (nodes, member, name) = match member_file(&parsed)? {
+        Some((_, file)) => {
+            let (nodes, leader, name) = as_member(&parsed, &file, nodes(&parsed)?)?;
+            (nodes, Some(Member { file, node: leader }), name)
+        }
+        None => (nodes(&parsed)?, None, host_name(&parsed, &inventory)),
+    };
     if nodes.is_empty() {
         return Err(AgentError::Invalid(format!(
             "no node to register with: pass --node http://host:port or set {NODES_ENV}"
@@ -757,9 +834,7 @@ fn run_loop(args: &[String], out: &mut impl io::Write) -> Result<i32, AgentError
             .max(5),
     );
     let parallel = parsed.u64("parallel", Some(PARALLEL_ENV), 1)?.max(1) as usize;
-    let inventory = Inventory::probe();
     let sandboxes = Sandboxes::probe(&Names::from_env());
-    let name = host_name(&parsed, &inventory);
     let roles = roles(&parsed)?;
     let preference = preference(&parsed)?;
     let (completed, failed) = count_done(&data.join("jobs/done"));
@@ -794,9 +869,17 @@ fn run_loop(args: &[String], out: &mut impl io::Write) -> Result<i32, AgentError
             let _ = move_dir(&entry.path(), &data.join("jobs/done"));
         }
     }
+    if let Some(member) = &member {
+        log::info!(
+            "agent: a fleet member of {} as {:?}; requests to it are signed",
+            member.node.as_str(),
+            member.file.name
+        );
+    }
     let mut state = Loop {
         node_ok: vec![true; nodes.len()],
         nodes,
+        member,
         name,
         roles,
         data,
@@ -1095,18 +1178,27 @@ fn install(args: &[String], out: &mut impl io::Write) -> Result<i32, AgentError>
     let parsed = parse(
         args,
         &[
-            "node", "name", "roles", "user", "data-dir", "sandbox", "interval", "parallel",
+            "node", "name", "roles", "user", "data-dir", "sandbox", "interval", "parallel", "fleet",
         ],
         &["print", "no-start"],
     )?;
-    let nodes = nodes(&parsed)?;
+    let inventory = Inventory::probe();
+    let (nodes, fleet_file, name) = match member_file(&parsed)? {
+        Some((path, file)) => {
+            let (nodes, _, name) = as_member(&parsed, &file, nodes(&parsed)?)?;
+            // systemd reads the credential as root and hands the service a
+            // private copy; the unit names the path, never the secret.
+            let path = fs::canonicalize(&path)
+                .map_err(|e| AgentError::Io(format!("{}: {e}", path.display())))?;
+            (nodes, Some(path), name)
+        }
+        None => (nodes(&parsed)?, None, host_name(&parsed, &inventory)),
+    };
     if nodes.is_empty() {
         return Err(AgentError::Invalid(format!(
             "install needs at least one --node http://host:port (or {NODES_ENV})"
         )));
     }
-    let inventory = Inventory::probe();
-    let name = host_name(&parsed, &inventory);
     let roles = roles(&parsed)?;
     let preference = preference(&parsed)?;
     let interval = parsed.u64("interval", Some(INTERVAL_ENV), DEFAULT_INTERVAL_SECONDS)?;
@@ -1155,6 +1247,7 @@ fn install(args: &[String], out: &mut impl io::Write) -> Result<i32, AgentError>
         data_dir: data_dir.clone(),
         env,
         groups,
+        fleet_file,
     };
     if parsed.switch("print") {
         writeln!(out, "# {}\n{}", service::UNIT_PATH, plan.unit())?;

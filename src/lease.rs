@@ -129,6 +129,9 @@ pub struct Claim {
     pub epoch: Option<u64>,
     /// Anything the holder wants a reader to see beside the lease.
     pub note: Option<String>,
+    /// Whether an enrolled fleet member signed it. Set by the node after it
+    /// verified the signature, never read from the body.
+    pub member: bool,
 }
 
 /// What a worker posts to `POST /lease/release`.
@@ -266,6 +269,7 @@ impl Claim {
                 units,
                 epoch: count_field(object, "epoch")?,
                 note: text_field(object, "note", MAX_TEXT_LEN)?,
+                member: false,
             },
             ignored,
         ))
@@ -319,6 +323,8 @@ struct Lease {
     epoch: Option<u64>,
     note: Option<String>,
     released: Option<(u64, Outcome)>,
+    /// Whether the last claim or renewal was signed by an enrolled member.
+    member: bool,
 }
 
 impl Lease {
@@ -483,6 +489,7 @@ impl Leases {
                 lease.units = claim.units;
                 lease.epoch = claim.epoch;
                 lease.note = claim.note.clone();
+                lease.member = claim.member;
                 was_live
             }
             None => {
@@ -501,6 +508,7 @@ impl Leases {
                     epoch: claim.epoch,
                     note: claim.note.clone(),
                     released: None,
+                    member: claim.member,
                 });
                 false
             }
@@ -692,6 +700,7 @@ fn lease_value(lease: &Lease, status: &str, now: u64) -> Value {
                 None => Value::Null,
             },
         ),
+        ("member", Value::Bool(lease.member)),
     ])
 }
 
@@ -712,6 +721,7 @@ mod tests {
             units: None,
             epoch: None,
             note: None,
+            member: false,
         }
     }
 

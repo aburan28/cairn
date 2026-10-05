@@ -1,8 +1,10 @@
 # Fleet members: enrollment in place of network trust
 
-**Status: design only.** Nothing below is built. Stage 1 changes no record,
-hash or rule and can ship on its own; Stage 2 (§15) is a consensus change and
-needs its own review. Written against [fleet.md](../fleet.md) and
+**Status: Stage 1 is built** -- `src/fleet/`, `POST /fleet/join`, `cairn
+fleet`, `--fleet` on `cairn work`, `cairn agent` and `orbit_worker.py`, the
+units, `CAIRN_PORTMAP_HTTP`, and Cairn.app's Fleet settings; [fleet.md](../fleet.md)
+is how to use it. It changes no record, hash or rule. Stage 2 (§15) is a
+consensus change, needs its own review, and is not built. Written against [fleet.md](../fleet.md) and
 `src/fleet.rs`, which this revises, and against the threat-model row *a
 stranger on the fleet network*, which Stage 1 closes for any fleet that turns
 network trust off.

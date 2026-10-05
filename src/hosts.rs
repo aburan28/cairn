@@ -82,6 +82,9 @@ pub struct Registration {
     pub jobs: Value,
     /// Objectives the host is currently running jobs for.
     pub objectives: Vec<String>,
+    /// Whether an enrolled fleet member signed it. Set by the node after it
+    /// verified the signature, never read from the body.
+    pub member: bool,
 }
 
 /// Why a registration was refused.
@@ -192,6 +195,7 @@ impl Registration {
             sandboxes: object_field("sandboxes")?,
             jobs: object_field("jobs")?,
             objectives: names("objectives", MAX_OBJECTIVES)?,
+            member: false,
         };
         Ok((registration, ignored))
     }
@@ -471,6 +475,7 @@ impl Listed {
                 "objectives",
                 Value::array(reg.objectives.iter().map(|id| Value::string(id.clone()))),
             ),
+            ("member", Value::Bool(reg.member)),
         ])
     }
 }

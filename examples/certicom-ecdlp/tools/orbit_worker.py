@@ -58,9 +58,11 @@ import hashlib
 import json
 import os
 import secrets
+import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -72,12 +74,49 @@ CLIENT = "orbit_worker.py/1"
 # -- the node ------------------------------------------------------------------
 
 
+class Member:
+    """A fleet membership: the member file `cairn fleet join` wrote.
+
+    This file reads the file's public fields and never its secret. Each POST
+    is signed by `cairn fleet sign`, one subprocess per request, which builds
+    the request string itself and signs nothing else; Python big-integer
+    arithmetic is not constant-time, and a rented box has neighbours
+    (`docs/design/fleet-enrollment.md` §11).
+    """
+
+    def __init__(self, path, cairn="cairn"):
+        self.path = path
+        self.cairn = cairn
+        with open(path, encoding="utf-8") as handle:
+            text = json.load(handle)
+        self.node = text["node"]
+        self.leader = text["leader"]
+        self.name = text["name"]
+
+    def authorize(self, method, target, data):
+        result = subprocess.run(
+            [self.cairn, "fleet", "sign", "--member", self.path, "--method", method, "--target", target],
+            input=data or b"",
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"cairn fleet sign: {result.stderr.decode(errors='replace').strip()}")
+        return result.stdout.decode().strip()
+
+
 class Node:
     """The four HTTP calls, and nothing else about the node."""
 
-    def __init__(self, base, timeout=30):
+    def __init__(self, base, timeout=30, member=None):
         self.base = base.rstrip("/")
         self.timeout = timeout
+        self.member = member
+        # A signature covers the request-target as sent, so a member's
+        # requests go straight to the node: a proxy that rewrites the target
+        # into an absolute URI would break every one of them.
+        handlers = [urllib.request.ProxyHandler({})] if member else []
+        self.opener = urllib.request.build_opener(*handlers)
 
     def _call(self, method, path, body=None):
         data = None
@@ -85,9 +124,12 @@ class Node:
         if body is not None:
             data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode()
             headers["content-type"] = "application/json"
+        if self.member is not None and method == "POST":
+            target = (urllib.parse.urlsplit(self.base).path or "") + path
+            headers["authorization"] = self.member.authorize(method, target, data)
         request = urllib.request.Request(self.base + path, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self.opener.open(request, timeout=self.timeout) as response:
                 text = response.read().decode()
                 return response.status, (json.loads(text) if text else None)
         except urllib.error.HTTPError as error:
@@ -439,16 +481,24 @@ def say(text):
 
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--node", required=True, help="the node's HTTP address, e.g. http://127.0.0.1:8080")
+    parser.add_argument("--node", default=None,
+                        help="the node's HTTP address, e.g. http://127.0.0.1:8080 (with --fleet, the member file's)")
     parser.add_argument("--job", required=True, help="the version 2 search job document")
     parser.add_argument("--objective", required=True, help="the piecework objective id (sha256:...)")
-    parser.add_argument("--worker", required=True,
+    parser.add_argument("--worker", default=None,
                         help="your pseudonym: the node_id your work slice is drawn from, and the submitter "
-                             "on every record unless --submitter says otherwise")
+                             "on every record unless --submitter says otherwise. With --fleet, a suffix: "
+                             "gpu0 reports as <member name>/gpu0")
     parser.add_argument("--submitter", default=None,
-                        help="submit under this name instead of --worker. In a fleet this is the leader's "
-                             "`signs_as` id from GET /network: the leader signs the record and is paid for it, "
-                             "while --worker stays this worker's own so each walks its own slice")
+                        help="submit under this name instead of --worker. On a leader's trusted network this "
+                             "is its `signs_as` id: the leader signs the record and is paid for it, while "
+                             "--worker stays this worker's own so each walks its own slice")
+    parser.add_argument("--fleet", default=None,
+                        help="work as an enrolled fleet member, from any address: the member file "
+                             "`cairn fleet join` wrote. Records name its leader, which signs and is paid; "
+                             "every POST is signed through `cairn fleet sign`")
+    parser.add_argument("--cairn", default=os.environ.get("CAIRN_BIN", "cairn"),
+                        help="the cairn binary that signs for --fleet (default: $CAIRN_BIN, then `cairn`)")
     parser.add_argument("--partitions", type=int, default=8, help="how many ways the space is split (default 8)")
     parser.add_argument("--batch", type=int, default=0, help="orbits per claim (default: the job's max_batch)")
     parser.add_argument("--heartbeat", type=float, default=30.0, help="seconds between heartbeats (default 30)")
@@ -463,12 +513,28 @@ def main(argv):
     parser.add_argument("--device", default=None, help="what this worker runs on, for the roster")
     args = parser.parse_args(argv)
 
+    member = None
+    if args.fleet:
+        if args.submitter:
+            raise SystemExit("--fleet names the submitter already (the member file's leader); drop --submitter")
+        member = Member(args.fleet, args.cairn)
+        suffix = args.worker
+        if suffix and ("/" in suffix or "|" in suffix or " " in suffix):
+            raise SystemExit("with --fleet, --worker is a suffix such as gpu0: no `/`, `|` or spaces")
+        # The leader key comes from the file, never from the node (G3).
+        args.worker = f"{member.name}/{suffix}" if suffix else member.name
+        args.submitter = member.leader
+        args.node = args.node or member.node
+    if not args.node:
+        raise SystemExit("--node is required (or --fleet, whose member file names its leader)")
+    if not args.worker:
+        raise SystemExit("--worker is required")
     if "|" in args.worker or "|" in (args.submitter or ""):
         raise SystemExit("a worker or submitter name may not contain `|`: the commitment hash uses it as a separator")
     job = O.Job(O.load_job(args.job))
     say(f"{args.worker} on {job.job['name']} (job {job.id[:16]}…), batches of {args.batch or job.max_batch}, "
-        f"node {args.node}")
-    return Worker(args, job, Node(args.node)).run()
+        f"node {args.node}" + (f", a fleet member of {member.leader[:12]}…" if member else ""))
+    return Worker(args, job, Node(args.node, member=member)).run()
 
 
 if __name__ == "__main__":

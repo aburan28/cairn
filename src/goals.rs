@@ -836,6 +836,7 @@ mod tests {
                 steps_per_second: None,
                 epoch: None,
                 units: None,
+                member: false,
             },
             FleetWorker {
                 objective_id: "sha256:2".into(),
@@ -848,6 +849,7 @@ mod tests {
                 steps_per_second: None,
                 epoch: None,
                 units: None,
+                member: false,
             },
         ];
         let goals = group(

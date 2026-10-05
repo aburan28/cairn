@@ -205,10 +205,25 @@ Any K of K+M rebuild the file. [shards.md](shards.md).
 openable without the submitter. [censorship.md](censorship.md).
 
 **Fleet.** One leader node that holds the signing identity and is paid, and
-the host agents and workers on the operator's own network that hand it their
-records to sign (`CAIRN_FLEET`); optionally a few nodes that peer with each
-other and nobody else (`CAIRN_PEERS`). A worker never holds the key.
-[fleet.md](fleet.md).
+the machines that hand it their records to sign (`CAIRN_FLEET`): enrolled
+members from anywhere, or anything on a network the leader trusts; optionally
+a few nodes that peer with each other and nobody else (`CAIRN_PEERS`). A
+worker never holds the leader's key. [fleet.md](fleet.md).
+
+**Fleet member.** A machine enrolled with a leader: it joined once with an
+invite token and proves its own member key on every request
+(`Authorization: CairnMember …`), from any address. Its name, and every
+`name/…` under it, is reserved on the leader's rosters. Revocable at once,
+and able to expire by itself. [fleet.md](fleet.md).
+
+**Invite token.** `cairn-invite1.<leader key>.<invite seed>`, printed once by
+`cairn fleet invite`: the leader's key, which the member pins, and the seed of
+a key whose only use is to sign joins. A secret until it is used up or
+expires. [design/fleet-enrollment.md](design/fleet-enrollment.md).
+
+**Member file.** What `cairn fleet join` writes on the member, mode 0600: the
+leader's URL and key, the member's name and its key. `--fleet FILE` on `cairn
+work`, `cairn agent` and `orbit_worker.py`; `CAIRN_FLEET_FILE`.
 
 **Port mapping.** Asking the router in front of a node to forward its p2p port
 (NAT-PMP, then UPnP IGD; `CAIRN_PORTMAP`). What the router answers is a claim,

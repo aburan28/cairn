@@ -36,6 +36,7 @@ import {
   CopyButton,
   EmptyState,
   Hash,
+  MemberBadge,
   NodePicker,
   Note,
   PageHeader,
@@ -651,6 +652,7 @@ function WorkerLine({ row, total }: { row: WorkerRow; total: number }) {
     <tr className="align-top transition-colors hover:bg-surface-2">
       <td className="mono px-4 py-2.5 text-ink">
         {row.name}
+        <MemberBadge member={row.reported?.member} />
         {row.reported?.device && (
           <div className="text-[11px] text-ink-3">{row.reported.device}</div>
         )}

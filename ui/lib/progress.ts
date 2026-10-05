@@ -93,6 +93,8 @@ export type ReportedWorker = {
   device: string | null;
   lanes: number | null;
   client: string | null;
+  /** Signed by an enrolled fleet member. Absent on a node older than enrollment. */
+  member?: boolean;
 };
 
 export type Reported = {

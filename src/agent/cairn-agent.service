@@ -18,6 +18,7 @@ User={{USER}}
 Group={{GROUP}}
 SupplementaryGroups={{GROUPS}}
 EnvironmentFile=-{{ENV_FILE}}
+{{CREDENTIALS}}
 ExecStart={{EXEC}} agent run
 WorkingDirectory={{DATA}}
 Restart=on-failure

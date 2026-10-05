@@ -827,6 +827,12 @@ enum Command {
     Work {
         args: Vec<String>,
     },
+    /// Enroll the machines that work for a leader: invites, joins,
+    /// revocations, and signing for clients that cannot. Parses its own tail;
+    /// see `src/fleet/cli.rs`.
+    Fleet {
+        args: Vec<String>,
+    },
     /// Score candidate artifacts locally and submit only the ones that already
     /// pass. The proposer loop.
     Propose {
@@ -1506,6 +1512,9 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
             args: cursor.rest(),
         },
         "work" => Command::Work {
+            args: cursor.rest(),
+        },
+        "fleet" => Command::Fleet {
             args: cursor.rest(),
         },
         "canon" => {
@@ -4015,6 +4024,15 @@ fn print_help(out: &mut dyn Write) {
         "      a node and run executor jobs under gVisor or Kata, as a systemd",
     );
     say(out, "      service (`cairn agent help` lists its commands)");
+    say(out, "  fleet <command> ...");
+    say(
+        out,
+        "      enroll the machines that work for this node, from any address: invite,",
+    );
+    say(
+        out,
+        "      join, revoke; the leader signs for members (`cairn fleet help`)",
+    );
     say(out, "  blob [ls|need|publish|gc]");
     say(
         out,
@@ -4418,6 +4436,22 @@ fn print_version(out: &mut dyn Write) {
 // Commands
 // ---------------------------------------------------------------------------
 
+/// The log a node started here would use: `cmd_run`'s choice, so that
+/// `cairn fleet` finds the registry beside the log `cairn run` writes. The
+/// same `--data-dir` or `--log` before both commands names the same one.
+fn node_log(options: &Options) -> PathBuf {
+    if options.log == DEFAULT_LOG && !options.log_chosen {
+        let data = options
+            .data
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(".local"));
+        Store::new(&data).log_path()
+    } else {
+        PathBuf::from(&options.log)
+    }
+}
+
 /// What the daemon-shaped subcommands inherit from the global flags.
 ///
 /// `--log`, `--root`, `--data-dir` and `--key-file` before the command name
@@ -4473,11 +4507,7 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
     }
 
     let default_path = |name: &str| data.join(name);
-    let log = if options.log == DEFAULT_LOG && !options.log_chosen {
-        store.log_path()
-    } else {
-        PathBuf::from(&options.log)
-    };
+    let log = node_log(options);
     let identity = request
         .identity
         .as_ref()
@@ -9975,6 +10005,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Lab { args } => Ok(cairn::lab::cli::main(args.clone())),
         Command::Agent { args } => Ok(cairn::agent::cli::main(args.clone())),
         Command::Work { args } => Ok(cairn::agent::work::main(args.clone())),
+        Command::Fleet { args } => Ok(cairn::fleet::cli::main(args.clone(), &node_log(options))),
         Command::Propose {
             objective,
             artifacts,
@@ -12572,6 +12603,7 @@ mod tests {
             "store",
             "sync",
             "agent",
+            "fleet",
             "log",
             "help",
             "version",
