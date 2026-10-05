@@ -5,12 +5,12 @@
   "key_files": "seeds/<transport>.key, relative to this file: the hex transport public key, 522240 characters. The file is named by the sha256 of the bytes it decodes to, so `cairn seeds` checks the name against the content and refuses a mismatch.",
   "seeds": [
     {
-      "name": "us-west",
-      "addr": "44.251.117.84:9000",
-      "transport": "28706a3accf6dd86a22e56ba30b9d2e8727ec20a741cdb50a9baf32d848a1996",
+      "name": "tunnel",
+      "addr": "bore.pub:56276",
+      "transport": "f143e1152485a2a9402d947e2cfb31b756bcb16ed1b9a00ec13a4b942bf4df73",
       "http": "https://aburan28.github.io/cairn/node",
       "operator": "the repository maintainer",
-      "note": "Key published by `cairn seeds publish` on the seed host and added by pull request; the file beside this list is named for the sha256 of its bytes and `cairn seeds resolve` re-derives that id before writing a bootstrap file. p2p dials addr directly and the handshake decides who answered. The http half is a mirror, not a live endpoint: the node serves plain HTTP and terminates no TLS by design, so workflows/node-sync.yml pulls its read endpoints every five minutes and re-serves them under /node/ on this site. The site is therefore at most one interval behind, and the reader re-derives the log either way -- it is hash-linked and carries a signed checkpoint. While the node is down the site keeps the last copy; before the first sync it serves nothing under /node/ and the reader falls back to the bundled launch log, labeled as such."
+      "note": "Replaces us-west at 44.251.117.84, which stopped answering. p2p dials bore.pub:56276; on 2026-10-05 a second node reached that address and the seed handed over the key named here. The port is a bore.pub forward onto the node, and the HTTPS reader in front of the same node is https://auto-controls-healing-player.trycloudflare.com . Neither forward is a leased address: both end when the process behind them stops, and the next process gets a new port and a new tunnel name. The http field stays the GitHub Pages mirror so a browser does not treat an empty fresh log as the published snapshot. That mirror is filled by node-sync from a durable node; until then /node/health is not the text ok and the site keeps the bundled launch log. The handshake still decides who answered."
     }
   ]
 }
