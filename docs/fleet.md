@@ -70,6 +70,12 @@ python3 examples/certicom-ecdlp/tools/orbit_worker.py \
   --worker gpu-box-1 --submitter $(curl -s http://10.0.0.5:8080/network | python3 -c 'import json,sys; print(json.load(sys.stdin)["node"]["fleet"]["signs_as"])')
 ```
 
+Fetch `signs_as` that way only across a network you trust. The HTTP side is
+plaintext, so anyone who can rewrite that one response can put their own key
+in it, and then sign and collect everything the worker submits. Across
+anything you do not control, copy the id from the leader's Settings or from
+`GET /network` run on the leader itself.
+
 Any other search takes the same two names through `cairn work`, which wraps a
 solver you supply in the assignment, heartbeat and commit/reveal clock:
 
@@ -193,6 +199,8 @@ the reason to think twice.
   roams, and why the tunnel is not optional across the internet. A signed
   record still proves nothing: a bad claim is rejected by the verifier and
   costs the leader its standing, not its balance.
+  [design/fleet-enrollment.md](design/fleet-enrollment.md) is the design
+  that replaces this with per-machine enrollment.
 - **No dispatcher.** The leader hands out no work. Each worker derives its
   slice from its own name and the epoch, as [coordination.md](coordination.md)
   explains; the host agent's spool is filled by whatever the operator trusts
