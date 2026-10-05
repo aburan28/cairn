@@ -5902,7 +5902,20 @@ mod tests {
         assert!(first < end && end <= 4096, "{first}..{end}");
         // A quarter of the space, give or take the last partition's remainder.
         assert!((end - first - 1024).abs() <= 1, "{first}..{end}");
-        assert_eq!(get_json(addr, &route).1, body, "fixed for the epoch");
+        // `epoch_ends_in_seconds` is a countdown from the clock, so two reads
+        // a second apart differ while the slice, which is what this asserts,
+        // does not.
+        let stable = |mut value: Value| {
+            if let Value::Object(fields) = &mut value {
+                fields.remove("epoch_ends_in_seconds");
+            }
+            value
+        };
+        assert_eq!(
+            stable(get_json(addr, &route).1),
+            stable(body),
+            "fixed for the epoch"
+        );
 
         // Every expected partition is reached by some node, and the ranges tile.
         let mut ranges: Vec<(i128, i128)> = (0..64)
