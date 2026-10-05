@@ -78,6 +78,10 @@ sleep 4
 echo '{"n": 626331}'
 SH
 chmod +x "$WORK/solver.sh"
+# /submit queues records for the daemon's five-second drain tick. Start this
+# round just after an epoch opens so the commitment can enter the log before
+# the next boundary; otherwise a late queue receipt can look like a commit.
+sleep "$(python3 -c 'import os,time; n=int(os.environ["CAIRN_EPOCH_SECONDS"]); print(n - time.time() % n + 0.2)')"
 "$RUST" work --node "$BASE" --objective "$OID" --worker garage --device "demo box" \
   --rounds 1 --heartbeat 1 --margin 2 -- "$WORK/solver.sh" >"$WORK/worker.log" 2>&1 &
 WORKER_PID=$!
@@ -129,6 +133,7 @@ for line in sys.stdin:
     r=json.loads(line)
     if r["kind"]=="verdict":
         v=r["payload"]["verdict"]; print("  verdict:", v["status"], "-", v.get("detail",""))' >&2
+  cat "$WORK/node.log" >&2
   fail "no settlement paid the worker (an unavailable verdict is this host's checker, not the worker; try PATH=/usr/bin:\$PATH)"
 fi
 echo "  garage was paid $PAID"
