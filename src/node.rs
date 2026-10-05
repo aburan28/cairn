@@ -737,6 +737,33 @@ pub enum RuleViolation {
     Ledger(LedgerError),
 }
 
+impl RuleViolation {
+    /// The rule's name in snake_case -- `epoch_already_settled` for
+    /// [`RuleViolation::EpochAlreadySettled`] -- for a client to branch on
+    /// beside the sentence `Display` writes. Read off the variant's own name,
+    /// so a rule added later names itself, and a renamed variant is a renamed
+    /// reason, which a reviewer sees in the diff.
+    pub fn code(&self) -> String {
+        let debug = format!("{self:?}");
+        let name = debug
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .next()
+            .unwrap_or("");
+        let mut code = String::with_capacity(name.len() + 8);
+        for (i, c) in name.chars().enumerate() {
+            if c.is_ascii_uppercase() {
+                if i > 0 {
+                    code.push('_');
+                }
+                code.push(c.to_ascii_lowercase());
+            } else {
+                code.push(c);
+            }
+        }
+        code
+    }
+}
+
 impl fmt::Display for RuleViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -8734,6 +8761,26 @@ mod tests {
 
     use crate::frontier::Direction;
     use crate::records::commitment_hash;
+
+    #[test]
+    fn a_rule_violation_names_itself_in_snake_case() {
+        assert_eq!(
+            RuleViolation::NoMatchingCommitment.code(),
+            "no_matching_commitment"
+        );
+        assert_eq!(
+            RuleViolation::MalformedTimestamp {
+                record: "claim",
+                value: "yesterday".into()
+            }
+            .code(),
+            "malformed_timestamp"
+        );
+        assert_eq!(
+            RuleViolation::EpochAlreadySettled { epoch: 7 }.code(),
+            "epoch_already_settled"
+        );
+    }
 
     const TS: &str = "2026-07-28T00:00:00+00:00";
     /// A Lean binary name guaranteed not to exist, so `lean` verification is

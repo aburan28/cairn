@@ -683,6 +683,108 @@ pub fn known_value(known: &Known) -> Value {
     Value::object(fields)
 }
 
+// -- where compute is scarce ---------------------------------------------------------
+
+/// An angle with open reward and few workers on it: the view that sends
+/// compute where it is scarce rather than where it already is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Underserved {
+    pub goal_key: String,
+    pub goal_name: String,
+    /// The angle's path; empty for objectives whose goal names no approach.
+    pub angle: String,
+    /// The goal handle to post or work under, angle included.
+    pub handle: String,
+    pub open_objectives: usize,
+    /// Reward still payable on the angle's open objectives, in units.
+    pub open_reward: u128,
+    /// Workers heartbeating to those objectives now.
+    pub live_workers: u64,
+    /// `open_reward / (live_workers + 1)`, rounded down: what the open reward
+    /// comes to per worker if one more joins. The one more is whoever reads
+    /// this, and it keeps an angle nobody works from dividing by zero.
+    pub reward_per_worker: u128,
+    /// The angle's open objective ids, richest first.
+    pub objectives: Vec<String>,
+}
+
+/// Every angle with reward still open, richest per worker first.
+///
+/// Ties break by open reward, then by fewer live workers, then by goal key and
+/// angle path, so a listing is stable across reads. Integer arithmetic only:
+/// the figure is a ranking, never a payment, and two readers of one log and
+/// one roster must rank alike. `live_workers` is the heartbeat roster's,
+/// self-reported and unverified, so a stranger can make an angle look busy;
+/// the worst that buys is that this list steers fewer workers there.
+pub fn underserved(goals: &[Goal]) -> Vec<Underserved> {
+    let mut rows: Vec<Underserved> = Vec::new();
+    for goal in goals {
+        for angle in &goal.angles {
+            let mut open: Vec<&Entry> = angle
+                .objectives
+                .iter()
+                .filter(|e| !e.settled && e.reward > 0)
+                .collect();
+            if open.is_empty() {
+                continue;
+            }
+            open.sort_by(|a, b| b.reward.cmp(&a.reward).then_with(|| a.id.cmp(&b.id)));
+            let open_reward: u128 = open.iter().map(|e| u128::from(e.reward)).sum();
+            let live_workers: u64 = open.iter().map(|e| e.live_workers).sum();
+            let segments: Vec<&str> = angle.segments.iter().map(String::as_str).collect();
+            rows.push(Underserved {
+                goal_key: goal.key.clone(),
+                goal_name: goal.name.clone(),
+                angle: angle.path.clone(),
+                handle: Handle::compose(&goal.key, &segments),
+                open_objectives: open.len(),
+                open_reward,
+                live_workers,
+                reward_per_worker: open_reward / (u128::from(live_workers) + 1),
+                objectives: open.iter().map(|e| e.id.clone()).collect(),
+            });
+        }
+    }
+    rows.sort_by(|a, b| {
+        b.reward_per_worker
+            .cmp(&a.reward_per_worker)
+            .then_with(|| b.open_reward.cmp(&a.open_reward))
+            .then_with(|| a.live_workers.cmp(&b.live_workers))
+            .then_with(|| a.goal_key.cmp(&b.goal_key))
+            .then_with(|| a.angle.cmp(&b.angle))
+    });
+    rows
+}
+
+/// One row of [`underserved`], as `GET /goals` lists it.
+pub fn underserved_value(row: &Underserved) -> Value {
+    Value::object([
+        ("goal", Value::string(row.goal_key.clone())),
+        ("goal_name", Value::string(row.goal_name.clone())),
+        ("angle", Value::string(row.angle.clone())),
+        ("handle", Value::string(row.handle.clone())),
+        ("open_objectives", Value::Int(row.open_objectives as i128)),
+        (
+            "open_reward",
+            Value::Int(i128::try_from(row.open_reward).unwrap_or(i128::MAX)),
+        ),
+        ("live_workers", Value::Int(i128::from(row.live_workers))),
+        (
+            "reward_per_worker",
+            Value::Int(i128::try_from(row.reward_per_worker).unwrap_or(i128::MAX)),
+        ),
+        (
+            "objectives",
+            Value::Array(
+                row.objectives
+                    .iter()
+                    .map(|id| Value::string(id.clone()))
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
 /// A search result row: the goal, and how it matched.
 pub fn found_value(rank: Match, found: &FoundGoal<'_>) -> Value {
     let mut value = match found {
@@ -704,6 +806,89 @@ pub fn found_value(rank: Match, found: &FoundGoal<'_>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(id: &str, reward: u64, settled: bool, live: u64) -> Entry {
+        Entry {
+            id: id.into(),
+            goal: String::new(),
+            statement_excerpt: String::new(),
+            verifier_kind: "certificate".into(),
+            reward,
+            funder: "f".into(),
+            settled,
+            live_workers: live,
+        }
+    }
+
+    fn angle(path: &str, objectives: Vec<Entry>) -> Angle {
+        Angle {
+            path: path.into(),
+            segments: path
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
+            objectives,
+        }
+    }
+
+    #[test]
+    fn underserved_angles_rank_open_reward_per_worker_and_skip_what_is_paid() {
+        let goals = vec![
+            Goal {
+                key: "ecc2k130".into(),
+                name: "ECC2K-130".into(),
+                handles: vec!["GOAL-ecc2k130".into()],
+                known: None,
+                angles: vec![
+                    // Rich but crowded: 900 over 8 workers (+1) is 100 each.
+                    angle("rho/gpu", vec![entry("a", 900, false, 8)]),
+                    // Poorer but empty: 300 over nobody (+1) is 300 each.
+                    angle(
+                        "rho/fpga",
+                        vec![entry("b", 200, false, 0), entry("c", 100, false, 0)],
+                    ),
+                    // Paid out: nothing open, so not listed at all.
+                    angle("index-calculus", vec![entry("d", 5000, true, 0)]),
+                ],
+            },
+            Goal {
+                key: "capset".into(),
+                name: "Cap sets".into(),
+                handles: vec![],
+                known: None,
+                angles: vec![
+                    // Ties the fpga angle per worker; more open reward wins.
+                    angle("", vec![entry("e", 600, false, 1), entry("f", 0, false, 0)]),
+                ],
+            },
+        ];
+        let rows = underserved(&goals);
+        let order: Vec<(&str, &str, u128)> = rows
+            .iter()
+            .map(|r| (r.goal_key.as_str(), r.angle.as_str(), r.reward_per_worker))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("capset", "", 300),
+                ("ecc2k130", "rho/fpga", 300),
+                ("ecc2k130", "rho/gpu", 100),
+            ]
+        );
+        let fpga = &rows[1];
+        assert_eq!(fpga.objectives, vec!["b".to_string(), "c".to_string()]);
+        assert_eq!(fpga.handle, "GOAL-ecc2k130/rho/fpga");
+        assert_eq!(
+            rows[0].objectives,
+            vec!["e".to_string()],
+            "a zero reward is not open reward"
+        );
+        let value = underserved_value(fpga);
+        assert_eq!(value.get("reward_per_worker").unwrap().as_u64(), Some(300));
+        assert_eq!(value.get("live_workers").unwrap().as_u64(), Some(0));
+        assert!(underserved(&[]).is_empty());
+    }
 
     fn objective(goal: &str, statement: &str, reward: u64) -> Objective {
         let mut value = Value::object([

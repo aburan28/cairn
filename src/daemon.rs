@@ -76,7 +76,7 @@ use crate::verifiers::VerifierRegistry;
 const BEACONS_PER_TICK: usize = 64;
 
 /// Seconds between sync rounds.
-const TICK_SECONDS: u64 = 5;
+pub const TICK_SECONDS: u64 = 5;
 
 /// Ticks between LAN beacon announcements.
 const BEACON_EVERY_TICKS: u64 = multicast::INTERVAL_SECONDS.div_ceil(TICK_SECONDS);

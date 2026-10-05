@@ -1178,7 +1178,9 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     let body = if request.method == "POST" && MEMBER_ROUTES.contains(&request.path.as_str()) {
         match read_body(&mut reader, &request) {
             Ok(body) => Some(body),
-            Err((status, message)) => return json_error(stream, status, &message),
+            Err((status, message)) => {
+                return json_refusal(stream, &Refusal::new(status, "bad_body", message))
+            }
         }
     } else {
         None
@@ -1221,17 +1223,18 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         && request.path != "/fleet/join"
         && !host_may_write(request.host.as_deref(), &allowed_hosts())
     {
-        return respond(
+        return json_refusal(
             stream,
-            421,
-            "application/json",
-            error_body(&format!(
-                "this node does not accept writes addressed to {:?}; a public DNS name is \
-                 how a web page rebinds itself onto a local node. Address it by IP, \
-                 localhost or a LAN name, or list the name in {ALLOWED_HOSTS_ENV}",
-                request.host.as_deref().unwrap_or("")
-            ))
-            .as_bytes(),
+            &Refusal::new(
+                421,
+                "host_not_allowed",
+                format!(
+                    "this node does not accept writes addressed to {:?}; a public DNS name is \
+                     how a web page rebinds itself onto a local node. Address it by IP, \
+                     localhost or a LAN name, or list the name in {ALLOWED_HOSTS_ENV}",
+                    request.host.as_deref().unwrap_or("")
+                ),
+            ),
         );
     }
 
@@ -1670,6 +1673,19 @@ fn goals_index(stream: &mut TcpStream, serving: &Serving, request: &Request) -> 
                     Value::Array(grouped.iter().map(goals::goal_value).collect()),
                 ),
                 ("total", Value::Int(grouped.len() as i128)),
+                // Where compute is scarce: open reward per live worker, by
+                // angle, richest first. A ranking from the same two sources as
+                // the rest of this answer, never a payment.
+                (
+                    "underserved",
+                    Value::Array(
+                        goals::underserved(&grouped)
+                            .iter()
+                            .take(UNDERSERVED_SHOWN)
+                            .map(goals::underserved_value)
+                            .collect(),
+                    ),
+                ),
                 (
                     "catalog",
                     Value::object([
@@ -1691,6 +1707,10 @@ fn goals_index(stream: &mut TcpStream, serving: &Serving, request: &Request) -> 
         ),
     }
 }
+
+/// How many underserved angles `GET /goals` lists: enough to choose from,
+/// few enough that the list says where the scarcity is.
+const UNDERSERVED_SHOWN: usize = 10;
 
 /// One goal by key or alias, with every angle and objective under it.
 fn goal_of(stream: &mut TcpStream, serving: &Serving, key: &str) -> io::Result<()> {
@@ -3513,15 +3533,20 @@ fn submit(
     verified: Option<&Verified>,
 ) -> io::Result<()> {
     let Some(spool) = &serving.spool else {
-        return json_error(
+        return json_refusal(
             stream,
-            405,
-            "this node is read-only; it accepts no submissions",
+            &Refusal::new(
+                405,
+                "read_only",
+                "this node is read-only; it accepts no submissions",
+            ),
         );
     };
     let value = match json_body(body, request, "/submit") {
         Ok(value) => value,
-        Err((status, message)) => return json_error(stream, status, &message),
+        Err((status, message)) => {
+            return json_refusal(stream, &Refusal::new(status, "bad_body", message))
+        }
     };
 
     // The kind comes from the query string or the record's own `type`, and is
@@ -3535,13 +3560,15 @@ fn submit(
         .or_else(|| value.get("type").and_then(Value::as_str).map(String::from))
         .unwrap_or_else(|| "claim".to_string());
 
+    let malformed =
+        |why: String| Refusal::new(400, "malformed", format!("record is malformed: {why}"));
     let decoded = match kind.as_str() {
         "claim" => Claim::from_value(&value)
             .map(|_| ())
-            .map_err(|e| e.to_string()),
+            .map_err(|e| malformed(e.to_string())),
         "commitment" => Commitment::from_value(&value)
             .map(|_| ())
-            .map_err(|e| e.to_string()),
+            .map_err(|e| malformed(e.to_string())),
         // An objective is a *proposal to spend*, so the one thing worth
         // checking here is the thing a submitter cannot fix later: the funding
         // authorization. `post_objective` checks it again at drain time
@@ -3554,19 +3581,30 @@ fn submit(
         // a log with no declared supply is a bounty anyone may post; on one
         // with a supply, `post_objective` refuses the nickname outright.
         "objective" => Objective::from_value(&value)
-            .map_err(|e| e.to_string())
+            .map_err(|e| malformed(e.to_string()))
             .and_then(|objective| {
-                objective
-                    .verify_funding_signature()
-                    .map_err(|e| e.to_string())
+                objective.verify_funding_signature().map_err(|e| {
+                    Refusal::new(
+                        400,
+                        "bad_funding_signature",
+                        format!(
+                            "record is malformed: {e}. Sign the bytes POST /objective/prepare \
+                             returns for this draft, with the key the funder names"
+                        ),
+                    )
+                })
             }),
-        other => Err(format!(
-            "unknown record kind {other:?}; this endpoint accepts \"objective\", \
-             \"commitment\" and \"claim\""
+        other => Err(Refusal::new(
+            400,
+            "unknown_kind",
+            format!(
+                "unknown record kind {other:?}; this endpoint accepts \"objective\", \
+                 \"commitment\" and \"claim\""
+            ),
         )),
     };
-    if let Err(why) = decoded {
-        return json_error(stream, 400, &format!("record is malformed: {why}"));
+    if let Err(refusal) = decoded {
+        return json_refusal(stream, &refusal);
     }
 
     // A fleet leader signs its workers' records here, before the gate and the
@@ -3585,10 +3623,13 @@ fn submit(
         _ => Ok(()),
     };
     if let Err(why) = gate {
-        return json_error(
+        return json_refusal(
             stream,
-            400,
-            &format!("record does not satisfy its schema: {why}"),
+            &Refusal::new(
+                400,
+                "schema",
+                format!("record does not satisfy its schema: {why}"),
+            ),
         );
     }
 
@@ -3608,12 +3649,15 @@ fn submit(
                     log::warn!("fleet: cannot journal {id} for {}: {error}", member.name);
                 }
             }
+            let wait = wait_for(serving, &kind, &value, crate::time::unix_seconds());
             json(
                 stream,
                 202,
                 &Value::object([
+                    ("reason", Value::string("queued")),
                     ("queued", Value::string(id)),
                     ("kind", Value::string(kind)),
+                    ("wait", wait),
                     (
                         "signed_as",
                         match signed_as {
@@ -3644,13 +3688,77 @@ fn submit(
         // 429, not 500: a full queue is a fact about how recently the
         // operator drained, not a broken node, and the submitter should
         // retry rather than assume their work is unwelcome.
-        Err(OfferError::Full(full)) => json_error(stream, 429, &full.to_string()),
-        Err(OfferError::Io(error)) => json_error(
+        Err(OfferError::Full(full)) => {
+            json_refusal(stream, &Refusal::new(429, "queue_full", full.to_string()))
+        }
+        Err(OfferError::Io(error)) => json_refusal(
             stream,
-            500,
-            &format!("cannot queue the submission: {error}"),
+            &Refusal::new(
+                500,
+                "internal",
+                format!("cannot queue the submission: {error}"),
+            ),
         ),
     }
+}
+
+/// What a queued record waits for, in fields a client can act on without
+/// reading the note: who drains the queue and how often, the epoch now and
+/// how long it has left, the epoch the record claims, and for a commitment
+/// the epoch its reveal becomes admissible in.
+///
+/// `at_risk` says the record may be refused at drain time for its epoch: it
+/// claims another epoch than this one, or this one ends before the next
+/// drain. Admission checks a commitment's or claim's epoch against the epoch
+/// it is drained in, so a record queued in an epoch's last seconds lands in
+/// the next and is refused, which is why `cairn work` posts nothing in an
+/// epoch's last eight seconds.
+fn wait_for(serving: &Serving, kind: &str, value: &Value, now: u64) -> Value {
+    let length = epoch_seconds();
+    let epoch = epoch_of(now, length);
+    let ends_in = length - now % length;
+    // A daemon drains its own queue every tick; a plain publisher's queue is
+    // drained by the operator, on no schedule this process knows.
+    let every = serving
+        .sessions
+        .is_some()
+        .then_some(crate::daemon::TICK_SECONDS);
+    let int = |n: u64| Value::Int(i128::from(n));
+    let mut fields: Vec<(&'static str, Value)> = vec![
+        ("for", Value::string("admission")),
+        (
+            "drained_by",
+            Value::string(if every.is_some() {
+                "this node"
+            } else {
+                "the operator (cairn drain, or a daemon on this queue)"
+            }),
+        ),
+        ("drain_every_seconds", every.map(int).unwrap_or(Value::Null)),
+        ("epoch", int(epoch)),
+        ("epoch_seconds", int(length)),
+        ("epoch_ends_in_seconds", int(ends_in)),
+    ];
+    if matches!(kind, "commitment" | "claim") {
+        let claimed = value
+            .get("created_at")
+            .and_then(Value::as_str)
+            .and_then(crate::time::parse_rfc3339)
+            .and_then(|t| u64::try_from(t).ok())
+            .map(|t| epoch_of(t, length));
+        let late = every.is_some_and(|every| ends_in <= every);
+        fields.push(("record_epoch", claimed.map(int).unwrap_or(Value::Null)));
+        fields.push(("at_risk", Value::Bool(claimed != Some(epoch) || late)));
+        if kind == "commitment" {
+            let reveal = claimed.unwrap_or(epoch).saturating_add(1);
+            fields.push(("reveal_from_epoch", int(reveal)));
+            fields.push((
+                "reveal_in_seconds",
+                int(reveal.saturating_mul(length).saturating_sub(now)),
+            ));
+        }
+    }
+    Value::object(fields)
 }
 
 /// Issue a short-lived upload grant against a node-local deposit.
@@ -6330,6 +6438,130 @@ mod tests {
         );
         let (_, leases) = get_json(fleet.addr, &format!("/leases/{}", fleet.objective_id));
         assert!(leases.canonical_string().contains(r#""member":true"#));
+    }
+
+    #[test]
+    fn every_submission_answer_carries_a_machine_readable_reason() {
+        let dir = TempDir::new("submit-reasons");
+        let (log, objective_id) = orbit_search_log(&dir);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")))
+            .accepting_into(dir.path.join("queue"))
+            .with_max_queued(1);
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let commitment = |tail: char| {
+            Value::object([
+                ("type", Value::string("commitment")),
+                ("objective_id", Value::string(objective_id.clone())),
+                ("submitter", Value::string("reasons-test")),
+                (
+                    "hash",
+                    Value::string(format!("sha256:{}", tail.to_string().repeat(64))),
+                ),
+                (
+                    "created_at",
+                    Value::string(crate::time::format_iso8601_utc(
+                        crate::time::unix_seconds() as i64
+                    )),
+                ),
+            ])
+            .canonical_string()
+        };
+        let post = |target: &str, body: &str| ask_raw(addr, "POST", target, &[], body.as_bytes());
+
+        // Queued, with what it waits for.
+        let (status, body) = post("/submit?kind=commitment", &commitment('1'));
+        assert!(status.contains("202"), "{status} {body:?}");
+        assert_eq!(reason(&body), Some("queued"));
+        let wait = body.get("wait").expect("a wait block");
+        assert_eq!(wait.get("for").unwrap().as_str(), Some("admission"));
+        assert_eq!(
+            wait.get("drain_every_seconds"),
+            Some(&Value::Null),
+            "no daemon here"
+        );
+        let record_epoch = wait.get("record_epoch").unwrap().as_u64().unwrap();
+        assert_eq!(
+            wait.get("reveal_from_epoch").unwrap().as_u64(),
+            Some(record_epoch + 1)
+        );
+        let epoch = wait.get("epoch").unwrap().as_u64().unwrap();
+        assert_eq!(
+            wait.get("at_risk"),
+            Some(&Value::Bool(record_epoch != epoch)),
+            "at risk only when the record claims another epoch"
+        );
+
+        // Every refusal names itself.
+        for (target, payload, want_status, want_reason) in [
+            (
+                "/submit?kind=commitment",
+                commitment('2'),
+                "429",
+                "queue_full",
+            ),
+            (
+                "/submit?kind=banana",
+                "{}".to_string(),
+                "400",
+                "unknown_kind",
+            ),
+            (
+                "/submit?kind=commitment",
+                r#"{"type":"commitment"}"#.to_string(),
+                "400",
+                "malformed",
+            ),
+            (
+                "/submit?kind=commitment",
+                "not json".to_string(),
+                "400",
+                "bad_body",
+            ),
+            (
+                "/submit?kind=objective",
+                draft(&Identity::from_secret_bytes([3u8; 32]).submitter_id()).canonical_string(),
+                "400",
+                "bad_funding_signature",
+            ),
+        ] {
+            let (status, body) = post(target, &payload);
+            assert!(status.contains(want_status), "{target}: {status} {body:?}");
+            assert_eq!(reason(&body), Some(want_reason), "{target}: {body:?}");
+            assert!(
+                body.get("error").and_then(Value::as_str).is_some(),
+                "the words stay too"
+            );
+        }
+        let (status, body) = ask_raw(
+            addr,
+            "POST",
+            "/submit?kind=commitment",
+            &[("Host", "rebound.example.com")],
+            commitment('3').as_bytes(),
+        );
+        assert!(status.contains("421"), "{status}");
+        assert_eq!(reason(&body), Some("host_not_allowed"));
+
+        // A node that queues nothing says so in a word too.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let read_only = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let (status, body) = ask_raw(
+            read_only,
+            "POST",
+            "/submit?kind=commitment",
+            &[],
+            commitment('4').as_bytes(),
+        );
+        assert!(status.contains("405"), "{status}");
+        assert_eq!(reason(&body), Some("read_only"));
     }
 
     #[test]

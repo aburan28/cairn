@@ -69,6 +69,46 @@ use crate::records::{commitment_hash, Claim, Commitment};
 const CLIENT: &str = concat!("cairn-work/", env!("CARGO_PKG_VERSION"));
 const NODE_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Refusals no retry and no later round can change, by their machine-readable
+/// `reason`: the node takes nothing from this worker as it is configured.
+/// Stopping says so once, where carrying on would fail every round in the
+/// same words.
+const FATAL_REASONS: [&str; 10] = [
+    "read_only",
+    "host_not_allowed",
+    "not_a_member",
+    "enrollment_off",
+    "member_unknown",
+    "member_revoked",
+    "member_expired",
+    "bad_signature",
+    "malformed_authorization",
+    "clock_skew",
+];
+
+/// Why the node refused, as its `reason`, when the reason means stop.
+fn fatal(response: &http::Response) -> Option<&str> {
+    response
+        .body
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|reason| FATAL_REASONS.contains(reason))
+}
+
+/// Say so when the node thinks a queued record may miss its epoch.
+fn warn_if_at_risk(response: &http::Response, what: &str) {
+    let wait = response.body.get("wait");
+    if wait.and_then(|w| w.get("at_risk")) == Some(&Value::Bool(true)) {
+        say(&format!(
+            "the node queued this {what} but says it may be refused for its epoch (it ends in \
+             {} s); a later round will try again",
+            wait.and_then(|w| w.get("epoch_ends_in_seconds"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ));
+    }
+}
+
 /// Post nothing in the last few seconds of an epoch: the node drains its queue
 /// every five, and a commitment admitted after the boundary lands in the next
 /// epoch, which would make its reveal one epoch later than planned.
@@ -667,6 +707,7 @@ impl Worker {
             )?;
             match response.status {
                 202 | 200 => {
+                    warn_if_at_risk(&response, "commitment");
                     self.committed += 1;
                     self.pending.push(Pending {
                         epoch,
@@ -685,6 +726,13 @@ impl Worker {
                     }
                 }
                 _ => {
+                    if let Some(reason) = fatal(&response) {
+                        return Err(AgentError::Node(format!(
+                            "the node refused this worker's commitment ({reason}): {}",
+                            response.error_text()
+                        ))
+                        .into());
+                    }
                     say(&format!("commitment refused: {}", response.error_text()));
                     return Ok(());
                 }
@@ -744,7 +792,16 @@ impl Worker {
                     say("the node's queue is full; holding the reveal");
                     self.pending.push(pending);
                 }
-                _ => say(&format!("reveal refused: {}", response.error_text())),
+                _ => {
+                    if let Some(reason) = fatal(&response) {
+                        return Err(AgentError::Node(format!(
+                            "the node refused this worker's reveal ({reason}): {}",
+                            response.error_text()
+                        ))
+                        .into());
+                    }
+                    say(&format!("reveal refused: {}", response.error_text()));
+                }
             }
         }
         Ok(())
@@ -840,6 +897,32 @@ mod tests {
         ))
         .unwrap_err();
         assert!(error.contains('|'), "{error}");
+    }
+
+    #[test]
+    fn a_refusal_that_no_retry_can_fix_is_told_apart_by_its_reason() {
+        let answer = |status: u16, reason: &str| http::Response {
+            status,
+            body: Value::object([
+                ("error", Value::string("words")),
+                ("reason", Value::string(reason)),
+            ]),
+        };
+        assert_eq!(fatal(&answer(403, "not_a_member")), Some("not_a_member"));
+        assert_eq!(
+            fatal(&answer(401, "member_revoked")),
+            Some("member_revoked")
+        );
+        assert_eq!(fatal(&answer(401, "clock_skew")), Some("clock_skew"));
+        // Worth another round: a different record, a later epoch, a drained queue.
+        for passing in ["malformed", "schema", "queue_full", "relations_not_signed"] {
+            assert_eq!(fatal(&answer(400, passing)), None, "{passing}");
+        }
+        let unexplained = http::Response {
+            status: 500,
+            body: Value::Null,
+        };
+        assert_eq!(fatal(&unexplained), None, "an old node sends no reason");
     }
 
     #[test]
