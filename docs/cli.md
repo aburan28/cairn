@@ -509,7 +509,7 @@ for exactly those bytes (send the `headers` the grant lists); without both, the
 upload goes through the node, which signs what it forwards. Full design:
 [design/deposit-grants.md](design/deposit-grants.md).
 
-### `secret set <name> (<value> | --value V | --file PATH | --stdin)` · `secret get` · `secret list` · `secret delete` · `secret path` · `secret run [--env NAME[=ENVVAR]]... -- <cmd>`
+### `secret set <name> (--stdin | --file PATH | --value V)` · `secret get` · `secret list` · `secret delete` · `secret path` · `secret run [--env NAME[=ENVVAR]]... -- <cmd>`
 
 Named operator secrets under `~/.cairn/secrets/` (or `$CAIRN_SECRETS_DIR`).
 This is not the at-rest key and not a submitter identity — those have their
@@ -519,7 +519,9 @@ how `scripts/ecc2k-dp.sh` feeds AWS keys and a `DATABASE_URL` into the ECC2K-130
 DP upload and ingester without putting them in the shell. A binding may be
 `NAME=ENVVAR` (or `--env NAME=ENVVAR`) when the child expects a different
 variable. `secret path` prints the directory. `--stdin` refuses a TTY so a
-secret is not typed into scrollback. MCP exposes `set_secret` / `list_secrets`
+secret is not typed into scrollback. A value given as a bare argument is refused, and `--value`
+warns, because either puts it in shell history and in every process listing
+while the command runs; `--value` remains for values that are not secret. MCP exposes `set_secret` / `list_secrets`
 only; values never cross into an agent transcript.
 
 ### `store status`

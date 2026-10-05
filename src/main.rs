@@ -3100,12 +3100,17 @@ fn parse_secret(cursor: &mut Cursor) -> Result<Command, CliError> {
                             "secret set: unknown option {other:?}"
                         )))
                     }
-                    other if value.is_none() && file.is_none() && !stdin => {
-                        // Positional value, so `cairn secret set NAME VALUE`
-                        // works without a flag. Prefer `--value` / `--file` /
-                        // `--stdin` in scripts so a value that looks like a
-                        // flag is not swallowed.
-                        value = Some(other.to_string());
+                    _ if value.is_none() && file.is_none() && !stdin => {
+                        // A positional value was accepted once, and it is the
+                        // form that puts a key on the command line without a
+                        // second thought: in shell history, and readable by
+                        // every user on the host while the command runs.
+                        return Err(CliError::Usage(format!(
+                            "secret set {name}: a value on the command line is visible to other \
+                             processes and kept in shell history. Pipe it: \
+                             `printf %s \"$VALUE\" | cairn secret set {name} --stdin`, or \
+                             `--file PATH`; `--value V` remains for values that are not secret"
+                        )));
                     }
                     other => {
                         return Err(CliError::Usage(format!(
@@ -3120,7 +3125,7 @@ fn parse_secret(cursor: &mut Cursor) -> Result<Command, CliError> {
                 .count();
             if sources != 1 {
                 return Err(CliError::Usage(String::from(
-                    "secret set needs exactly one of a positional value, --value, --file, or --stdin",
+                    "secret set needs exactly one of --stdin, --file, or --value",
                 )));
             }
             SecretAction::Set {
@@ -4296,7 +4301,7 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
-        "  secret set <name> (<value> | --value V | --file PATH | --stdin)",
+        "  secret set <name> (--stdin | --file PATH | --value V)",
     );
     say(
         out,
@@ -8159,6 +8164,11 @@ fn cmd_secret(out: &mut dyn Write, action: &SecretAction) -> Result<i32, CliErro
             stdin,
         } => {
             let body = if let Some(value) = value {
+                eprintln!(
+                    "warning: secret {name}: --value puts the value on the command line, where \
+                     other processes and your shell history can see it; prefer --stdin or --file \
+                     for anything secret"
+                );
                 value.clone()
             } else if let Some(path) = file {
                 fs::read_to_string(path).map_err(|source| CliError::Io {
@@ -11239,14 +11249,26 @@ mod tests {
                 action: SecretAction::List
             }
         );
+        // A positional value is refused: it is the form that puts a key in
+        // shell history and in every process listing.
+        match parse(argv(&["secret", "set", "AWS_ACCESS_KEY_ID", "AKIA"])) {
+            Err(CliError::Usage(why)) => assert!(why.contains("--stdin"), "{why}"),
+            other => panic!("a positional secret value was accepted: {other:?}"),
+        }
         assert_eq!(
-            parse(argv(&["secret", "set", "AWS_ACCESS_KEY_ID", "AKIA"]))
-                .expect("parses")
-                .command,
+            parse(argv(&[
+                "secret",
+                "set",
+                "RHO_DB_HOST",
+                "--value",
+                "db.internal"
+            ]))
+            .expect("parses")
+            .command,
             Command::Secret {
                 action: SecretAction::Set {
-                    name: "AWS_ACCESS_KEY_ID".into(),
-                    value: Some("AKIA".into()),
+                    name: "RHO_DB_HOST".into(),
+                    value: Some("db.internal".into()),
                     file: None,
                     stdin: false,
                 }

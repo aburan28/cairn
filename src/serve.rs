@@ -776,6 +776,10 @@ struct Request {
     /// The `Host` header, when the client sent one. Read only to refuse a
     /// write addressed to a public DNS name; see [`host_may_write`].
     host: Option<String>,
+    /// Whether a proxy says it forwarded this request (`Forwarded`,
+    /// `X-Forwarded-For`, `X-Real-IP`). Read only to stop a reverse proxy's
+    /// loopback connection standing in for a fleet member; see [`handle`].
+    forwarded: bool,
 }
 
 /// Serve until the process is killed.
@@ -1007,7 +1011,16 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             leases_of(stream, serving, &path["/leases/".len()..])
         }
         ("GET", path) if path == "/ui" || path.starts_with("/ui/") => ui_asset(stream, path),
-        ("POST", "/submit") => submit(stream, &mut reader, serving, &request, remote),
+        ("POST", "/submit") => {
+            // Behind a reverse proxy every request arrives from loopback, and
+            // loopback is in `CAIRN_FLEET=private` -- so the whole internet
+            // would be a fleet member. A loopback connection that says a proxy
+            // forwarded it is somebody else's request; it is treated as from
+            // an unknown address, which no fleet admits. The forwarded address
+            // itself is not trusted: any client can write the header.
+            let member_address = remote.filter(|ip| !(ip.is_loopback() && request.forwarded));
+            submit(stream, &mut reader, serving, &request, member_address)
+        }
         ("POST", "/progress") => heartbeat(stream, &mut reader, serving, &request),
         ("POST", "/hosts") => host_register(stream, &mut reader, serving, &request),
         ("POST", "/lease") => lease_claim(stream, &mut reader, serving, &request),
@@ -1069,6 +1082,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
     let mut length = 0u64;
     let mut content_type = None;
     let mut host = None;
+    let mut forwarded = false;
     let mut headers = 0usize;
     loop {
         let mut header = String::new();
@@ -1086,6 +1100,9 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
             let value = value.trim();
             if name == "host" {
                 host = Some(value.to_string());
+            }
+            if matches!(name.as_str(), "forwarded" | "x-forwarded-for" | "x-real-ip") {
+                forwarded = true;
             }
             if name == "content-length" {
                 length = value
@@ -1126,6 +1143,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
         length,
         content_type,
         host,
+        forwarded,
     })
 }
 
@@ -5534,6 +5552,25 @@ mod tests {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .contains("relations"));
+
+        // Behind a reverse proxy every request arrives from loopback. One that
+        // says a proxy forwarded it is somebody else's, not a fleet member's.
+        {
+            use std::io::{Read as _, Write as _};
+            let record = commitment(&me);
+            let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+            write!(
+                socket,
+                "POST /submit?kind=commitment HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+                 X-Forwarded-For: 203.0.113.9\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{record}",
+                record.len()
+            )
+            .expect("send");
+            let mut response = String::new();
+            socket.read_to_string(&mut response).expect("read");
+            assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+        }
 
         // Outside the fleet: a fleet of a network this test is not on.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
