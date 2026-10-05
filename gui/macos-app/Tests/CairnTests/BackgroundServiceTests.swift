@@ -9,10 +9,10 @@ final class BackgroundServiceTests: XCTestCase {
     private let binary = URL(fileURLWithPath: "/usr/local/cairn/bin/cairn")
     private let dir = "/Users/x/Library/Application Support/Cairn"
 
-    private func settings(lead: Bool = false) -> NodeSettings {
+    private func settings(lead: Bool = false, join: NodeSettings.FleetJoin = .network) -> NodeSettings {
         NodeSettings(dataFolder: URL(fileURLWithPath: dir, isDirectory: true), cpus: 4, memoryMB: 4096, storageGB: 0,
                      p2pHost: "0.0.0.0", bootstrapFiles: ["/Users/x/seed.json"], attachURL: nil,
-                     leadFleet: lead, fleetNetworks: "10.0.0.0/8")
+                     leadFleet: lead, fleetNetworks: "10.0.0.0/8", fleetJoin: join)
     }
 
     func testTheAgentRunsTheNodeWithoutMCPOnTheDocumentedPorts() throws {
@@ -63,6 +63,27 @@ final class BackgroundServiceTests: XCTestCase {
         XCTAssertEqual(plain.serveHost, "127.0.0.1")
         XCTAssertEqual(plain.fleetArguments, [])
         XCTAssertNil(plain.environment["CAIRN_FLEET"])
+    }
+
+    func testAnInvitedFleetSignsForEnrolledMembersOnly() {
+        let invited = settings(lead: true, join: .invited)
+        XCTAssertEqual(invited.environment["CAIRN_FLEET"], "enrolled", "the networks are not a credential")
+        XCTAssertEqual(BackgroundService.serviceEnvironment(invited)["CAIRN_FLEET"], "enrolled")
+        XCTAssertEqual(invited.serveHost, "0.0.0.0", "members still reach the leader over the network")
+    }
+
+    func testANewFleetStartsWithInvitationsAndAnOldOneKeepsItsNetworks() throws {
+        let fresh = try XCTUnwrap(UserDefaults(suiteName: "cairn-fleet-new-\(UUID().uuidString)"))
+        XCTAssertEqual(NodeSettings.current(fresh).fleetJoin, .invited)
+        fresh.set(true, forKey: NodeSettings.Key.leadFleet)
+        XCTAssertEqual(NodeSettings.current(fresh).fleetJoin, .invited, "decided once, before the fleet was led")
+
+        let upgraded = try XCTUnwrap(UserDefaults(suiteName: "cairn-fleet-old-\(UUID().uuidString)"))
+        upgraded.set(true, forKey: NodeSettings.Key.leadFleet)
+        upgraded.set("192.168.1.0/24", forKey: NodeSettings.Key.fleetNetworks)
+        let kept = NodeSettings.current(upgraded)
+        XCTAssertEqual(kept.fleetJoin, .network, "a fleet led before invitations keeps what its operator chose")
+        XCTAssertEqual(kept.environment["CAIRN_FLEET"], "192.168.1.0/24")
     }
 
     func testTheReaderURLAndThePlistPathAreWhereTheDocsSayTheyAre() {

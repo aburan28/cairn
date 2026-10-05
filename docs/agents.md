@@ -93,6 +93,24 @@ The nonce that binds the two calls together lives in a file beside the log. It
 has to survive a restart of the server, and it must never reach your context —
 see below.
 
+**Every `submit_claim` result says what happened in a word**, in the result's
+`_meta` beside the text, so a harness can branch without parsing prose:
+
+| `cairn/reason` | with | meaning |
+|---|---|---|
+| `committed` | `cairn/wait`: `committed_in_epoch`, `reveal_from_epoch`, `reveal_in_seconds`, `epoch_seconds` | bound and hidden; call again from `reveal_from_epoch` |
+| `already_committed` | `cairn/wait` | the same artifact is committed and waiting; call again then |
+| `revealed` | `cairn/claim_id`, `cairn/verdict`, `cairn/settled`, `cairn/reward`, `cairn/settles_after_epoch` | opened and judged by the pinned verifier |
+| `bad_arguments`, `unknown_objective` | | fix the call |
+| `citation_not_offered`, `citation_not_accepted`, `must_cite_frontier` | | cite what this server offered, and the frontier holder |
+| `malformed`, `schema` | | the claim would not decode, or fails its schema |
+| `commit_refused`, `reveal_refused` | `cairn/rule`, the rule's name (`epoch_already_settled`, …); `cairn/dropped` when the commitment can no longer be opened | the rules engine said no |
+| `internal` | | tell the operator |
+
+`_meta` rather than `structuredContent`, because a client may read the latter
+as the whole result; the text beside it stays the full explanation. Tools that
+only read send no `_meta`.
+
 ## The server is a trust boundary, not plumbing
 
 Agents log everything they see, and transcripts leak. Three things therefore

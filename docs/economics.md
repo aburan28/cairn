@@ -101,6 +101,16 @@ assumed away, and [node-incentives.md](node-incentives.md) has the rest --
 including the result that the size of the pool decides *how many* nodes there
 are and has no effect whatever on whether they do the work.
 
+## Paying out in other assets
+
+A unit is accounting, and stays accounting: nothing here converts one into
+bitcoin or ether, and a tradeable token mirroring units is refused, for the
+reasons [design/external-payouts.md](design/external-payouts.md) gives. That
+design proposes the alternative: an escrow per objective, in an asset that
+already exists, released per settlement in proportion to the units that
+settlement credited, at a rate the funder fixed when it escrowed. It never
+touches the rules, and it is not built.
+
 ## Negative results
 
 "I searched this region and found nothing" is genuinely valuable, genuinely

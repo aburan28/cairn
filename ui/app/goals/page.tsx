@@ -6,8 +6,10 @@ import { useSearchParams } from "next/navigation";
 import {
   type Goal,
   type GoalsResponse,
+  type Underserved,
   angleLabel,
   describeMatch,
+  describeUnderserved,
   fetchGoals,
   findGoals,
 } from "@/lib/goals";
@@ -219,6 +221,13 @@ function Goals() {
         )}
       </Box>
 
+      {/* -- where compute is scarce ------------------------------------------ */}
+      {!focus && (data.underserved?.length ?? 0) > 0 && (
+        <div className="mt-5">
+          <Scarce rows={data.underserved ?? []} />
+        </div>
+      )}
+
       {/* -- the goals ------------------------------------------------------- */}
       <div className="mt-5 flex flex-col gap-4">
         {focus && (
@@ -244,6 +253,47 @@ function Goals() {
 
       <p className="mt-6 text-[12px] text-ink-3">{data.note}</p>
     </>
+  );
+}
+
+/**
+ * The angles with the most open reward per live worker: where one more
+ * worker would matter most. Heartbeats are self-reported, so a busy-looking
+ * angle may not be; the worst that does is send fewer workers there.
+ */
+function Scarce({ rows }: { rows: Underserved[] }) {
+  return (
+    <Box
+      title="Where compute is scarce"
+      aside={<span className="text-[11px] font-normal text-ink-3">open reward ÷ (live workers + 1)</span>}
+    >
+      <ol className="flex flex-col gap-2">
+        {rows.map((row) => (
+          <li key={row.handle} className="flex flex-wrap items-baseline gap-2 text-[13px]">
+            <span className="mono text-[12px] text-accent">
+              {row.reward_per_worker.toLocaleString("en-US")} units each
+            </span>
+            <Link href={`/goals?key=${encodeURIComponent(row.goal)}`} className="text-ink">
+              {row.goal_name}
+            </Link>
+            <span className="mono text-[12px] text-ink-2">{angleLabel(row.angle)}</span>
+            <span className="text-ink-3">{describeUnderserved(row)}</span>
+            {row.objectives[0] && (
+              <Link
+                href={`/challenge?id=${encodeURIComponent(row.objectives[0])}`}
+                className="text-[12px] text-accent"
+              >
+                richest open objective
+              </Link>
+            )}
+          </li>
+        ))}
+      </ol>
+      <p className="mt-2 text-[12px] text-ink-3">
+        Workers are heartbeats this node holds, reported and unverified; rewards are what the log has funded and not
+        yet paid.
+      </p>
+    </Box>
   );
 }
 

@@ -5,6 +5,7 @@
 //! of that sequence is easier to keep right than two.
 
 use rand_core::{OsRng, RngCore};
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -139,11 +140,20 @@ pub fn replace_from(path: &Path, source: &Path) -> io::Result<u64> {
     ))
 }
 
+/// Where systemd puts the credentials it hands a service (`LoadCredential=`
+/// and its kin), named in that service's environment.
+const CREDENTIALS_DIRECTORY: &str = "CREDENTIALS_DIRECTORY";
+
 /// Open a secret once, then validate and harden that same file descriptor.
 ///
 /// Comparing the pre-open path identity to the opened descriptor closes the
 /// check/open race without relying on a platform-specific `O_NOFOLLOW` value.
 fn open_existing(path: &Path) -> io::Result<fs::File> {
+    open_existing_with(path, std::env::var_os(CREDENTIALS_DIRECTORY).as_deref())
+}
+
+/// [`open_existing`], told where systemd keeps this service's credentials.
+fn open_existing_with(path: &Path, credentials: Option<&OsStr>) -> io::Result<fs::File> {
     let before = fs::symlink_metadata(path)?;
     if !before.file_type().is_file() {
         return Err(io::Error::new(
@@ -168,11 +178,46 @@ fn open_existing(path: &Path) -> io::Result<fs::File> {
                 "secret path changed while it was being opened",
             ));
         }
-        if opened.mode() & 0o077 != 0 {
+        // A credential's group bits may be systemd's ACL mask (see
+        // `is_credential`); nothing explains other bits, so those are
+        // repaired wherever the file is.
+        let loose = if is_credential(path, credentials) {
+            0o007
+        } else {
+            0o077
+        };
+        if opened.mode() & loose != 0 {
             file.set_permissions(fs::Permissions::from_mode(0o600))?;
         }
     }
+    #[cfg(not(unix))]
+    let _ = credentials;
     Ok(file)
+}
+
+/// Whether `path` is one of the credentials systemd handed this service.
+///
+/// systemd copies each into `$CREDENTIALS_DIRECTORY`, a private mount it
+/// makes read-only and lets the service's user alone read. Under `User=` it
+/// grants that read with an ACL, and a file with an ACL reports the ACL's mask
+/// in its group bits: the credential reads as 0440 though nobody else can
+/// open it. That mode is systemd's to keep, and the read-only mount would
+/// refuse a repair (`EROFS`), failing the read of a credential that is as
+/// private as a file gets.
+#[cfg(unix)]
+fn is_credential(path: &Path, credentials: Option<&OsStr>) -> bool {
+    let Some(directory) = credentials.filter(|d| !d.is_empty()) else {
+        return false;
+    };
+    let parent = match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+        Some(parent) => parent,
+        None => return false,
+    };
+    match (fs::canonicalize(parent), fs::canonicalize(directory)) {
+        (Ok(parent), Ok(directory)) => parent == directory,
+        _ => false,
+    }
 }
 
 /// Refuse symlinks and repair permissive Unix modes on an existing secret.
@@ -313,5 +358,51 @@ mod tests {
         );
         fs::remove_file(link).unwrap();
         fs::remove_file(target).unwrap();
+    }
+
+    /// What a `User=` service sees of a `LoadCredential=` file: mode 0440,
+    /// the group bits being the ACL that lets that user alone read it, on a
+    /// mount that refuses a chmod. Read as it is; and the same mode anywhere
+    /// else, or other bits even there, are repaired as before.
+    #[cfg(unix)]
+    #[test]
+    fn a_systemd_credential_keeps_its_group_bits_and_nothing_else_does() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let mode = |path: &Path| fs::metadata(path).unwrap().mode() & 0o777;
+        let set = |path: &Path, mode: u32| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap()
+        };
+        let directory = scratch("credentials");
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let credential = directory.join("fleet");
+        fs::write(&credential, "member").unwrap();
+
+        set(&credential, 0o440);
+        let file = open_existing_with(&credential, Some(directory.as_os_str())).unwrap();
+        assert_eq!(io::read_to_string(file).unwrap(), "member");
+        assert_eq!(mode(&credential), 0o440);
+        // The same directory spelled another way.
+        let roundabout = directory.join("..").join(directory.file_name().unwrap());
+        open_existing_with(&credential, Some(roundabout.as_os_str())).unwrap();
+        assert_eq!(mode(&credential), 0o440);
+
+        // Other bits are no ACL's doing: repaired, credential or not.
+        set(&credential, 0o444);
+        open_existing_with(&credential, Some(directory.as_os_str())).unwrap();
+        assert_eq!(mode(&credential), 0o600);
+
+        // Without the directory, or beside another one, 0440 is a loose
+        // secret like any other.
+        for credentials in [
+            None,
+            Some(std::ffi::OsString::new()),
+            Some(std::env::temp_dir().into_os_string()),
+        ] {
+            set(&credential, 0o440);
+            open_existing_with(&credential, credentials.as_deref()).unwrap();
+            assert_eq!(mode(&credential), 0o600, "beside {credentials:?}");
+        }
+        fs::remove_dir_all(directory).unwrap();
     }
 }

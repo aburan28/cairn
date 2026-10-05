@@ -6,6 +6,8 @@ import {
   classLabel,
   describeHost,
   describeReachability,
+  fleetMembers,
+  fleetSigning,
   fleetTotals,
   formatMemory,
   formatUptime,
@@ -224,5 +226,26 @@ describe("describeReachability", () => {
     expect(forwarded).toMatchObject({ status: "verified", tone: "accent" });
     expect(forwarded.detail).toContain("40s ago");
     expect(forwarded.detail).toContain("by hand");
+  });
+});
+
+describe("fleet signing", () => {
+  const leader = "ab".repeat(32);
+  it("says an enrolled-only leader signs for its members from anywhere", () => {
+    const fleet = { sources: ["enrolled"], signs_as: leader, members: { enrolled: 3, live: 1 } };
+    expect(fleetSigning(fleet)).toContain("from any address, only for members it enrolled");
+    expect(fleetMembers(fleet)).toBe(
+      "3 enrolled members, 1 heard from in the last few minutes; `cairn fleet list` on the leader names them",
+    );
+  });
+  it("names the networks it still trusts beside its members", () => {
+    const fleet = { sources: ["enrolled", "127.0.0.0/8"], signs_as: leader, members: { enrolled: 1, live: 1 } };
+    expect(fleetSigning(fleet)).toContain("for enrolled members, and for anything on 127.0.0.0/8");
+    expect(fleetMembers(fleet)).toMatch(/^1 enrolled member,/);
+  });
+  it("keeps the network-only wording, and no members line, for an older leader", () => {
+    const fleet = { sources: ["10.0.0.0/8"], signs_as: leader };
+    expect(fleetSigning(fleet)).toBe("unsigned records from these networks that name this node are signed here, as");
+    expect(fleetMembers(fleet)).toBeNull();
   });
 });

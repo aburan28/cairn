@@ -122,6 +122,10 @@ pub struct Heartbeat {
     pub device: Option<String>,
     pub lanes: Option<u64>,
     pub client: Option<String>,
+    /// Whether an enrolled fleet member signed it (`docs/design/fleet-enrollment.md`
+    /// §7). Set by the node after it verified the signature, never read from
+    /// the body: a worker cannot say it about itself.
+    pub member: bool,
 }
 
 /// Why a heartbeat was refused.
@@ -264,6 +268,7 @@ impl Heartbeat {
                 device: text("device", MAX_TEXT_LEN)?,
                 lanes: count("lanes")?,
                 client: text("client", MAX_TEXT_LEN)?,
+                member: false,
             },
             ignored,
         ))
@@ -510,6 +515,7 @@ fn worker_value(seen: &Seen, age: u64, liveness: Liveness, measured: Option<u64>
         ("device", opt_str(&hb.device)),
         ("lanes", opt_int(hb.lanes)),
         ("client", opt_str(&hb.client)),
+        ("member", Value::Bool(hb.member)),
     ])
 }
 
@@ -535,6 +541,8 @@ pub struct FleetWorker {
     pub steps_per_second: Option<u64>,
     pub epoch: Option<u64>,
     pub units: Option<(u64, u64)>,
+    /// Whether its last heartbeat was signed by an enrolled member.
+    pub member: bool,
 }
 
 /// A coarse class for a worker's self-described `device`, so a page can sum
@@ -623,6 +631,7 @@ impl Board {
                     steps_per_second: seen.measured_rate(now).or(hb.steps_per_second),
                     epoch: hb.epoch,
                     units: hb.units,
+                    member: hb.member,
                 });
             }
         }
@@ -1030,6 +1039,7 @@ mod tests {
             device: None,
             lanes: None,
             client: Some("test".into()),
+            member: false,
         }
     }
 

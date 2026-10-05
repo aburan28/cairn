@@ -63,10 +63,51 @@ use super::http::{self, NodeUrl};
 use super::AgentError;
 use crate::canonical::Value;
 use crate::crypto::identity::Identity;
+use crate::fleet::auth::{key_hex, MemberFile};
 use crate::records::{commitment_hash, Claim, Commitment};
 
 const CLIENT: &str = concat!("cairn-work/", env!("CARGO_PKG_VERSION"));
 const NODE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Refusals no retry and no later round can change, by their machine-readable
+/// `reason`: the node takes nothing from this worker as it is configured.
+/// Stopping says so once, where carrying on would fail every round in the
+/// same words.
+const FATAL_REASONS: [&str; 10] = [
+    "read_only",
+    "host_not_allowed",
+    "not_a_member",
+    "enrollment_off",
+    "member_unknown",
+    "member_revoked",
+    "member_expired",
+    "bad_signature",
+    "malformed_authorization",
+    "clock_skew",
+];
+
+/// Why the node refused, as its `reason`, when the reason means stop.
+fn fatal(response: &http::Response) -> Option<&str> {
+    response
+        .body
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|reason| FATAL_REASONS.contains(reason))
+}
+
+/// Say so when the node thinks a queued record may miss its epoch.
+fn warn_if_at_risk(response: &http::Response, what: &str) {
+    let wait = response.body.get("wait");
+    if wait.and_then(|w| w.get("at_risk")) == Some(&Value::Bool(true)) {
+        say(&format!(
+            "the node queued this {what} but says it may be refused for its epoch (it ends in \
+             {} s); a later round will try again",
+            wait.and_then(|w| w.get("epoch_ends_in_seconds"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ));
+    }
+}
 
 /// Post nothing in the last few seconds of an epoch: the node drains its queue
 /// every five, and a commitment admitted after the boundary lands in the next
@@ -78,6 +119,7 @@ cairn work — put this machine to work on one objective, with your own solver
 
 USAGE
     cairn work --node URL --objective ID --worker NAME [options] -- SOLVER [ARGS]...
+    cairn work --fleet FILE --objective ID [--worker SUFFIX] [options] -- SOLVER [ARGS]...
 
     --node URL           the node's HTTP address, e.g. http://192.168.1.20:8080
     --objective ID       the objective to work (sha256:…)
@@ -85,9 +127,15 @@ USAGE
                          the submitter on every record
     --identity FILE      sign commitments and claims with this identity; the
                          submitter becomes its public key (`cairn identity`)
+    --fleet FILE         work as an enrolled fleet member, from any address: the
+                         member file `cairn fleet join` wrote. Records name its
+                         leader, which signs them and is paid; every request is
+                         signed with the member key. --node defaults to the
+                         file's, and --worker is a suffix: gpu0 reports as
+                         <member name>/gpu0 (docs/fleet.md)
     --submitter ID       name ID as the submitter instead of --worker, unsigned:
-                         a fleet member names its leader's `signs_as`, and the
-                         leader signs and is paid (docs/fleet.md)
+                         a worker on a leader's trusted network names its
+                         `signs_as`, and the leader signs and is paid
     --partitions N       how many ways the search is split (default 8)
     --rounds N           stop after N solver runs (default: run until stopped)
     --heartbeat SECONDS  how often to report in while the solver runs (default 30)
@@ -117,6 +165,10 @@ pub struct Options {
     /// Who the records name, when it is neither `worker` nor `identity`'s
     /// key: a fleet leader's id. The slice and the heartbeat stay `worker`'s.
     pub submitter: Option<String>,
+    /// The fleet membership this worker signs its requests with, when it is
+    /// an enrolled member: the records name the file's leader, never one
+    /// fetched from the node (design §3, G3).
+    pub member: Option<MemberFile>,
     pub partitions: u64,
     pub rounds: Option<u64>,
     pub heartbeat: Duration,
@@ -167,6 +219,7 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
     let mut worker = None;
     let mut identity_path: Option<String> = None;
     let mut submitter: Option<String> = None;
+    let mut fleet_path: Option<String> = None;
     let mut partitions = 8u64;
     let mut rounds = None;
     let mut heartbeat = 30u64;
@@ -194,6 +247,7 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
             "--worker" => worker = Some(value()?.clone()),
             "--identity" => identity_path = Some(value()?.clone()),
             "--submitter" => submitter = Some(value()?.clone()),
+            "--fleet" => fleet_path = Some(value()?.clone()),
             "--partitions" => partitions = number(value()?)?,
             "--rounds" => rounds = Some(number(value()?)?),
             "--heartbeat" => heartbeat = number(value()?)?,
@@ -204,17 +258,50 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
         i += 2;
     }
 
-    let node = NodeUrl::parse(&node.ok_or("--node is required")?).map_err(|e| e.to_string())?;
+    let member = fleet_path
+        .map(|path| MemberFile::load(std::path::Path::new(&path)))
+        .transpose()?;
+    if member.is_some() && (identity_path.is_some() || submitter.is_some()) {
+        return Err(
+            "--fleet names the submitter already (the member file's leader); drop \
+             --identity and --submitter"
+                .into(),
+        );
+    }
+    let node = match (node, &member) {
+        (Some(node), _) => node,
+        (None, Some(member)) => member.node.clone(),
+        (None, None) => return Err("--node is required".into()),
+    };
+    let node = NodeUrl::parse(&node).map_err(|e| e.to_string())?;
     let objective = objective.ok_or("--objective is required")?;
     if !objective.starts_with("sha256:") {
         return Err(format!(
             "--objective {objective:?} should be an id, sha256:…"
         ));
     }
-    let worker = worker.ok_or("--worker is required")?;
     // `|` separates the fields of a commitment hash's preimage; a name holding
     // one could collide with another submitter's commitment.
-    if worker.is_empty() || worker.contains('|') || worker.chars().any(char::is_control) {
+    let printable =
+        |name: &str| !name.is_empty() && !name.contains('|') && !name.chars().any(char::is_control);
+    let worker = match &member {
+        // A member reports under its own name, or one slice of it: the leader
+        // reserves both and refuses any other.
+        Some(member) => {
+            if let Some(suffix) = &worker {
+                if !printable(suffix) || suffix.contains('/') || suffix.contains(' ') {
+                    return Err(
+                        "with --fleet, --worker is a suffix such as gpu0: printable, no `/`, \
+                         `|` or spaces"
+                            .into(),
+                    );
+                }
+            }
+            member.worker_name(worker.as_deref())
+        }
+        None => worker.ok_or("--worker is required")?,
+    };
+    if !printable(&worker) {
         return Err("--worker must be printable text without `|`".into());
     }
     if partitions == 0 {
@@ -245,6 +332,7 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
         worker,
         identity,
         submitter,
+        member,
         partitions,
         rounds,
         heartbeat: Duration::from_secs(heartbeat),
@@ -312,10 +400,11 @@ impl Worker {
         // The heartbeat and the slice are always `worker`'s: the assignment
         // is a function of that name, and two fleet members naming one leader
         // must still take different slices.
-        let submitter = match (&options.identity, &options.submitter) {
-            (Some(identity), _) => identity.submitter_id(),
-            (None, Some(named)) => named.clone(),
-            (None, None) => options.worker.clone(),
+        let submitter = match (&options.member, &options.identity, &options.submitter) {
+            (Some(member), _, _) => key_hex(&member.leader),
+            (None, Some(identity), _) => identity.submitter_id(),
+            (None, None, Some(named)) => named.clone(),
+            (None, None, None) => options.worker.clone(),
         };
         Ok(Worker {
             options,
@@ -336,7 +425,12 @@ impl Worker {
             short(&self.options.objective),
             self.options.node.as_str(),
             self.epoch_seconds,
-            if self.options.identity.is_some() {
+            if self.options.member.is_some() {
+                format!(
+                    ", a fleet member of {}, which signs and is paid",
+                    short(&self.submitter)
+                )
+            } else if self.options.identity.is_some() {
                 format!(", signing as {}", short(&self.submitter))
             } else if self.submitter != self.options.worker {
                 format!(", submitting for {}", short(&self.submitter))
@@ -480,6 +574,7 @@ impl Worker {
             let found = Arc::clone(&found);
             let body = self.heartbeat_body(assignment);
             let node = self.options.node.clone();
+            let member = self.options.member.clone();
             let every = self.options.heartbeat;
             thread::spawn(move || {
                 let mut last: Option<Instant> = None;
@@ -492,9 +587,18 @@ impl Worker {
                                 Value::Int(i128::from(found.load(Ordering::SeqCst))),
                             );
                         }
-                        if let Err(error) = http::post_json(&node, "/progress", &body, NODE_TIMEOUT)
-                        {
-                            say(&format!("heartbeat: {error}"));
+                        match http::post_json_as(
+                            &node,
+                            "/progress",
+                            &body,
+                            member.as_ref(),
+                            NODE_TIMEOUT,
+                        ) {
+                            Ok(response) if !response.ok() => {
+                                say(&format!("heartbeat refused: {}", response.error_text()))
+                            }
+                            Ok(_) => {}
+                            Err(error) => say(&format!("heartbeat: {error}")),
                         }
                         last = Some(Instant::now());
                     }
@@ -594,14 +698,16 @@ impl Worker {
         }
         let epoch = self.epoch();
         loop {
-            let response = http::post_json(
+            let response = http::post_json_as(
                 &self.options.node,
                 "/submit?kind=commitment",
                 &record.to_value(),
+                self.options.member.as_ref(),
                 NODE_TIMEOUT,
             )?;
             match response.status {
                 202 | 200 => {
+                    warn_if_at_risk(&response, "commitment");
                     self.committed += 1;
                     self.pending.push(Pending {
                         epoch,
@@ -620,6 +726,13 @@ impl Worker {
                     }
                 }
                 _ => {
+                    if let Some(reason) = fatal(&response) {
+                        return Err(AgentError::Node(format!(
+                            "the node refused this worker's commitment ({reason}): {}",
+                            response.error_text()
+                        ))
+                        .into());
+                    }
                     say(&format!("commitment refused: {}", response.error_text()));
                     return Ok(());
                 }
@@ -660,10 +773,11 @@ impl Worker {
             if let Some(identity) = &self.options.identity {
                 claim = claim.signed_with(identity);
             }
-            let response = http::post_json(
+            let response = http::post_json_as(
                 &self.options.node,
                 "/submit?kind=claim",
                 &claim.to_value(),
+                self.options.member.as_ref(),
                 NODE_TIMEOUT,
             )?;
             match response.status {
@@ -678,7 +792,16 @@ impl Worker {
                     say("the node's queue is full; holding the reveal");
                     self.pending.push(pending);
                 }
-                _ => say(&format!("reveal refused: {}", response.error_text())),
+                _ => {
+                    if let Some(reason) = fatal(&response) {
+                        return Err(AgentError::Node(format!(
+                            "the node refused this worker's reveal ({reason}): {}",
+                            response.error_text()
+                        ))
+                        .into());
+                    }
+                    say(&format!("reveal refused: {}", response.error_text()));
+                }
             }
         }
         Ok(())
@@ -774,6 +897,81 @@ mod tests {
         ))
         .unwrap_err();
         assert!(error.contains('|'), "{error}");
+    }
+
+    #[test]
+    fn a_refusal_that_no_retry_can_fix_is_told_apart_by_its_reason() {
+        let answer = |status: u16, reason: &str| http::Response {
+            status,
+            body: Value::object([
+                ("error", Value::string("words")),
+                ("reason", Value::string(reason)),
+            ]),
+        };
+        assert_eq!(fatal(&answer(403, "not_a_member")), Some("not_a_member"));
+        assert_eq!(
+            fatal(&answer(401, "member_revoked")),
+            Some("member_revoked")
+        );
+        assert_eq!(fatal(&answer(401, "clock_skew")), Some("clock_skew"));
+        // Worth another round: a different record, a later epoch, a drained queue.
+        for passing in ["malformed", "schema", "queue_full", "relations_not_signed"] {
+            assert_eq!(fatal(&answer(400, passing)), None, "{passing}");
+        }
+        let unexplained = http::Response {
+            status: 500,
+            body: Value::Null,
+        };
+        assert_eq!(fatal(&unexplained), None, "an old node sends no reason");
+    }
+
+    #[test]
+    fn a_fleet_member_names_the_leader_from_its_file_and_reports_under_its_own_name() {
+        let dir = std::env::temp_dir().join(format!("cairn-work-fleet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("fleet.json");
+        let leader = Identity::from_secret_bytes([1; 32]);
+        MemberFile {
+            node: "http://203.0.113.7:8080".into(),
+            leader: leader.public().to_bytes(),
+            name: "gpu-box-1".into(),
+            member: Identity::from_secret_bytes([4; 32]),
+            expires_at: None,
+        }
+        .save_new(&path)
+        .unwrap();
+        let path = path.display().to_string();
+
+        let options = parse(&args(&format!(
+            "--fleet {path} --objective sha256:ab --worker gpu0 -- x"
+        )))
+        .unwrap()
+        .unwrap();
+        assert_eq!(options.node.as_str(), "http://203.0.113.7:8080");
+        assert_eq!(options.worker, "gpu-box-1/gpu0");
+        let worker = Worker::new(options).unwrap();
+        assert_eq!(
+            worker.submitter,
+            leader.submitter_id(),
+            "the pinned leader, never fetched"
+        );
+
+        let alone = parse(&args(&format!("--fleet {path} --objective sha256:ab -- x")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(alone.worker, "gpu-box-1");
+        for conflict in ["--identity f", "--submitter s"] {
+            assert!(parse(&args(&format!(
+                "--fleet {path} {conflict} --objective sha256:ab -- x"
+            )))
+            .unwrap_err()
+            .contains("--fleet"));
+        }
+        assert!(parse(&args(&format!(
+            "--fleet {path} --objective sha256:ab --worker a/b -- x"
+        )))
+        .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -42,6 +42,9 @@ pub struct Install {
     pub env: Vec<(String, String)>,
     /// Supplementary groups that exist on this host.
     pub groups: Vec<String>,
+    /// A fleet member file, handed to the service with `LoadCredential=` so
+    /// the member key is in neither the unit nor its environment file.
+    pub fleet_file: Option<PathBuf>,
 }
 
 impl Install {
@@ -57,6 +60,20 @@ impl Install {
             // Root keeps the ability to gain capabilities because a native
             // runsc with cgroups needs them; a system user never had any.
             .replace("{{NO_NEW_PRIVILEGES}}", if root { "false" } else { "true" })
+            .replace("{{CREDENTIALS}}\n", &self.credentials())
+    }
+
+    /// `LoadCredential=` for a member file, and where the service finds its
+    /// copy: `%d` is the service's private credentials directory.
+    fn credentials(&self) -> String {
+        match &self.fleet_file {
+            Some(path) => format!(
+                "LoadCredential=fleet:{}\nEnvironment={}=%d/fleet\n",
+                path.display(),
+                crate::fleet::cli::FILE_ENV
+            ),
+            None => String::new(),
+        }
     }
 
     /// The environment file: one variable per line, values quoted so a
@@ -227,6 +244,7 @@ mod tests {
                 ("CAIRN_AGENT_NAME".to_string(), "gpu \"box\" 1".to_string()),
             ],
             groups: vec!["docker".to_string(), "kvm".to_string()],
+            fleet_file: None,
         }
     }
 
@@ -253,6 +271,22 @@ mod tests {
         let env = plan("x").env_file();
         assert!(env.contains("CAIRN_AGENT_NODES=\"http://10.0.0.2:8080,http://10.0.0.3:8080\"\n"));
         assert!(env.contains("CAIRN_AGENT_NAME=\"gpu \\\"box\\\" 1\"\n"));
+    }
+
+    #[test]
+    fn a_member_file_is_a_credential_and_never_in_the_environment() {
+        let plain = plan("cairn-agent").unit();
+        assert!(!plain.contains("LoadCredential"), "{plain}");
+        assert!(!plain.contains("{{"), "{plain}");
+        let mut member = plan("cairn-agent");
+        member.fleet_file = Some(PathBuf::from("/etc/cairn-agent/fleet.json"));
+        let unit = member.unit();
+        assert!(unit.contains("LoadCredential=fleet:/etc/cairn-agent/fleet.json\n"));
+        assert!(unit.contains("Environment=CAIRN_FLEET_FILE=%d/fleet\n"));
+        assert!(
+            !member.env_file().contains("fleet"),
+            "the env file names no member file"
+        );
     }
 
     #[test]

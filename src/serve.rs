@@ -53,6 +53,8 @@ use std::time::{Duration, Instant};
 use crate::canonical::{digest_bytes, Value};
 use crate::crypto::identity::Identity;
 use crate::deposit::{self, DepositDir, DepositError, MAX_PROXY_BYTES};
+use crate::fleet::auth::{JoinRequest, MemberAuth, Refusal};
+use crate::fleet::members::{Member, Registry};
 use crate::fleet::{self, Fleet};
 use crate::goals;
 use crate::hosts;
@@ -75,6 +77,11 @@ use crate::secrets;
 /// is read, because a server that preallocates from a declared length has been
 /// told how much memory to use.
 pub const MAX_BODY_BYTES: u64 = 1 << 20;
+
+/// The routes on which a fleet member's signature means something
+/// (`docs/design/fleet-enrollment.md` §7). Their bodies are read before
+/// routing, so the signature is checked over the bytes the handler parses.
+const MEMBER_ROUTES: [&str; 5] = ["/submit", "/progress", "/hosts", "/lease", "/lease/release"];
 
 /// How long a single request may take to arrive before the connection is
 /// dropped. A slow-loris holding sockets open is the cheapest attack on a
@@ -459,12 +466,34 @@ pub struct Serving {
     /// `Err` is a named file that would not read, refused by
     /// [`Serving::check_startup`] before the first request.
     goals: Result<goals::Catalog, String>,
+    /// The signed time of each member's last lease release, by objective,
+    /// task and holder, with when it was recorded: a claim signed before the
+    /// release it would undo is a replay, not a new claim (design §7). Kept
+    /// for twice the request window, past which no replay verifies anyway.
+    released: Mutex<BTreeMap<LeaseKey, (u64, u64)>>,
+    /// Whether the router forwards this server's own port, when the daemon
+    /// asked it to (`CAIRN_PORTMAP_HTTP`): `node.reach.external` on
+    /// `GET /network`, the address a worker outside the LAN would dial.
+    http_external: Option<Arc<Mutex<crate::p2p::reach::Report>>>,
 }
 
 /// A fleet and the identity that signs for it.
 struct FleetSigner {
     sources: Fleet,
     identity: Identity,
+    /// The members enrolled beside the log, when `sources` lists `enrolled`.
+    members: Option<Registry>,
+}
+
+/// One holder's lease on one task: objective, task, holder.
+type LeaseKey = (String, String, String);
+
+/// A request a fleet member signed, after its signature verified.
+#[derive(Debug, Clone)]
+struct Verified {
+    member: Member,
+    /// The time the member signed, by its own clock.
+    time: u64,
 }
 
 /// How this server obtains the at-rest key, when the log is sealed.
@@ -498,15 +527,23 @@ impl Serving {
             fleet: None,
             peers_policy: None,
             goals: goals::Catalog::from_env(),
+            released: Mutex::new(BTreeMap::new()),
+            http_external: None,
         }
     }
 
     /// Lead a fleet: sign, with `identity`, every unsigned commitment or claim
-    /// that names `identity` and arrives from one of `fleet`'s networks.
+    /// that names `identity` and comes from an enrolled member's signed
+    /// request or from one of `fleet`'s networks. Members are read from the
+    /// registry beside the log ([`crate::fleet::members`]).
     pub fn with_fleet(mut self, fleet: Fleet, identity: Identity) -> Serving {
+        let members = fleet
+            .enrolled
+            .then(|| Registry::for_log(&self.log, identity.public().to_bytes()));
         self.fleet = Some(FleetSigner {
             sources: fleet,
             identity,
+            members,
         });
         self
     }
@@ -533,14 +570,36 @@ impl Serving {
             },
         };
         let identity = crate::mcp::load_identity(&path)?;
-        let networks: Vec<String> = sources.sources.iter().map(|c| c.to_string()).collect();
         log::info!(
             "fleet: unsigned records from {} that name {} are signed here with {}; workers submit under that id and are paid to it",
-            networks.join(", "),
+            sources.describe(),
             identity.submitter_id(),
             path.display()
         );
+        if sources.enrolled {
+            log::info!(
+                "fleet: members are enrolled in {}; `cairn fleet invite` makes a token to join with",
+                fleet::members::dir_for_log(&self.log).display()
+            );
+        }
+        if sources.trusts_networks() {
+            log::warn!(
+                "fleet: trusting every address in {} with no proof; `enrolled` alone signs only for machines you invited",
+                sources
+                    .sources
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         Ok(self.with_fleet(sources, identity))
+    }
+
+    /// Publish the router mapping of the HTTP port, which the daemon keeps.
+    pub fn with_http_external(mut self, report: Arc<Mutex<crate::p2p::reach::Report>>) -> Serving {
+        self.http_external = Some(report);
+        self
     }
 
     /// What the daemon's peer policy is, for the Network page: its name and
@@ -558,48 +617,58 @@ impl Serving {
     /// Sign a fleet member's record, or say why not.
     ///
     /// Only a commitment or claim whose `submitter` is this node's own
-    /// identity and which carries no signature is touched: from a fleet
-    /// network it is signed and returned with the id it was signed as; from
-    /// anywhere else it is refused with `403`, because queued it would only
-    /// fail at drain time where the sender never hears why. Every other
-    /// record passes through untouched -- a member's own nickname, a member's
-    /// own key, another node's key -- and meets the rules it always met.
+    /// identity and which carries no signature is touched: for an enrolled
+    /// member's verified request, or from a fleet network, it is signed and
+    /// returned with the id it was signed as; from anyone else it is refused
+    /// with `403`, because queued it would only fail at drain time where the
+    /// sender never hears why. Every other record passes through untouched --
+    /// a member's own nickname, a member's own key, another node's key -- and
+    /// meets the rules it always met.
     fn fleet_sign(
         &self,
         kind: &str,
         value: Value,
         remote: Option<std::net::IpAddr>,
-    ) -> Result<(Value, Option<String>), (u16, String)> {
+        member: Option<&Member>,
+    ) -> Result<(Value, Option<String>), Refusal> {
         let Some(signer) = &self.fleet else {
             return Ok((value, None));
         };
         let me = signer.identity.submitter_id();
-        let admitted = || remote.is_some_and(|ip| signer.sources.admits(ip));
-        let refused = |remote: Option<std::net::IpAddr>| {
-            let networks: Vec<String> = signer
-                .sources
-                .sources
-                .iter()
-                .map(|c| c.to_string())
-                .collect();
-            (
+        let admitted = || member.is_some() || remote.is_some_and(|ip| signer.sources.admits(ip));
+        let refused = || {
+            let how = match (signer.members.is_some(), signer.sources.trusts_networks()) {
+                (true, false) => "an enrolled member's signed request (`cairn fleet join`)".to_string(),
+                (true, true) => format!(
+                    "an enrolled member's signed request (`cairn fleet join`), or a request from {}",
+                    signer.sources.describe().trim_start_matches("enrolled members, ")
+                ),
+                (false, _) => format!("a request from {}", signer.sources.describe()),
+            };
+            Refusal::new(
                 403,
+                "not_a_member",
                 format!(
-                    "this record names this node's identity {me} and carries no signature. Only a fleet member ({}) may hand such a record over for signing, and {} is not one. Submit under your own name, or sign it yourself",
-                    networks.join(", "),
-                    remote.map(|ip| ip.to_string()).unwrap_or_else(|| "an unknown address".into())
+                    "this record names this node's identity {me} and carries no signature. \
+                     This node signs such a record only for a fleet member -- {how} -- and {} \
+                     is not one. Submit under your own name, or sign it yourself",
+                    remote
+                        .map(|ip| ip.to_string())
+                        .unwrap_or_else(|| "an unknown address".into())
                 ),
             )
         };
+        let malformed = |e: &dyn fmt::Display| {
+            Refusal::new(400, "malformed", format!("record is malformed: {e}"))
+        };
         match kind {
             "commitment" => {
-                let commitment = Commitment::from_value(&value)
-                    .map_err(|e| (400, format!("record is malformed: {e}")))?;
+                let commitment = Commitment::from_value(&value).map_err(|e| malformed(&e))?;
                 if commitment.submitter != me || commitment.signature.is_some() {
                     return Ok((value, None));
                 }
                 if !admitted() {
-                    return Err(refused(remote));
+                    return Err(refused());
                 }
                 Ok((
                     commitment.signed_with(&signer.identity).to_value(),
@@ -607,30 +676,136 @@ impl Serving {
                 ))
             }
             "claim" => {
-                let claim = Claim::from_value(&value)
-                    .map_err(|e| (400, format!("record is malformed: {e}")))?;
+                let claim = Claim::from_value(&value).map_err(|e| malformed(&e))?;
                 if claim.submitter != me || claim.signature.is_some() {
                     return Ok((value, None));
                 }
                 if !admitted() {
-                    return Err(refused(remote));
+                    return Err(refused());
                 }
                 // A relation speaks for the leader beyond "this result is
                 // mine": `retracts` withdraws one of its own claims from
                 // /knowledge on identity alone. Signing says whose result it
                 // is and nothing else, so the leader signs those itself.
                 if !claim.relations.is_empty() {
-                    return Err((
+                    return Err(Refusal::new(
                         403,
+                        "relations_not_signed",
                         "the fleet signs results, not relations: a claim carrying \
-                         `relations` must be signed by the leader itself"
-                            .to_string(),
+                         `relations` must be signed by the leader itself",
                     ));
                 }
                 Ok((claim.signed_with(&signer.identity).to_value(), Some(me)))
             }
             _ => Ok((value, None)),
         }
+    }
+
+    /// The registry of enrolled members, when this node leads a fleet that
+    /// takes them.
+    fn members(&self) -> Option<&Registry> {
+        self.fleet.as_ref()?.members.as_ref()
+    }
+
+    /// Check a member's signature over the request this node received. A
+    /// header that is present and fails is refused, never read as no header.
+    fn verify_member(&self, request: &Request, body: &[u8]) -> Result<Verified, Refusal> {
+        let auth = MemberAuth::parse(request.authorization.as_deref().unwrap_or(""))?;
+        let Some(registry) = self.members() else {
+            return Err(Refusal::new(
+                401,
+                "enrollment_off",
+                "this node signs for no enrolled members (its CAIRN_FLEET does not list \
+                 `enrolled`), so a member signature cannot be checked here. Send the request \
+                 to the leader that enrolled this machine",
+            ));
+        };
+        let member = registry.verify_request(
+            &auth,
+            &request.method,
+            &request.target,
+            body,
+            crate::time::unix_seconds(),
+        )?;
+        Ok(Verified {
+            member,
+            time: auth.time,
+        })
+    }
+
+    /// Whether a roster entry may be posted under `name` (design §7): a
+    /// member's own name, or a name under it unless `exact`; and for a
+    /// request no member signed, any name no member holds.
+    fn may_use_name(
+        &self,
+        name: &str,
+        verified: Option<&Verified>,
+        exact: bool,
+    ) -> Result<(), Refusal> {
+        if let Some(verified) = verified {
+            let own = &verified.member.name;
+            let fits = if exact {
+                name == own
+            } else {
+                fleet::auth::covers(own, name)
+            };
+            if !fits {
+                return Err(Refusal::new(
+                    403,
+                    "name_not_yours",
+                    if exact {
+                        format!("this member is {own:?} and may post only as {own:?}, not {name:?}")
+                    } else {
+                        format!(
+                            "this member is {own:?} and may post as {own:?} or {own:?}/…, not \
+                             {name:?}"
+                        )
+                    },
+                ));
+            }
+            return Ok(());
+        }
+        match self
+            .members()
+            .and_then(|registry| registry.reserved_by(name, crate::time::unix_seconds()))
+        {
+            Some(holder) => Err(Refusal::new(
+                403,
+                "name_reserved",
+                format!(
+                    "{name:?} belongs to the enrolled member {:?}; only its signed requests may \
+                     use it. Post under a name of your own",
+                    holder.name
+                ),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Note a member's signed lease release, so a replay of an earlier claim
+    /// cannot undo it.
+    fn note_release(&self, key: LeaseKey, signed: u64) {
+        let now = crate::time::unix_seconds();
+        let mut released = self
+            .released
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let horizon = 2 * fleet::auth::REQUEST_WINDOW_SECONDS;
+        released.retain(|_, (_, at)| now.saturating_sub(*at) <= horizon);
+        let entry = released.entry(key).or_insert((signed, now));
+        if signed >= entry.0 {
+            *entry = (signed, now);
+        }
+    }
+
+    /// Whether a member's signed claim is older than its own last release of
+    /// the same task: a replay inside the window, answered and not applied.
+    fn is_stale_claim(&self, key: &LeaseKey, signed: u64) -> bool {
+        self.released
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .is_some_and(|(released, _)| signed <= *released)
     }
 
     /// Share the daemon's session roster, so `GET /sessions` and `GET /network`
@@ -769,6 +944,9 @@ impl Serving {
 /// One parsed request line plus the headers we care about.
 struct Request {
     method: String,
+    /// The request-target exactly as the request line carried it, query and
+    /// all: what a fleet member's signature covers.
+    target: String,
     path: String,
     query: BTreeMap<String, String>,
     length: u64,
@@ -776,6 +954,9 @@ struct Request {
     /// The `Host` header, when the client sent one. Read only to refuse a
     /// write addressed to a public DNS name; see [`host_may_write`].
     host: Option<String>,
+    /// The `Authorization` header. Read only for the `CairnMember` scheme
+    /// (design §6); any other is ignored, as every header was before.
+    authorization: Option<String>,
     /// Whether a proxy says it forwarded this request (`Forwarded`,
     /// `X-Forwarded-For`, `X-Real-IP`). Read only to stop a reverse proxy's
     /// loopback connection standing in for a fleet member; see [`handle`].
@@ -995,20 +1176,69 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             return respond(stream, 400, "text/plain", message.as_bytes());
         }
     };
-    if matches!(request.method.as_str(), "POST" | "PUT")
+    let writes = matches!(request.method.as_str(), "POST" | "PUT");
+    // A member route's body is read here, before routing, so a member's
+    // signature is checked over exactly the bytes its handler will parse.
+    let body = if request.method == "POST" && MEMBER_ROUTES.contains(&request.path.as_str()) {
+        match read_body(&mut reader, &request) {
+            Ok(body) => Some(body),
+            Err((status, message)) => {
+                return json_refusal(stream, &Refusal::new(status, "bad_body", message))
+            }
+        }
+    } else {
+        None
+    };
+    // A member's signature, checked before anything acts on the request. A
+    // header that is present and fails is a 401 and never anonymous (design
+    // §6); on a route where a signature means nothing it is refused rather
+    // than ignored, so a header cannot be a way around the Host rule below.
+    let verified = match &body {
+        _ if !writes
+            || !request
+                .authorization
+                .as_deref()
+                .is_some_and(MemberAuth::is_scheme) =>
+        {
+            None
+        }
+        None => {
+            return json_refusal(
+                stream,
+                &Refusal::new(
+                    400,
+                    "not_a_member_route",
+                    "a member signature is read on POST /submit, /progress, /hosts, /lease \
+                     and /lease/release; this route takes none",
+                ),
+            )
+        }
+        Some(body) => match serving.verify_member(&request, body) {
+            Ok(verified) => Some(verified),
+            Err(refusal) => return json_refusal(stream, &refusal),
+        },
+    };
+    // The Host rule stops a web page that rebound a public name onto this
+    // node. A verified member is not such a page -- it holds a key the page
+    // cannot -- and neither is a join, which is signed by an invite; both
+    // reach a leader by whatever name the operator gave its workers.
+    if writes
+        && verified.is_none()
+        && request.path != "/fleet/join"
         && !host_may_write(request.host.as_deref(), &allowed_hosts())
     {
-        return respond(
+        return json_refusal(
             stream,
-            421,
-            "application/json",
-            error_body(&format!(
-                "this node does not accept writes addressed to {:?}; a public DNS name is \
-                 how a web page rebinds itself onto a local node. Address it by IP, \
-                 localhost or a LAN name, or list the name in {ALLOWED_HOSTS_ENV}",
-                request.host.as_deref().unwrap_or("")
-            ))
-            .as_bytes(),
+            &Refusal::new(
+                421,
+                "host_not_allowed",
+                format!(
+                    "this node does not accept writes addressed to {:?}; a public DNS name is \
+                     how a web page rebinds itself onto a local node. Address it by IP, \
+                     localhost or a LAN name, or list the name in {ALLOWED_HOSTS_ENV}",
+                    request.host.as_deref().unwrap_or("")
+                ),
+            ),
         );
     }
 
@@ -1054,14 +1284,48 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             // would be a fleet member. A loopback connection that says a proxy
             // forwarded it is somebody else's request; it is treated as from
             // an unknown address, which no fleet admits. The forwarded address
-            // itself is not trusted: any client can write the header.
+            // itself is not trusted: any client can write the header. An
+            // enrolled member is unaffected: it is admitted by its key, not
+            // its address, so it signs through a proxy as from anywhere.
             let member_address = remote.filter(|ip| !(ip.is_loopback() && request.forwarded));
-            submit(stream, &mut reader, serving, &request, member_address)
+            submit(
+                stream,
+                serving,
+                &request,
+                member_address,
+                body.as_deref().unwrap_or_default(),
+                verified.as_ref(),
+            )
         }
-        ("POST", "/progress") => heartbeat(stream, &mut reader, serving, &request),
-        ("POST", "/hosts") => host_register(stream, &mut reader, serving, &request),
-        ("POST", "/lease") => lease_claim(stream, &mut reader, serving, &request),
-        ("POST", "/lease/release") => lease_release(stream, &mut reader, serving, &request),
+        ("POST", "/progress") => heartbeat(
+            stream,
+            serving,
+            &request,
+            body.as_deref().unwrap_or_default(),
+            verified.as_ref(),
+        ),
+        ("POST", "/hosts") => host_register(
+            stream,
+            serving,
+            &request,
+            body.as_deref().unwrap_or_default(),
+            verified.as_ref(),
+        ),
+        ("POST", "/lease") => lease_claim(
+            stream,
+            serving,
+            &request,
+            body.as_deref().unwrap_or_default(),
+            verified.as_ref(),
+        ),
+        ("POST", "/lease/release") => lease_release(
+            stream,
+            serving,
+            &request,
+            body.as_deref().unwrap_or_default(),
+            verified.as_ref(),
+        ),
+        ("POST", "/fleet/join") => fleet_join(stream, &mut reader, serving, &request),
         ("POST", "/objective/prepare") => prepare_objective(stream, &mut reader, &request),
         ("POST", "/deposit/grant") => deposit_grant(stream, &mut reader, serving, &request),
         ("PUT", path) if path.starts_with("/deposit/upload/") => deposit_upload(
@@ -1108,7 +1372,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
 
     let (path, query_text) = match target.split_once('?') {
         Some((path, query)) => (path.to_string(), query.to_string()),
-        None => (target, String::new()),
+        None => (target.clone(), String::new()),
     };
     let mut query = BTreeMap::new();
     for pair in query_text.split('&').filter(|s| !s.is_empty()) {
@@ -1119,6 +1383,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
     let mut length = 0u64;
     let mut content_type = None;
     let mut host = None;
+    let mut authorization = None;
     let mut forwarded = false;
     let mut headers = 0usize;
     loop {
@@ -1137,6 +1402,9 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
             let value = value.trim();
             if name == "host" {
                 host = Some(value.to_string());
+            }
+            if name == "authorization" {
+                authorization = Some(value.to_string());
             }
             if matches!(name.as_str(), "forwarded" | "x-forwarded-for" | "x-real-ip") {
                 forwarded = true;
@@ -1175,11 +1443,13 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
 
     Ok(Request {
         method,
+        target,
         path,
         query,
         length,
         content_type,
         host,
+        authorization,
         forwarded,
     })
 }
@@ -1276,6 +1546,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("POST /hosts"),
                 Value::string("POST /lease"),
                 Value::string("POST /lease/release"),
+                Value::string("POST /fleet/join"),
                 // Always listed: a node with no deposits configured still
                 // answers these, with unavailable / missing rather than 404,
                 // so a contributor learns "this node has no deposit" instead
@@ -1422,6 +1693,19 @@ fn goals_index(stream: &mut TcpStream, serving: &Serving, request: &Request) -> 
                     Value::Array(grouped.iter().map(goals::goal_value).collect()),
                 ),
                 ("total", Value::Int(grouped.len() as i128)),
+                // Where compute is scarce: open reward per live worker, by
+                // angle, richest first. A ranking from the same two sources as
+                // the rest of this answer, never a payment.
+                (
+                    "underserved",
+                    Value::Array(
+                        goals::underserved(&grouped)
+                            .iter()
+                            .take(UNDERSERVED_SHOWN)
+                            .map(goals::underserved_value)
+                            .collect(),
+                    ),
+                ),
                 (
                     "catalog",
                     Value::object([
@@ -1443,6 +1727,10 @@ fn goals_index(stream: &mut TcpStream, serving: &Serving, request: &Request) -> 
         ),
     }
 }
+
+/// How many underserved angles `GET /goals` lists: enough to choose from,
+/// few enough that the list says where the scarcity is.
+const UNDERSERVED_SHOWN: usize = 10;
 
 /// One goal by key or alias, with every angle and objective under it.
 fn goal_of(stream: &mut TcpStream, serving: &Serving, key: &str) -> io::Result<()> {
@@ -1917,7 +2205,21 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                         Value::Bool(facts.accepts_submissions),
                     ),
                     ("runs_p2p", Value::Bool(facts.runs_p2p)),
-                    ("reach", network::reach(serving.bound)),
+                    ("reach", {
+                        let mut reach = network::reach(serving.bound);
+                        if let (Value::Object(fields), Some(external)) =
+                            (&mut reach, &serving.http_external)
+                        {
+                            fields.insert(
+                                "external".to_string(),
+                                external
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .to_value(),
+                            );
+                        }
+                        reach
+                    }),
                     // The fleet this node leads and whom it peers with: two
                     // declarations, like the roles above, and like them a
                     // fact about this process's configuration and nothing a
@@ -1928,6 +2230,22 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                             Some(signer) => Value::object([
                                 ("sources", signer.sources.to_value()),
                                 ("signs_as", Value::string(signer.identity.submitter_id())),
+                                // Counts only: who is in a fleet is the
+                                // operator's business (`cairn fleet list`).
+                                (
+                                    "members",
+                                    match &signer.members {
+                                        Some(registry) => {
+                                            let (enrolled, live) =
+                                                registry.counts(now, progress::LIVE_SECONDS);
+                                            Value::object([
+                                                ("enrolled", Value::Int(enrolled as i128)),
+                                                ("live", Value::Int(live as i128)),
+                                            ])
+                                        }
+                                        None => Value::Null,
+                                    },
+                                ),
                             ]),
                             None => Value::Null,
                         },
@@ -2089,6 +2407,7 @@ fn compute_value(
                     None => Value::Null,
                 },
             ),
+            ("member", Value::Bool(worker.member)),
         ]));
     }
     let mut devices: Vec<((String, &str), Sum)> = by_device.into_iter().collect();
@@ -2387,21 +2706,98 @@ fn hosts_index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         .summary(now);
     json(stream, 200, &summary)
 }
-
-fn host_register(
+/// Enroll a machine with an invite (`docs/design/fleet-enrollment.md` §5).
+///
+/// The body is signed twice: by the invite's key, which proves the joiner
+/// holds the token without sending it, and by the new member key, which
+/// proves the joiner holds that. Neither secret crosses the wire. A replay
+/// yields the same membership; everything else the registry refuses comes
+/// back with its reason.
+fn fleet_join(
     stream: &mut TcpStream,
     reader: &mut BufReader<TcpStream>,
     serving: &Serving,
     request: &Request,
 ) -> io::Result<()> {
-    let value = match read_json_body(reader, request, "/hosts") {
+    let Some(registry) = serving.members() else {
+        return json_refusal(
+            stream,
+            &Refusal::new(
+                404,
+                "enrollment_off",
+                "this node takes no members: its CAIRN_FLEET does not list `enrolled`",
+            ),
+        );
+    };
+    let value = match read_json_body(reader, request, "/fleet/join") {
         Ok(value) => value,
         Err((status, message)) => return json_error(stream, status, &message),
     };
-    let (registration, ignored) = match hosts::Registration::from_value(&value) {
+    let join = match JoinRequest::from_value(&value) {
+        Ok(join) => join,
+        Err(refusal) => return json_refusal(stream, &refusal),
+    };
+    let member = match registry.join(&join, crate::time::unix_seconds()) {
+        Ok(member) => member,
+        Err(refusal) => return json_refusal(stream, &refusal),
+    };
+    log::info!(
+        "fleet: {} joined as {}",
+        &fleet::auth::key_hex(&member.key)[..12],
+        member.name
+    );
+    let iso = |unix: u64| crate::time::format_iso8601_utc(i64::try_from(unix).unwrap_or(i64::MAX));
+    json(
+        stream,
+        201,
+        &Value::object([
+            ("joined", Value::Bool(true)),
+            ("name", Value::string(member.name.clone())),
+            ("member", Value::string(fleet::auth::key_hex(&member.key))),
+            (
+                "leader",
+                Value::string(fleet::auth::key_hex(&registry.leader())),
+            ),
+            (
+                "expires_at",
+                match member.expires_at {
+                    Some(at) => Value::string(iso(at)),
+                    None => Value::Null,
+                },
+            ),
+            (
+                "note",
+                Value::string(
+                    "Enrolled. Sign every POST with `Authorization: CairnMember <member> \
+                     <time> <signature>` and this leader signs your commitments and claims as \
+                     itself, from any address, and reserves your name on its rosters. \
+                     `cairn work --fleet FILE` does all of it.",
+                ),
+            ),
+        ]),
+    )
+}
+
+fn host_register(
+    stream: &mut TcpStream,
+    serving: &Serving,
+    request: &Request,
+    body: &[u8],
+    verified: Option<&Verified>,
+) -> io::Result<()> {
+    let value = match json_body(body, request, "/hosts") {
+        Ok(value) => value,
+        Err((status, message)) => return json_error(stream, status, &message),
+    };
+    let (mut registration, ignored) = match hosts::Registration::from_value(&value) {
         Ok(decoded) => decoded,
         Err(why) => return json_error(stream, 400, &why.to_string()),
     };
+    // One machine, one membership: a member registers under its own name.
+    if let Err(refusal) = serving.may_use_name(&registration.host, verified, true) {
+        return json_refusal(stream, &refusal);
+    }
+    registration.member = verified.is_some();
     // Unlike a heartbeat, a registration names no objective: a machine is on
     // the network before anybody has posted work for it. What bounds a
     // stranger here is the roster's own cap and the size cap on each entry.
@@ -2500,18 +2896,41 @@ fn leases_of(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<
 /// Accepted on a read-only node: nothing here touches the log or the queue.
 fn lease_claim(
     stream: &mut TcpStream,
-    reader: &mut BufReader<TcpStream>,
     serving: &Serving,
     request: &Request,
+    body: &[u8],
+    verified: Option<&Verified>,
 ) -> io::Result<()> {
-    let value = match read_json_body(reader, request, "/lease") {
+    let value = match json_body(body, request, "/lease") {
         Ok(value) => value,
         Err((status, message)) => return json_error(stream, status, &message),
     };
-    let (claim, ignored) = match lease::Claim::from_value(&value) {
+    let (mut claim, ignored) = match lease::Claim::from_value(&value) {
         Ok(decoded) => decoded,
         Err(why) => return json_error(stream, 400, &why.to_string()),
     };
+    if let Err(refusal) = serving.may_use_name(&claim.holder, verified, false) {
+        return json_refusal(stream, &refusal);
+    }
+    if let Some(verified) = verified {
+        let key = (
+            claim.objective_id.clone(),
+            claim.task.clone(),
+            claim.holder.clone(),
+        );
+        if serving.is_stale_claim(&key, verified.time) {
+            return json_refusal(
+                stream,
+                &Refusal::new(
+                    409,
+                    "stale_claim",
+                    "this claim was signed before the same holder's last release of the same \
+                     task: a replay, not a new claim. Sign a new one to take the task again",
+                ),
+            );
+        }
+        claim.member = true;
+    }
     let node = match serving.node() {
         Ok(node) => node,
         Err(why) => return json_error(stream, 500, &why),
@@ -2588,11 +3007,12 @@ fn lease_claim(
 /// ways a task ends and what each tells the next worker.
 fn lease_release(
     stream: &mut TcpStream,
-    reader: &mut BufReader<TcpStream>,
     serving: &Serving,
     request: &Request,
+    body: &[u8],
+    verified: Option<&Verified>,
 ) -> io::Result<()> {
-    let value = match read_json_body(reader, request, "/lease/release") {
+    let value = match json_body(body, request, "/lease/release") {
         Ok(value) => value,
         Err((status, message)) => return json_error(stream, status, &message),
     };
@@ -2600,6 +3020,14 @@ fn lease_release(
         Ok(decoded) => decoded,
         Err(why) => return json_error(stream, 400, &why.to_string()),
     };
+    if let Err(refusal) = serving.may_use_name(&release.holder, verified, false) {
+        return json_refusal(stream, &refusal);
+    }
+    let released_key = (
+        release.objective_id.clone(),
+        release.task.clone(),
+        release.holder.clone(),
+    );
     let now = crate::time::unix_seconds();
     let (objective_id, task, holder, outcome) = (
         release.objective_id.clone(),
@@ -2612,6 +3040,9 @@ fn lease_release(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .release(release, now);
+    if let (Ok(()), Some(verified)) = (&result, verified) {
+        serving.note_release(released_key, verified.time);
+    }
     match result {
         Ok(()) => json(
             stream,
@@ -2650,18 +3081,25 @@ fn lease_release(
 /// cannot fill the roster with names against ids nobody is working.
 fn heartbeat(
     stream: &mut TcpStream,
-    reader: &mut BufReader<TcpStream>,
     serving: &Serving,
     request: &Request,
+    body: &[u8],
+    verified: Option<&Verified>,
 ) -> io::Result<()> {
-    let value = match read_json_body(reader, request, "/progress") {
+    let value = match json_body(body, request, "/progress") {
         Ok(value) => value,
         Err((status, message)) => return json_error(stream, status, &message),
     };
-    let (heartbeat, ignored) = match Heartbeat::from_value(&value) {
+    let (mut heartbeat, ignored) = match Heartbeat::from_value(&value) {
         Ok(decoded) => decoded,
         Err(why) => return json_error(stream, 400, &why.to_string()),
     };
+    // One box, four GPUs, four slices: a member reports as `name` or
+    // `name/gpu0`, and nobody else may report under either.
+    if let Err(refusal) = serving.may_use_name(&heartbeat.worker, verified, false) {
+        return json_refusal(stream, &refusal);
+    }
+    heartbeat.member = verified.is_some();
     let node = match serving.node() {
         Ok(node) => node,
         Err(why) => return json_error(stream, 500, &why),
@@ -3108,21 +3546,27 @@ fn checkpoint(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
 /// put a second copy of the admission rules on the network boundary.
 fn submit(
     stream: &mut TcpStream,
-    reader: &mut BufReader<TcpStream>,
     serving: &Serving,
     request: &Request,
     remote: Option<std::net::IpAddr>,
+    body: &[u8],
+    verified: Option<&Verified>,
 ) -> io::Result<()> {
     let Some(spool) = &serving.spool else {
-        return json_error(
+        return json_refusal(
             stream,
-            405,
-            "this node is read-only; it accepts no submissions",
+            &Refusal::new(
+                405,
+                "read_only",
+                "this node is read-only; it accepts no submissions",
+            ),
         );
     };
-    let value = match read_json_body(reader, request, "/submit") {
+    let value = match json_body(body, request, "/submit") {
         Ok(value) => value,
-        Err((status, message)) => return json_error(stream, status, &message),
+        Err((status, message)) => {
+            return json_refusal(stream, &Refusal::new(status, "bad_body", message))
+        }
     };
 
     // The kind comes from the query string or the record's own `type`, and is
@@ -3136,13 +3580,15 @@ fn submit(
         .or_else(|| value.get("type").and_then(Value::as_str).map(String::from))
         .unwrap_or_else(|| "claim".to_string());
 
+    let malformed =
+        |why: String| Refusal::new(400, "malformed", format!("record is malformed: {why}"));
     let decoded = match kind.as_str() {
         "claim" => Claim::from_value(&value)
             .map(|_| ())
-            .map_err(|e| e.to_string()),
+            .map_err(|e| malformed(e.to_string())),
         "commitment" => Commitment::from_value(&value)
             .map(|_| ())
-            .map_err(|e| e.to_string()),
+            .map_err(|e| malformed(e.to_string())),
         // An objective is a *proposal to spend*, so the one thing worth
         // checking here is the thing a submitter cannot fix later: the funding
         // authorization. `post_objective` checks it again at drain time
@@ -3155,26 +3601,38 @@ fn submit(
         // a log with no declared supply is a bounty anyone may post; on one
         // with a supply, `post_objective` refuses the nickname outright.
         "objective" => Objective::from_value(&value)
-            .map_err(|e| e.to_string())
+            .map_err(|e| malformed(e.to_string()))
             .and_then(|objective| {
-                objective
-                    .verify_funding_signature()
-                    .map_err(|e| e.to_string())
+                objective.verify_funding_signature().map_err(|e| {
+                    Refusal::new(
+                        400,
+                        "bad_funding_signature",
+                        format!(
+                            "record is malformed: {e}. Sign the bytes POST /objective/prepare \
+                             returns for this draft, with the key the funder names"
+                        ),
+                    )
+                })
             }),
-        other => Err(format!(
-            "unknown record kind {other:?}; this endpoint accepts \"objective\", \
-             \"commitment\" and \"claim\""
+        other => Err(Refusal::new(
+            400,
+            "unknown_kind",
+            format!(
+                "unknown record kind {other:?}; this endpoint accepts \"objective\", \
+                 \"commitment\" and \"claim\""
+            ),
         )),
     };
-    if let Err(why) = decoded {
-        return json_error(stream, 400, &format!("record is malformed: {why}"));
+    if let Err(refusal) = decoded {
+        return json_refusal(stream, &refusal);
     }
 
     // A fleet leader signs its workers' records here, before the gate and the
     // queue, so what is queued is exactly what will be admitted.
-    let (value, signed_as) = match serving.fleet_sign(&kind, value, remote) {
+    let member = verified.map(|v| &v.member);
+    let (value, signed_as) = match serving.fleet_sign(&kind, value, remote, member) {
         Ok(signed) => signed,
-        Err((status, why)) => return json_error(stream, status, &why),
+        Err(refusal) => return json_refusal(stream, &refusal),
     };
 
     // Schema-gate it here as well as at drain time. Both implementations
@@ -3185,49 +3643,142 @@ fn submit(
         _ => Ok(()),
     };
     if let Err(why) = gate {
-        return json_error(
+        return json_refusal(
             stream,
-            400,
-            &format!("record does not satisfy its schema: {why}"),
+            &Refusal::new(
+                400,
+                "schema",
+                format!("record does not satisfy its schema: {why}"),
+            ),
         );
     }
 
     match spool.offer(&kind, &value) {
-        Ok(id) => json(
-            stream,
-            202,
-            &Value::object([
-                ("queued", Value::string(id)),
-                ("kind", Value::string(kind)),
-                (
-                    "signed_as",
-                    match signed_as {
-                        Some(id) => Value::string(id),
-                        None => Value::Null,
-                    },
-                ),
-                (
-                    "note",
-                    Value::string(
-                        "Queued, not admitted. The operator's node re-derives every rule \
+        Ok(id) => {
+            // Which member found what, on the leader alone (design §9). The
+            // log names the leader and only the leader.
+            if let (Some(_), Some(member), Some(registry)) = (&signed_as, member, serving.members())
+            {
+                let objective = value
+                    .get("objective_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if let Err(error) =
+                    registry.journal(member, &kind, &id, objective, crate::time::unix_seconds())
+                {
+                    log::warn!("fleet: cannot journal {id} for {}: {error}", member.name);
+                }
+            }
+            let wait = wait_for(serving, &kind, &value, crate::time::unix_seconds());
+            json(
+                stream,
+                202,
+                &Value::object([
+                    ("reason", Value::string("queued")),
+                    ("queued", Value::string(id)),
+                    ("kind", Value::string(kind)),
+                    ("wait", wait),
+                    (
+                        "signed_as",
+                        match signed_as {
+                            Some(id) => Value::string(id),
+                            None => Value::Null,
+                        },
+                    ),
+                    (
+                        "member",
+                        match member {
+                            Some(member) => Value::string(member.name.clone()),
+                            None => Value::Null,
+                        },
+                    ),
+                    (
+                        "note",
+                        Value::string(
+                            "Queued, not admitted. The operator's node re-derives every rule \
                          against the whole log when it drains the queue -- epoch, citations, \
                          duplicate artifacts -- so this is a proposal and not a receipt. \
                          Watch GET /log for the record, and GET /frontier/{id} for the \
                          outcome.",
+                        ),
                     ),
-                ),
-            ]),
-        ),
+                ]),
+            )
+        }
         // 429, not 500: a full queue is a fact about how recently the
         // operator drained, not a broken node, and the submitter should
         // retry rather than assume their work is unwelcome.
-        Err(OfferError::Full(full)) => json_error(stream, 429, &full.to_string()),
-        Err(OfferError::Io(error)) => json_error(
+        Err(OfferError::Full(full)) => {
+            json_refusal(stream, &Refusal::new(429, "queue_full", full.to_string()))
+        }
+        Err(OfferError::Io(error)) => json_refusal(
             stream,
-            500,
-            &format!("cannot queue the submission: {error}"),
+            &Refusal::new(
+                500,
+                "internal",
+                format!("cannot queue the submission: {error}"),
+            ),
         ),
     }
+}
+
+/// What a queued record waits for, in fields a client can act on without
+/// reading the note: who drains the queue and how often, the epoch now and
+/// how long it has left, the epoch the record claims, and for a commitment
+/// the epoch its reveal becomes admissible in.
+///
+/// `at_risk` says the record may be refused at drain time for its epoch: it
+/// claims another epoch than this one, or this one ends before the next
+/// drain. Admission checks a commitment's or claim's epoch against the epoch
+/// it is drained in, so a record queued in an epoch's last seconds lands in
+/// the next and is refused, which is why `cairn work` posts nothing in an
+/// epoch's last eight seconds.
+fn wait_for(serving: &Serving, kind: &str, value: &Value, now: u64) -> Value {
+    let length = epoch_seconds();
+    let epoch = epoch_of(now, length);
+    let ends_in = length - now % length;
+    // A daemon drains its own queue every tick; a plain publisher's queue is
+    // drained by the operator, on no schedule this process knows.
+    let every = serving
+        .sessions
+        .is_some()
+        .then_some(crate::daemon::TICK_SECONDS);
+    let int = |n: u64| Value::Int(i128::from(n));
+    let mut fields: Vec<(&'static str, Value)> = vec![
+        ("for", Value::string("admission")),
+        (
+            "drained_by",
+            Value::string(if every.is_some() {
+                "this node"
+            } else {
+                "the operator (cairn drain, or a daemon on this queue)"
+            }),
+        ),
+        ("drain_every_seconds", every.map(int).unwrap_or(Value::Null)),
+        ("epoch", int(epoch)),
+        ("epoch_seconds", int(length)),
+        ("epoch_ends_in_seconds", int(ends_in)),
+    ];
+    if matches!(kind, "commitment" | "claim") {
+        let claimed = value
+            .get("created_at")
+            .and_then(Value::as_str)
+            .and_then(crate::time::parse_rfc3339)
+            .and_then(|t| u64::try_from(t).ok())
+            .map(|t| epoch_of(t, length));
+        let late = every.is_some_and(|every| ends_in <= every);
+        fields.push(("record_epoch", claimed.map(int).unwrap_or(Value::Null)));
+        fields.push(("at_risk", Value::Bool(claimed != Some(epoch) || late)));
+        if kind == "commitment" {
+            let reveal = claimed.unwrap_or(epoch).saturating_add(1);
+            fields.push(("reveal_from_epoch", int(reveal)));
+            fields.push((
+                "reveal_in_seconds",
+                int(reveal.saturating_mul(length).saturating_sub(now)),
+            ));
+        }
+    }
+    Value::object(fields)
 }
 
 /// Issue a short-lived upload grant against a node-local deposit.
@@ -3510,15 +4061,35 @@ fn read_json_body(
     if request.content_type.as_deref() != Some("application/json") {
         return Err((415, format!("POST {route} requires application/json")));
     }
-    if request.length == 0 {
-        return Err((400, "empty body".to_string()));
-    }
+    let body = read_body(reader, request)?;
+    json_body(&body, request, route)
+}
+
+/// Read a body's bytes, exactly `content-length` of them. The length was
+/// checked against its cap when the headers were read.
+fn read_body(
+    reader: &mut BufReader<TcpStream>,
+    request: &Request,
+) -> Result<Vec<u8>, (u16, String)> {
     let mut body = Vec::new();
-    if reader.take(request.length).read_to_end(&mut body).is_err() {
+    if reader.take(request.length).read_to_end(&mut body).is_err()
+        || (body.len() as u64) < request.length
+    {
         return Err((400, "could not read the body".to_string()));
     }
-    let text = String::from_utf8(body).map_err(|_| (400, "body is not UTF-8".to_string()))?;
-    Value::from_json(&text).map_err(|error| (400, format!("body is not usable JSON: {error}")))
+    Ok(body)
+}
+
+/// Parse a body already read, with the checks [`read_json_body`] makes.
+fn json_body(body: &[u8], request: &Request, route: &str) -> Result<Value, (u16, String)> {
+    if request.content_type.as_deref() != Some("application/json") {
+        return Err((415, format!("POST {route} requires application/json")));
+    }
+    if body.is_empty() {
+        return Err((400, "empty body".to_string()));
+    }
+    let text = std::str::from_utf8(body).map_err(|_| (400, "body is not UTF-8".to_string()))?;
+    Value::from_json(text).map_err(|error| (400, format!("body is not usable JSON: {error}")))
 }
 
 /// Canonicalize a draft objective and hand back the exact bytes its funder
@@ -3627,6 +4198,20 @@ fn json_error(stream: &mut TcpStream, status: u16, message: &str) -> io::Result<
         status,
         "application/json",
         error_body(message).as_bytes(),
+    )
+}
+
+/// A refusal with its machine-readable reason beside the words:
+/// `{"error": "...", "reason": "name_reserved"}`. A client branches on the
+/// reason and shows the error.
+fn json_refusal(stream: &mut TcpStream, refusal: &Refusal) -> io::Result<()> {
+    json(
+        stream,
+        refusal.status,
+        &Value::object([
+            ("error", Value::string(refusal.message.clone())),
+            ("reason", Value::string(refusal.reason)),
+        ]),
     )
 }
 
@@ -5540,6 +6125,588 @@ mod tests {
         );
     }
 
+    /// Send one request with whatever headers a case needs, and get
+    /// `(status line, body)` back.
+    fn ask_raw(
+        addr: std::net::SocketAddr,
+        method: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> (String, Value) {
+        let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+        let mut head = format!("{method} {target} HTTP/1.1\r\nConnection: close\r\n");
+        if !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+        {
+            head.push_str("Host: x\r\n");
+        }
+        for (name, value) in headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        ));
+        socket.write_all(head.as_bytes()).expect("write");
+        socket.write_all(body).expect("write");
+        let mut response = String::new();
+        let _ = std::io::Read::read_to_string(&mut socket, &mut response);
+        let (head, body) = response.split_once("\r\n\r\n").expect("a body");
+        let status = head.lines().next().unwrap_or_default().to_string();
+        (status, Value::from_json(body).unwrap_or(Value::Null))
+    }
+
+    fn reason(body: &Value) -> Option<&str> {
+        body.get("reason").and_then(Value::as_str)
+    }
+
+    /// A leader that trusts no network, and one member that joined it over
+    /// HTTP with an invite.
+    struct Enrolled {
+        dir: TempDir,
+        log: PathBuf,
+        objective_id: String,
+        addr: std::net::SocketAddr,
+        leader: Identity,
+        member: Identity,
+        name: String,
+    }
+
+    impl Enrolled {
+        fn start(tag: &str) -> Enrolled {
+            let dir = TempDir::new(tag);
+            let (log, objective_id) = orbit_search_log(&dir);
+            let leader = Identity::from_secret_bytes([7u8; 32]);
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")))
+                .accepting_into(dir.path.join("queue"))
+                .with_fleet(Fleet::parse("enrolled").unwrap(), leader.clone());
+            std::thread::spawn(move || {
+                let _ = serve_on(listener, serving);
+            });
+            // The operator's side writes files; the node reads them.
+            let registry = Registry::for_log(&log, leader.public().to_bytes());
+            let (token, _) = registry
+                .create_invite(
+                    &fleet::members::Terms {
+                        uses: 1,
+                        expires_in: 3600,
+                        name: Some("gpu-box-1".into()),
+                        ..Default::default()
+                    },
+                    crate::time::unix_seconds(),
+                )
+                .expect("invite");
+            let member = Identity::from_secret_bytes([4u8; 32]);
+            let join = JoinRequest::sign(
+                &token.leader,
+                &token.invite(),
+                &member,
+                "",
+                crate::time::unix_seconds(),
+            );
+            let (status, body) = ask_raw(
+                addr,
+                "POST",
+                "/fleet/join",
+                &[],
+                join.to_value().canonical_string().as_bytes(),
+            );
+            assert!(status.contains("201"), "{status} {body:?}");
+            assert_eq!(
+                body.get("leader").unwrap().as_str(),
+                Some(leader.submitter_id().as_str())
+            );
+            let name = body.get("name").unwrap().as_str().unwrap().to_string();
+            assert_eq!(name, "gpu-box-1");
+            // A join replayed, even addressed to a public name, is the same
+            // membership: the Host rule does not stand between a rented box
+            // and a leader it knows by DNS name.
+            let (status, again) = ask_raw(
+                addr,
+                "POST",
+                "/fleet/join",
+                &[("Host", "leader.example.com:8080")],
+                join.to_value().canonical_string().as_bytes(),
+            );
+            assert!(status.contains("201"), "{status} {again:?}");
+            assert_eq!(again.get("name"), body.get("name"));
+            Enrolled {
+                dir,
+                log,
+                objective_id,
+                addr,
+                leader,
+                member,
+                name,
+            }
+        }
+
+        /// A request signed by the member at `time`, over `body`.
+        fn signed(&self, target: &str, body: &str, time: u64) -> String {
+            fleet::auth::MemberAuth::sign(
+                &self.member,
+                &self.leader.public().to_bytes(),
+                time,
+                "POST",
+                target,
+                body.as_bytes(),
+            )
+            .render()
+        }
+
+        fn post(&self, target: &str, body: &str, header: Option<&str>) -> (String, Value) {
+            let headers: Vec<(&str, &str)> = header
+                .map(|h| vec![("Authorization", h)])
+                .unwrap_or_default();
+            ask_raw(self.addr, "POST", target, &headers, body.as_bytes())
+        }
+
+        fn post_signed(&self, target: &str, body: &str) -> (String, Value) {
+            let header = self.signed(target, body, crate::time::unix_seconds());
+            self.post(target, body, Some(&header))
+        }
+
+        fn commitment(&self, who: &str, hash_tail: char) -> String {
+            Value::object([
+                ("type", Value::string("commitment")),
+                ("objective_id", Value::string(self.objective_id.clone())),
+                ("submitter", Value::string(who)),
+                (
+                    "hash",
+                    Value::string(format!("sha256:{}", hash_tail.to_string().repeat(64))),
+                ),
+                (
+                    "created_at",
+                    Value::string(crate::time::format_iso8601_utc(
+                        crate::time::unix_seconds() as i64
+                    )),
+                ),
+            ])
+            .canonical_string()
+        }
+
+        fn heartbeat(&self, worker: &str) -> String {
+            format!(
+                r#"{{"objective_id":"{}","worker":"{worker}","steps":1}}"#,
+                self.objective_id
+            )
+        }
+    }
+
+    #[test]
+    fn an_enrolled_member_is_signed_for_from_anywhere_and_a_stranger_is_not() {
+        let fleet = Enrolled::start("enrolled-signing");
+        let me = fleet.leader.submitter_id();
+
+        // Loopback is not a credential once only `enrolled` is listed.
+        let anonymous = fleet.commitment(&me, '1');
+        let (status, body) = fleet.post("/submit?kind=commitment", &anonymous, None);
+        assert!(status.contains("403"), "{status} {body:?}");
+        assert_eq!(reason(&body), Some("not_a_member"));
+
+        // The member's signed request is signed as the leader and journaled.
+        let record = fleet.commitment(&me, '2');
+        let header = fleet.signed(
+            "/submit?kind=commitment",
+            &record,
+            crate::time::unix_seconds(),
+        );
+        let (status, body) = fleet.post("/submit?kind=commitment", &record, Some(&header));
+        assert!(status.contains("202"), "{status} {body:?}");
+        assert_eq!(body.get("signed_as").unwrap().as_str(), Some(me.as_str()));
+        assert_eq!(body.get("member").unwrap().as_str(), Some("gpu-box-1"));
+        let queued = body.get("queued").unwrap().clone();
+        // A replay inside the window queues the same record, not a second.
+        let (status, again) = fleet.post("/submit?kind=commitment", &record, Some(&header));
+        assert!(status.contains("202"), "{status} {again:?}");
+        assert_eq!(again.get("queued"), Some(&queued));
+        let journal = std::fs::read_to_string(fleet.dir.path.join("fleet/journal.jsonl"))
+            .expect("the journal");
+        let line = Value::from_json(journal.lines().next().unwrap()).unwrap();
+        assert_eq!(line.get("name").unwrap().as_str(), Some("gpu-box-1"));
+        assert_eq!(line.get("record"), Some(&queued));
+        assert_eq!(
+            line.get("objective").unwrap().as_str(),
+            Some(fleet.objective_id.as_str())
+        );
+
+        // A signature over other bytes, another path, or another clock fails,
+        // and a header that fails is a 401, never an anonymous request.
+        let (status, body) = fleet.post(
+            "/submit?kind=commitment",
+            &fleet.commitment(&me, '3'),
+            Some(&header),
+        );
+        assert!(status.contains("401"), "{status} {body:?}");
+        assert_eq!(reason(&body), Some("bad_signature"));
+        let (status, body) = fleet.post("/submit?kind=claim", &record, Some(&header));
+        assert!(status.contains("401"), "{status}");
+        assert_eq!(reason(&body), Some("bad_signature"));
+        let stale = fleet.signed(
+            "/submit?kind=commitment",
+            &record,
+            crate::time::unix_seconds() - 1000,
+        );
+        let (status, body) = fleet.post("/submit?kind=commitment", &record, Some(&stale));
+        assert!(status.contains("401"), "{status}");
+        assert_eq!(reason(&body), Some("clock_skew"));
+        let hb = fleet.heartbeat("anyone-else");
+        let (status, body) = fleet.post("/progress", &hb, Some("CairnMember nonsense"));
+        assert!(status.contains("401"), "{status}");
+        assert_eq!(reason(&body), Some("malformed_authorization"));
+        let (status, _) = fleet.post("/progress", &hb, None);
+        assert!(
+            status.contains("202"),
+            "the same heartbeat with no header is a stranger's"
+        );
+
+        // A member is not a web page that rebound a public name: the Host rule
+        // stands for strangers and steps aside for a verified signature.
+        let public = [("Host", "leader.example.com:8080")];
+        let (status, _) = ask_raw(fleet.addr, "POST", "/progress", &public, hb.as_bytes());
+        assert!(status.contains("421"), "{status}");
+        let mine = fleet.heartbeat("gpu-box-1");
+        let header = fleet.signed("/progress", &mine, crate::time::unix_seconds());
+        let (status, body) = ask_raw(
+            fleet.addr,
+            "POST",
+            "/progress",
+            &[
+                ("Host", "leader.example.com:8080"),
+                ("Authorization", &header),
+            ],
+            mine.as_bytes(),
+        );
+        assert!(status.contains("202"), "{status} {body:?}");
+
+        // A signature means nothing on a route that takes none.
+        let (status, body) = fleet.post("/objective/prepare", "{}", Some(&header));
+        assert!(status.contains("400"), "{status}");
+        assert_eq!(reason(&body), Some("not_a_member_route"));
+
+        // Counts on the public route, never names.
+        let (_, network) = get_json(fleet.addr, "/network");
+        let fleet_value = at(&network, "node.fleet");
+        assert_eq!(
+            fleet_value.get("sources"),
+            Some(&Value::Array(vec![Value::string("enrolled")]))
+        );
+        assert_eq!(at(fleet_value, "members.enrolled").as_u64(), Some(1));
+        assert_eq!(at(fleet_value, "members.live").as_u64(), Some(1));
+        assert!(!network
+            .canonical_string()
+            .contains(&fleet.member.submitter_id()));
+
+        // Revoked on the leader's disk; refused at the next request.
+        Registry::for_log(&fleet.log, fleet.leader.public().to_bytes())
+            .revoke(
+                &fleet.member.public().to_bytes(),
+                "box returned",
+                crate::time::unix_seconds(),
+            )
+            .unwrap();
+        let (status, body) = fleet.post_signed("/progress", &mine);
+        assert!(status.contains("401"), "{status} {body:?}");
+        assert_eq!(reason(&body), Some("member_revoked"));
+    }
+
+    #[test]
+    fn an_enrolled_name_is_reserved_on_every_roster() {
+        let fleet = Enrolled::start("enrolled-names");
+        let name = fleet.name.clone();
+
+        // Heartbeats: the member as itself and under its own namespace.
+        for worker in [name.clone(), format!("{name}/gpu0")] {
+            let (status, body) = fleet.post_signed("/progress", &fleet.heartbeat(&worker));
+            assert!(status.contains("202"), "{worker}: {status} {body:?}");
+            let (status, body) = fleet.post("/progress", &fleet.heartbeat(&worker), None);
+            assert!(status.contains("403"), "{worker}: {status}");
+            assert_eq!(reason(&body), Some("name_reserved"));
+        }
+        let (status, body) = fleet.post_signed("/progress", &fleet.heartbeat("someone-else"));
+        assert!(status.contains("403"), "{status}");
+        assert_eq!(reason(&body), Some("name_not_yours"));
+        let (_, progress) = get_json(fleet.addr, &format!("/progress/{}", fleet.objective_id));
+        assert!(
+            progress.canonical_string().contains(r#""member":true"#),
+            "the roster marks a member: {}",
+            progress.canonical_string()
+        );
+
+        // Hosts: one machine, one name, exactly.
+        let host = |host: &str| {
+            format!(r#"{{"host":"{host}","hardware":{{"cpus":8}},"sandboxes":{{}},"jobs":{{}}}}"#)
+        };
+        let (status, body) = fleet.post_signed("/hosts", &host(&name));
+        assert!(status.contains("202"), "{status} {body:?}");
+        let (status, body) = fleet.post_signed("/hosts", &host(&format!("{name}/gpu0")));
+        assert!(status.contains("403"), "{status}");
+        assert_eq!(reason(&body), Some("name_not_yours"));
+        let (status, body) = fleet.post("/hosts", &host(&name), None);
+        assert!(status.contains("403"), "{status}");
+        assert_eq!(reason(&body), Some("name_reserved"));
+
+        // Leases: reserved, and a claim replayed after a release is not one.
+        let holder = format!("{name}/gpu0");
+        let claim = format!(
+            r#"{{"objective_id":"{}","task":"unit:7","holder":"{holder}","ttl_seconds":120}}"#,
+            fleet.objective_id
+        );
+        let release = format!(
+            r#"{{"objective_id":"{}","task":"unit:7","holder":"{holder}","outcome":"failed"}}"#,
+            fleet.objective_id
+        );
+        let (status, body) = fleet.post("/lease", &claim, None);
+        assert!(status.contains("403"), "{status}");
+        assert_eq!(reason(&body), Some("name_reserved"));
+        let t = crate::time::unix_seconds();
+        let claimed = fleet.signed("/lease", &claim, t);
+        let (status, body) = fleet.post("/lease", &claim, Some(&claimed));
+        assert!(status.contains("202"), "{status} {body:?}");
+        let released = fleet.signed("/lease/release", &release, t + 1);
+        let (status, body) = fleet.post("/lease/release", &release, Some(&released));
+        assert!(status.contains("202"), "{status} {body:?}");
+        let (status, body) = fleet.post("/lease", &claim, Some(&claimed));
+        assert!(status.contains("409"), "{status} {body:?}");
+        assert_eq!(reason(&body), Some("stale_claim"));
+        let fresh = fleet.signed("/lease", &claim, t + 2);
+        let (status, body) = fleet.post("/lease", &claim, Some(&fresh));
+        assert!(
+            status.contains("202"),
+            "a claim signed after the release is new: {status} {body:?}"
+        );
+        let (_, leases) = get_json(fleet.addr, &format!("/leases/{}", fleet.objective_id));
+        assert!(leases.canonical_string().contains(r#""member":true"#));
+    }
+
+    #[test]
+    fn every_submission_answer_carries_a_machine_readable_reason() {
+        let dir = TempDir::new("submit-reasons");
+        let (log, objective_id) = orbit_search_log(&dir);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")))
+            .accepting_into(dir.path.join("queue"))
+            .with_max_queued(1);
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let commitment = |tail: char| {
+            Value::object([
+                ("type", Value::string("commitment")),
+                ("objective_id", Value::string(objective_id.clone())),
+                ("submitter", Value::string("reasons-test")),
+                (
+                    "hash",
+                    Value::string(format!("sha256:{}", tail.to_string().repeat(64))),
+                ),
+                (
+                    "created_at",
+                    Value::string(crate::time::format_iso8601_utc(
+                        crate::time::unix_seconds() as i64
+                    )),
+                ),
+            ])
+            .canonical_string()
+        };
+        let post = |target: &str, body: &str| ask_raw(addr, "POST", target, &[], body.as_bytes());
+
+        // Queued, with what it waits for.
+        let (status, body) = post("/submit?kind=commitment", &commitment('1'));
+        assert!(status.contains("202"), "{status} {body:?}");
+        assert_eq!(reason(&body), Some("queued"));
+        let wait = body.get("wait").expect("a wait block");
+        assert_eq!(wait.get("for").unwrap().as_str(), Some("admission"));
+        assert_eq!(
+            wait.get("drain_every_seconds"),
+            Some(&Value::Null),
+            "no daemon here"
+        );
+        let record_epoch = wait.get("record_epoch").unwrap().as_u64().unwrap();
+        assert_eq!(
+            wait.get("reveal_from_epoch").unwrap().as_u64(),
+            Some(record_epoch + 1)
+        );
+        let epoch = wait.get("epoch").unwrap().as_u64().unwrap();
+        assert_eq!(
+            wait.get("at_risk"),
+            Some(&Value::Bool(record_epoch != epoch)),
+            "at risk only when the record claims another epoch"
+        );
+
+        // Every refusal names itself.
+        for (target, payload, want_status, want_reason) in [
+            (
+                "/submit?kind=commitment",
+                commitment('2'),
+                "429",
+                "queue_full",
+            ),
+            (
+                "/submit?kind=banana",
+                "{}".to_string(),
+                "400",
+                "unknown_kind",
+            ),
+            (
+                "/submit?kind=commitment",
+                r#"{"type":"commitment"}"#.to_string(),
+                "400",
+                "malformed",
+            ),
+            (
+                "/submit?kind=commitment",
+                "not json".to_string(),
+                "400",
+                "bad_body",
+            ),
+            (
+                "/submit?kind=objective",
+                draft(&Identity::from_secret_bytes([3u8; 32]).submitter_id()).canonical_string(),
+                "400",
+                "bad_funding_signature",
+            ),
+        ] {
+            let (status, body) = post(target, &payload);
+            assert!(status.contains(want_status), "{target}: {status} {body:?}");
+            assert_eq!(reason(&body), Some(want_reason), "{target}: {body:?}");
+            assert!(
+                body.get("error").and_then(Value::as_str).is_some(),
+                "the words stay too"
+            );
+        }
+        let (status, body) = ask_raw(
+            addr,
+            "POST",
+            "/submit?kind=commitment",
+            &[("Host", "rebound.example.com")],
+            commitment('3').as_bytes(),
+        );
+        assert!(status.contains("421"), "{status}");
+        assert_eq!(reason(&body), Some("host_not_allowed"));
+
+        // A node that queues nothing says so in a word too.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let read_only = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let (status, body) = ask_raw(
+            read_only,
+            "POST",
+            "/submit?kind=commitment",
+            &[],
+            commitment('4').as_bytes(),
+        );
+        assert!(status.contains("405"), "{status}");
+        assert_eq!(reason(&body), Some("read_only"));
+    }
+
+    #[test]
+    fn a_multi_use_invite_admits_exactly_its_uses_under_concurrent_joins() {
+        let fleet = Enrolled::start("enrolled-concurrent");
+        let registry = Registry::for_log(&fleet.log, fleet.leader.public().to_bytes());
+        let (token, _) = registry
+            .create_invite(
+                &fleet::members::Terms {
+                    uses: 3,
+                    expires_in: 3600,
+                    prefix: Some("rented".into()),
+                    ..Default::default()
+                },
+                crate::time::unix_seconds(),
+            )
+            .unwrap();
+        let token = std::sync::Arc::new(token);
+        let joins: Vec<_> = (0..8u8)
+            .map(|i| {
+                let token = std::sync::Arc::clone(&token);
+                let addr = fleet.addr;
+                std::thread::spawn(move || {
+                    let member = Identity::from_secret_bytes([40 + i; 32]);
+                    let join = JoinRequest::sign(
+                        &token.leader,
+                        &token.invite(),
+                        &member,
+                        "",
+                        crate::time::unix_seconds(),
+                    );
+                    ask_raw(
+                        addr,
+                        "POST",
+                        "/fleet/join",
+                        &[],
+                        join.to_value().canonical_string().as_bytes(),
+                    )
+                })
+            })
+            .collect();
+        let outcomes: Vec<(String, Value)> = joins.into_iter().map(|j| j.join().unwrap()).collect();
+        let admitted = outcomes.iter().filter(|(s, _)| s.contains("201")).count();
+        assert_eq!(admitted, 3, "{outcomes:?}");
+        assert!(outcomes
+            .iter()
+            .filter(|(s, _)| !s.contains("201"))
+            .all(|(_, body)| reason(body) == Some("invite_spent")));
+        let (_, network) = get_json(fleet.addr, "/network");
+        assert_eq!(
+            at(&network, "node.fleet.members.enrolled").as_u64(),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn a_node_without_enrollment_refuses_member_signatures_and_joins() {
+        let dir = TempDir::new("enrollment-off");
+        let (log, objective_id) = orbit_search_log(&dir);
+        let leader = Identity::from_secret_bytes([7u8; 32]);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")))
+            .accepting_into(dir.path.join("queue"))
+            .with_fleet(Fleet::parse("loopback").unwrap(), leader.clone());
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let member = Identity::from_secret_bytes([4u8; 32]);
+        let body = format!(r#"{{"objective_id":"{objective_id}","worker":"w","steps":1}}"#);
+        let header = fleet::auth::MemberAuth::sign(
+            &member,
+            &leader.public().to_bytes(),
+            crate::time::unix_seconds(),
+            "POST",
+            "/progress",
+            body.as_bytes(),
+        )
+        .render();
+        let (status, answer) = ask_raw(
+            addr,
+            "POST",
+            "/progress",
+            &[("Authorization", &header)],
+            body.as_bytes(),
+        );
+        assert!(status.contains("401"), "{status}");
+        assert_eq!(reason(&answer), Some("enrollment_off"));
+        let (status, answer) = ask_raw(addr, "POST", "/fleet/join", &[], b"{}");
+        assert!(status.contains("404"), "{status}");
+        assert_eq!(reason(&answer), Some("enrollment_off"));
+        // Another scheme is not this node's business, as before.
+        let (status, _) = ask_raw(
+            addr,
+            "POST",
+            "/progress",
+            &[("Authorization", "Bearer abc")],
+            body.as_bytes(),
+        );
+        assert!(status.contains("202"), "{status}");
+    }
+
     #[test]
     fn a_fleet_leader_signs_its_workers_records_and_refuses_strangers() {
         let dir = TempDir::new("fleet-signing");
@@ -5672,6 +6839,10 @@ mod tests {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .contains("fleet member"));
+        assert_eq!(
+            body.get("reason").and_then(Value::as_str),
+            Some("not_a_member")
+        );
         // The nickname path is unaffected by being outside.
         let (status, _) = ask_json(outside, "/submit?kind=commitment", &commitment("gpu-box-1"));
         assert!(status.contains("202"), "{status}");

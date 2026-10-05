@@ -51,12 +51,13 @@ record instead.
 | `GET /knowledge/{claim_id}` | one claim: its standing and confidence under the named policy, every relation asserted about it and whether it was heard, and who stood behind its verdict under bond with each attestation's status and whether a docket caught it |
 | `GET /hosts` | machines that registered with `cairn agent`: each host's CPUs, memory, GPUs and the sandboxes it can run jobs under, as it described itself, with the live ones summed — see [Hosts](#hosts-what-machines-are-on-the-network) |
 | `GET /ui/` | the embedded reader, when the binary was built with the `ui` feature |
-| `POST /submit` | queue an objective, a commitment or a claim (only with `--queue`); `?kind=` names which, else the record's own `type` |
+| `POST /submit` | queue an objective, a commitment or a claim (only with `--queue`); `?kind=` names which, else the record's own `type`. Every answer carries a `reason`, and a `202` a `wait` block — see [below](#why-a-submission-was-queued-or-refused-in-a-word) |
 | `POST /objective/prepare` | canonicalize a draft objective and return the exact bytes its funder must sign — see below |
 | `POST /progress` | a worker's heartbeat: kept in this node's memory for `GET /progress/{id}`, never written to the log, accepted on a read-only node too |
 | `POST /lease` | take or renew an advisory lease on a task of an objective this log holds: held in memory like a heartbeat, never written, never a lock |
 | `POST /lease/release` | end a lease you hold, as `completed`, `failed` or `abandoned` |
 | `POST /hosts` | a host agent's registration: its hardware and sandboxes, kept in this node's memory for `GET /hosts` and `GET /network`, never written to the log, accepted on a read-only node too |
+| `POST /fleet/join` | enroll a machine with an invite token, on a leader whose `CAIRN_FLEET` lists `enrolled`: signed by the invite key and by the new member key, answered with the member's name and expiry — see [Fleet](#fleet-signing-for-your-own-machines) |
 | `POST /deposit/grant` | issue a short-lived upload grant against a node-local deposit; response never includes cloud keys |
 | `PUT /deposit/upload/{grant_id}` | proxy redemption of a grant (file backend, or curl-to-S3 fallback) |
 
@@ -343,6 +344,59 @@ rather than one that passes. The route reads no log and writes nothing; it is
 a `POST` only because it has a body, which also means a browser preflights it
 and, like `/submit`, it is reachable from the node's own origin alone.
 
+## Why a submission was queued or refused, in a word
+
+Every answer from `POST /submit` carries a `reason` beside its words, so a
+client branches on a token and shows the sentence:
+`{"error": "…", "reason": "queue_full"}`.
+
+| reason | status | what it means | what to do |
+|---|---|---|---|
+| `queued` | 202 | in the spool, not yet admitted; see `wait` below | watch `GET /log` |
+| `bad_body` | 400, 415 | not JSON, not UTF-8, empty, or not `application/json` | fix the request |
+| `unknown_kind` | 400 | `?kind=` (or the record's `type`) is none of objective, commitment, claim | fix the request |
+| `malformed` | 400 | the record does not decode as its kind | fix the record |
+| `bad_funding_signature` | 400 | an objective's funding authorization does not verify | sign the bytes `POST /objective/prepare` returns |
+| `schema` | 400 | a claim fails `spec/claim.schema.json` | fix the record |
+| `not_a_member` | 403 | it names this node's identity, unsigned, and this node does not sign for the sender ([fleet.md](fleet.md)) | submit under your own name, or join the fleet |
+| `relations_not_signed` | 403 | a fleet would sign a claim carrying `relations`; it never does | the leader signs those itself |
+| `read_only` | 405 | this node queues nothing | submit to a node started with `--queue` |
+| `host_not_allowed` | 421 | the write was addressed to a public DNS name this node does not list | address it by IP or LAN name, or list it in `CAIRN_HTTP_HOSTS` |
+| `queue_full` | 429 | the operator has not drained lately | retry later; nothing was lost |
+| `internal` | 500 | the spool could not be written | tell the operator |
+
+A fleet member's signed request can also be refused before it reaches the
+record, with the reasons in [Fleet](#fleet-signing-for-your-own-machines):
+`malformed_authorization`, `member_unknown`, `member_revoked`,
+`member_expired`, `clock_skew`, `bad_signature`, `enrollment_off`,
+`not_a_member_route`. The heartbeat, lease and host routes refuse a reserved
+name with `name_reserved` or `name_not_yours`.
+
+**`wait`, on a `202`**, says what the record waits for, in fields:
+
+```json
+"wait": {"for": "admission", "drained_by": "this node", "drain_every_seconds": 5,
+         "epoch": 2985, "epoch_seconds": 600, "epoch_ends_in_seconds": 312,
+         "record_epoch": 2985, "at_risk": false,
+         "reveal_from_epoch": 2986, "reveal_in_seconds": 312}
+```
+
+`drain_every_seconds` is null on a plain publisher, whose queue the operator
+drains on no schedule this process knows. `record_epoch` and `at_risk` are on
+commitments and claims. Admission checks the epoch a record claims against the
+epoch it is drained in, so `at_risk` is true when the two differ, or when this
+epoch ends before the next drain: the record will likely be refused for its
+epoch, and the client should make a fresh one in the next. The `reveal_*`
+fields are on commitments: the claim that opens one is admissible from the
+next epoch on. `cairn work` reads all of this. It stops on a refusal no retry
+can fix (`not_a_member`, `member_revoked`, `clock_skew`, …), keeps going past
+one that a later round can (`malformed`, `queue_full`), and warns when a
+record is at risk.
+
+What the rules decide at drain time -- a stale epoch, an unaccepted citation --
+is in the log's admission, not in this answer. MCP's `submit_claim` admits
+directly and names those too, by rule ([agents.md](agents.md)).
+
 ## Why `POST /submit` queues instead of appending
 
 A submission does not enter the log here. It lands in a spool directory, and
@@ -393,26 +447,57 @@ retried: nearly every refusal is permanent — a stale epoch, a citation that is
 not an accepted claim — and a queue that retries a permanent failure never
 empties.
 
-## Fleet: signing for your own workers
+## Fleet: signing for your own machines
 
 A record is paid to the `submitter` it names, and a key-shaped submitter must
-be signed by that key. A worker on an operator's own box should not hold the
-operator's key. So a node started with `CAIRN_FLEET=<networks>` and an
-identity (`--mcp-identity FILE`, or `CAIRN_FLEET_IDENTITY=FILE`) **signs**
-every unsigned commitment and claim that names its identity and arrives from
-one of those networks, before queuing it, and the `202` says so:
-`"signed_as": "<the id>"`. The same record from anywhere else is refused with
-`403` naming the networks and the address it came from, rather than queued to
-fail at drain time where the sender would never hear why. A worker's own
-nickname, a worker's own key, anybody's already-signed record: untouched.
+be signed by that key. A machine working for an operator should not hold the
+operator's key. So a node started with `CAIRN_FLEET` and an identity
+(`--mcp-identity FILE`, or `CAIRN_FLEET_IDENTITY=FILE`) **signs** every
+unsigned commitment and claim that names its identity, before queuing it, for
+the requests `CAIRN_FLEET` admits, and the `202` says so: `"signed_as": "<the
+id>"`, and `"member": "<name>"` for an enrolled member.
 
-`GET /network` publishes the arrangement under `node.fleet` (`sources`, the
-networks; `signs_as`, the id to submit under) and the daemon's peer policy
-under `node.peers_policy` (`open`, or an `allowlist` with how many it names,
-from `CAIRN_PEERS`). Both are declarations about this process, like roles:
-nothing a reader can check against the log. The whole arrangement -- a Mac
-that leads, Linux boxes that walk, a tunnel between regions, and what none
-of it does with money -- is [fleet.md](fleet.md).
+- **`enrolled`**: a request signed by a member of the leader's registry
+  (`<log dir>/fleet/`, kept by `cairn fleet`), from any address. The request
+  carries `Authorization: CairnMember <member key> <time> <signature>`, the
+  signature covering the method, the request-target exactly as sent, the
+  SHA-256 of the body and the leader's own key, under the domain line
+  `cairn-fleet-request/1`; the time must be within two minutes of the node's.
+  A header that is present and fails is a `401` with its reason
+  (`malformed_authorization`, `member_unknown`, `member_revoked`,
+  `member_expired`, `clock_skew`, `bad_signature`), never an anonymous request.
+  The header is read on `POST /submit`, `/progress`, `/hosts`, `/lease` and
+  `/lease/release`; anywhere else it is refused with `400 not_a_member_route`.
+  A verified member also passes the Host rule above, which stops web pages
+  and not machines holding a key.
+- **Networks** (`private`, `loopback`, CIDRs): any request from inside them,
+  with no header. Kept for compatibility; the node says at start that it is
+  trusting a network.
+
+Anyone else gets `403` with `"reason": "not_a_member"`, rather than a record
+queued to fail at drain time where the sender would never hear why. A
+worker's own nickname, a worker's own key, anybody's already-signed record:
+untouched. A member's name, and every `name/…` under it, is reserved on the
+heartbeat, lease and host rosters: unsigned, it is refused with `403
+name_reserved`; signed by another member, `403 name_not_yours`.
+
+`POST /fleet/join` is how a machine becomes a member: a body signed twice,
+by the invite key from the token and by the new member key, over the string
+`cairn-fleet-join/1` builds (design §5). It answers `201` with the member's
+name and expiry, the same membership again for a replay, and otherwise a
+refusal with its reason (`invite_unknown`, `invite_expired`, `invite_spent`,
+`name_taken`, `member_revoked`, …). It is the one route that changes
+membership; nothing over the network can invite, admit or revoke.
+
+`GET /network` publishes the arrangement under `node.fleet` (`sources`, with
+`enrolled` first when it is on; `signs_as`, the id records name; `members`,
+counts only) and the daemon's peer policy under `node.peers_policy` (`open`,
+or an `allowlist` with how many it names, from `CAIRN_PEERS`). Both are
+declarations about this process, like roles: nothing a reader can check
+against the log. The whole arrangement -- inviting, joining, rented GPUs,
+revocation, and what none of it does with money -- is [fleet.md](fleet.md),
+and the design with its threat analysis is
+[design/fleet-enrollment.md](design/fleet-enrollment.md).
 
 ## What this is not
 

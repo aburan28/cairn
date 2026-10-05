@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { type Goal, angleLabel, composeHandle, describeMatch, normalizeGoal, parseHandle } from "./goals";
+import {
+  type Goal,
+  type Underserved,
+  angleLabel,
+  composeHandle,
+  describeMatch,
+  describeUnderserved,
+  normalizeGoal,
+  parseHandle,
+} from "./goals";
 
 const goal = (over: Partial<Goal>): Goal => ({
   key: "certicomecc2k130",
@@ -79,5 +88,28 @@ describe("describeMatch", () => {
     );
     expect(text).toContain("1 objective (1 open)");
     expect(text).toContain("no angle named yet");
+  });
+});
+
+describe("describeUnderserved", () => {
+  const row = (over: Partial<Underserved>): Underserved => ({
+    goal: "certicomecc2k130",
+    goal_name: "ECC2K-130",
+    angle: "rho/fpga",
+    handle: "GOAL-certicomecc2k130/rho/fpga",
+    open_objectives: 2,
+    open_reward: 300000,
+    live_workers: 0,
+    reward_per_worker: 300000,
+    objectives: ["sha256:b", "sha256:c"],
+    ...over,
+  });
+  it("says what is open and that nobody is on it", () => {
+    expect(describeUnderserved(row({}))).toBe("300,000 units across 2 open objectives, nobody on it");
+  });
+  it("counts the workers, in the singular when there is one", () => {
+    expect(describeUnderserved(row({ open_objectives: 1, live_workers: 1 }))).toBe(
+      "300,000 units across 1 open objective, 1 live worker on it",
+    );
   });
 });

@@ -2,28 +2,42 @@
 #
 # The reference loop is examples/certicom-ecdlp/tools/orbit_worker.py, which
 # asks the leader for its slice each epoch, heartbeats, and submits what it
-# found. Under a fleet the worker submits under the LEADER's identity -- the
-# `signs_as` id GET /network publishes -- and the leader signs the record on
-# the way into its queue, so the pay lands on the leader and the worker never
-# holds a key. The worker's own name is still its own: the work slice is a
-# function of the name, and a fleet of workers under one name would all walk
-# the same slice.
+# found. As an enrolled fleet member it submits under the LEADER's key, taken
+# from the member file `cairn fleet join` wrote rather than from any answer
+# over the network, and signs every request with its own member key; the
+# leader signs the records as itself on the way into its queue, so the pay
+# lands on the leader and the worker never holds the leader's key. That works
+# from any address -- a rented GPU needs no tunnel (docs/fleet.md).
+#
+# Join once, as root, with a token from the leader's `cairn fleet invite`:
+#
+#   sudo cairn fleet join --node http://LEADER:8080 --out /etc/cairn/fleet.json "$TOKEN"
+#
+# The member file holds this machine's key, so it stays root's, mode 0600:
+# systemd hands the service a private copy (LoadCredential below) and the key
+# is in neither this unit nor its environment file.
 #
 # One instance per objective (or per GPU, or per anything): the instance name
-# picks the environment file.
+# picks the environment file, and is this worker's slice of the membership --
+# cairn-worker@gpu0 reports as <member name>/gpu0.
 #
 #   sudo install -m 644 worker@.service /etc/systemd/system/cairn-worker@.service
-#   sudo mkdir -p /etc/cairn && sudo install -m 640 worker.env.example /etc/cairn/worker-ecc2k130.env
-#   sudo $EDITOR /etc/cairn/worker-ecc2k130.env
-#   sudo systemctl daemon-reload && sudo systemctl enable --now cairn-worker@ecc2k130
-#   journalctl -u cairn-worker@ecc2k130 -f
+#   sudo mkdir -p /etc/cairn && sudo install -m 640 worker.env.example /etc/cairn/worker-gpu0.env
+#   sudo $EDITOR /etc/cairn/worker-gpu0.env
+#   sudo systemctl daemon-reload && sudo systemctl enable --now cairn-worker@gpu0
+#   journalctl -u cairn-worker@gpu0 -f
 #
 # The host itself is registered with the leader separately, by `cairn agent
-# install --node http://LEADER:8080` (docs/agent.md): the agent says what the
-# machine is and runs sandboxed jobs; this unit is a worker that walks.
+# install --fleet /etc/cairn/fleet.json` (docs/agent.md): the agent says what
+# the machine is and runs sandboxed jobs; this unit is a worker that walks.
 # Replace ExecStart with your own walker -- the GPU client from the ECC2K-130
-# campaign, for instance -- as long as it speaks the same four routes
-# (GET /work_assignment, POST /progress, POST /submit?kind=commitment|claim).
+# campaign, for instance, or `cairn work --fleet ${CAIRN_FLEET_FILE}` -- as
+# long as it speaks the same four routes (GET /work_assignment, POST
+# /progress, POST /submit?kind=commitment|claim) and signs its POSTs.
+#
+# A leader that trusts a network instead (CAIRN_FLEET=private) takes unsigned
+# requests from inside it: drop LoadCredential and --fleet, and pass
+# `--node http://LEADER:8080 --worker NAME --submitter <its signs_as>`.
 
 [Unit]
 Description=cairn fleet worker %i (walks a search and submits to the leader)
@@ -34,18 +48,20 @@ Wants=network-online.target
 User=cairn
 WorkingDirectory=/var/lib/cairn
 EnvironmentFile=/etc/cairn/worker-%i.env
-# From the environment file: CAIRN_LEADER (the leader's HTTP base URL, on the
-# private network or through a tunnel), CAIRN_OBJECTIVE (the objective id),
-# CAIRN_JOB (the search job file the objective pins), CAIRN_SUBMITTER (the
-# leader's `signs_as` id), CAIRN_WORKER (this worker's own name; defaults to
-# the instance name), CAIRN_PARTITIONS (how many slices the fleet splits
-# into; the same number on every worker).
+LoadCredential=fleet:/etc/cairn/fleet.json
+Environment=CAIRN_FLEET_FILE=%d/fleet
+Environment=CAIRN_WORKER=%i
+# From the environment file: CAIRN_OBJECTIVE (the objective id), CAIRN_JOB
+# (the search job file the objective pins), CAIRN_PARTITIONS (how many slices
+# the fleet splits into; the same number on every worker), CAIRN_BIN (the
+# cairn binary that signs), and optionally CAIRN_WORKER (this worker's suffix
+# under the member name; defaults to the instance name).
 ExecStart=/usr/bin/python3 /opt/cairn/tools/orbit_worker.py \
-    --node ${CAIRN_LEADER} \
+    --fleet ${CAIRN_FLEET_FILE} \
+    --cairn ${CAIRN_BIN} \
     --objective ${CAIRN_OBJECTIVE} \
     --job ${CAIRN_JOB} \
     --worker ${CAIRN_WORKER} \
-    --submitter ${CAIRN_SUBMITTER} \
     --partitions ${CAIRN_PARTITIONS}
 Restart=always
 RestartSec=10

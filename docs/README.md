@@ -19,7 +19,7 @@ below is either reference (what a command, a setting, or a word does) or design
 | write an objective other people can solve | [verification.md](verification.md) |
 | run a node strangers submit to | [serving.md](serving.md), then [storage.md](storage.md) |
 | connect two nodes in two places, each behind its own router | [two-nodes.md](two-nodes.md) |
-| run a leader that is paid and workers on your own machines that nobody else can reach | [fleet.md](fleet.md) |
+| run a leader that is paid, and machines that work for it from anywhere, rented GPUs included | [fleet.md](fleet.md) |
 | see what the network is trying to beat, and post on a problem without inventing a second name for it | [goals.md](goals.md) |
 | know what a command does | [cli.md](cli.md) |
 | know what a setting does | [configuration.md](configuration.md) |
@@ -97,9 +97,10 @@ The six pages a user needs and nothing else in this repository provides.
 - [discovery.md](discovery.md) — peer discovery without a name anybody owns.
 - [two-nodes.md](two-nodes.md) — two machines behind two routers: port
   mapping, the seed, and reading whether it worked.
-- [fleet.md](fleet.md) — one leader that signs and is paid, host agents and
-  workers on your own network, a tunnel across regions, and what no part of
-  it does with money.
+- [fleet.md](fleet.md) — one leader that signs and is paid, and the machines
+  that work for it: invited and enrolled from anywhere, rented GPUs without a
+  tunnel, revocation, the older network trust, and what no part of it does
+  with money.
 - [goals.md](goals.md) — goals and angles: one problem, many approaches, read
   off the handle every objective already carries; the alias catalog that
   joins two spellings; the `find_goal` tool a drafting agent calls first.
@@ -179,7 +180,8 @@ lines; that is the authority, and this table is the index to it.
 | [rho-piecework.md](design/rho-piecework.md) — distributed Pollard rho as piecework | **Stages A and B built** (`src/piecework.rs`); Stage C is not |
 | [orbit-piecework.md](design/orbit-piecework.md) — ECC2K-130: paying per orbit, and the witness that makes one checkable | **built**, with no consensus change; the corpus still does not fit a log |
 | [network-coordination.md](design/network-coordination.md) — live sessions over HTTP, the compute roster, advisory task leases, declared roles | **built** in the node and the reader (`src/p2p/sessions.rs`, `src/lease.rs`, `src/network.rs`); nothing in consensus, by design; gossiped leases and signed heartbeats are not |
-| [fleet-enrollment.md](design/fleet-enrollment.md) — per-machine enrollment in place of network trust, so a rented GPU joins a fleet without a tunnel | design only; Stage 1 needs no consensus change, Stage 2 does |
+| [fleet-enrollment.md](design/fleet-enrollment.md) — per-machine enrollment in place of network trust, so a rented GPU joins a fleet without a tunnel | Stage 1 built (no consensus change); Stage 2 is a consensus change and is not |
+| [external-payouts.md](design/external-payouts.md) — paying out in Bitcoin or Ethereum: who holds the funds (an escrow per objective, never a custodian), conversion fixed at escrow, payout addresses bound before a result exists, and the legal side | design only; nothing here moves money |
 | [index-calculus-p224.md](design/index-calculus-p224.md) — index calculus as piecework | proposal; nothing here is built |
 | [swarm-targeting.md](design/swarm-targeting.md) — aiming a swarm at one problem, and what ecdsa.fail's nonce grinding teaches | proposal; nothing here is built |
 

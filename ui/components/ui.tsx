@@ -42,6 +42,23 @@ export function Badge({
   );
 }
 
+/**
+ * An enrolled fleet member: the node verified this row's request against a
+ * key its operator invited (`cairn fleet join`). A name with no badge said
+ * whatever it liked; this one proved it.
+ */
+export function MemberBadge({ member }: { member?: boolean }) {
+  if (!member) return null;
+  return (
+    <span
+      className="badge badge-accent ml-1.5 align-middle"
+      title="An enrolled fleet member: this node checked the request's signature against a machine its operator invited"
+    >
+      member
+    </span>
+  );
+}
+
 export function Card({
   children,
   className = "",

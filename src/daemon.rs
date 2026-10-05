@@ -76,7 +76,7 @@ use crate::verifiers::VerifierRegistry;
 const BEACONS_PER_TICK: usize = 64;
 
 /// Seconds between sync rounds.
-const TICK_SECONDS: u64 = 5;
+pub const TICK_SECONDS: u64 = 5;
 
 /// Ticks between LAN beacon announcements.
 const BEACON_EVERY_TICKS: u64 = multicast::INTERVAL_SECONDS.div_ceil(TICK_SECONDS);
@@ -664,6 +664,41 @@ fn bind_http(
     let listener = TcpListener::bind(addr.as_str())
         .map_err(|error| format!("cannot bind the HTTP listener on {addr}: {error}"))?;
     let mut serving = serve::Serving::new(&config.log, &config.root);
+    // The HTTP port, forwarded by the router only when the operator asks
+    // (`CAIRN_PORTMAP_HTTP`): a fleet leader behind a home router that rented
+    // machines must reach. It makes this node a public seed, so it is never
+    // the default, and the decision is published either way.
+    let bound = listener
+        .local_addr()
+        .map_err(|error| format!("the HTTP listener on {addr}: {error}"))?;
+    let decision = crate::p2p::reach::decide_http(
+        std::env::var(crate::p2p::reach::HTTP_ENV).ok().as_deref(),
+        bound.ip(),
+    );
+    let external = Arc::new(Mutex::new(crate::p2p::reach::Report::off(
+        crate::p2p::reach::Mode::Off,
+        decision.note.clone().unwrap_or_default(),
+        crate::time::unix_seconds(),
+    )));
+    if decision.mode != crate::p2p::reach::Mode::Off {
+        log::warn!(
+            "portmap: asking the router to forward the HTTP port {} ({}={}); this node's HTTP \
+             side becomes reachable from the internet",
+            bound.port(),
+            crate::p2p::reach::HTTP_ENV,
+            decision.mode.as_str()
+        );
+        let shared = Arc::clone(&external);
+        let (mode, port) = (decision.mode, bound.port());
+        thread::spawn(move || {
+            crate::p2p::reach::run(mode, port, move |report| {
+                *shared
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = report;
+            })
+        });
+    }
+    serving = serving.with_http_external(external);
     // The same key the daemon opened the log with. Without it the HTTP half
     // reports the operator's own sealed log as altered on every request, while
     // the p2p half beside it reads it perfectly.

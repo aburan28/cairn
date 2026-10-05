@@ -291,6 +291,16 @@ the leader, and the box beside this agent usually runs a worker too:
 [`launch/fleet/worker@.service`](../launch/fleet/worker@.service) is the
 worker's unit.
 
+**As a fleet member.** `--fleet FILE` (or `CAIRN_FLEET_FILE`) takes the member
+file `cairn fleet join` wrote: the leader's URL joins the `--node`s (it is the
+only one when none is named), the host registers under the member's own name
+-- the one name its leader lets it use -- and every request to that leader is
+signed, so the box can be anywhere that reaches the leader's HTTP port.
+Requests to any other node go unsigned, since a member key means nothing
+there. `cairn agent install --fleet FILE` hands the file to the service with
+`LoadCredential=fleet:FILE` and points `CAIRN_FLEET_FILE` at systemd's private
+copy, so the member key is in neither the unit nor its environment file.
+
 ## Checking it
 
 `./scripts/agent-demo.sh` (`make agent-demo`) drives all of it against a node

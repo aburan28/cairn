@@ -35,6 +35,8 @@ export type Lease = {
   epoch: number | null;
   note: string | null;
   released: { at: string; outcome: Outcome } | null;
+  /** Claimed by an enrolled fleet member. Absent on a node older than enrollment. */
+  member?: boolean;
 };
 
 export type TaskLeases = {

@@ -40,6 +40,7 @@ import {
   CopyButton,
   EmptyState,
   Hash,
+  MemberBadge,
   NodePicker,
   Note,
   PageHeader,
@@ -599,7 +600,10 @@ function Dashboard({
                       <div className="mt-1 text-[11px] text-ink-3">{row.released.outcome}</div>
                     )}
                   </td>
-                  <td className="mono px-3 py-2.5 text-ink">{row.holder}</td>
+                  <td className="mono px-3 py-2.5 text-ink">
+                    {row.holder}
+                    <MemberBadge member={row.member} />
+                  </td>
                   <td className="mono px-3 py-2.5 text-ink-2">
                     {row.units ? `[${formatMagnitude(row.units.first)}, ${formatMagnitude(row.units.end)})` : "—"}
                     {row.epoch !== null && <span className="text-ink-3"> epoch {row.epoch}</span>}

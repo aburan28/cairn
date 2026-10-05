@@ -60,9 +60,28 @@ export type Goal = {
   match?: "alias" | "contains";
 };
 
+/**
+ * An angle where compute is scarce: open reward over the workers live on it,
+ * plus one -- the one being whoever reads this. A ranking, never a payment.
+ */
+export type Underserved = {
+  goal: string;
+  goal_name: string;
+  angle: string;
+  handle: string;
+  open_objectives: number;
+  open_reward: number;
+  live_workers: number;
+  reward_per_worker: number;
+  /** Open objective ids, richest first. */
+  objectives: string[];
+};
+
 export type GoalsResponse = {
   goals: Goal[];
   total: number;
+  /** Richest per worker first. Absent on a node older than the field. */
+  underserved?: Underserved[];
   catalog: { known: number; source: string };
   handle: string;
   note: string;
@@ -138,6 +157,16 @@ export function composeHandle(key: string, angle: string[]): string {
     .filter((s) => s.length > 0)
     .join("/");
   return path ? `GOAL-${bare}/${path}` : `GOAL-${bare}`;
+}
+
+/** One line for an underserved angle: what is open, and who is on it. */
+export function describeUnderserved(row: Underserved): string {
+  const objectives = `${row.open_objectives} open objective${row.open_objectives === 1 ? "" : "s"}`;
+  const workers =
+    row.live_workers === 0
+      ? "nobody on it"
+      : `${row.live_workers} live worker${row.live_workers === 1 ? "" : "s"} on it`;
+  return `${row.open_reward.toLocaleString("en-US")} units across ${objectives}, ${workers}`;
 }
 
 /** What an angle path reads as on a page. */

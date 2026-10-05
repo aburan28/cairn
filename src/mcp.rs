@@ -750,6 +750,12 @@ struct Server {
     /// agent pass a name that disagreed with the signature would produce a
     /// record the rules engine refuses for reasons the agent cannot see.
     identity: Option<Identity>,
+    /// Machine-readable facts about the current tool call's outcome --
+    /// `cairn/reason` and its companions -- sent as the result's `_meta`.
+    /// Set by a tool, taken by `call_tool`. `_meta` rather than
+    /// `structuredContent` for the reason `call_tool` gives: a client may read
+    /// the latter as the whole result, and these sit beside the text.
+    meta: Option<Json>,
     /// What `post_objective` may still commit. See [`SpendCeiling`].
     spend: SpendCeiling,
 }
@@ -796,6 +802,7 @@ impl Server {
             tainted: BTreeSet::new(),
             pending,
             identity,
+            meta: None,
             spend: SpendCeiling::new(0),
         }
     }
@@ -1017,6 +1024,7 @@ impl Server {
         };
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
+        self.meta = None;
         let result = match name {
             "list_objectives" => self.list_objectives(),
             "list_goals" => self.list_goals(),
@@ -1039,6 +1047,13 @@ impl Server {
         // A tool that fails reports it *inside* the result with `isError`, not
         // as a JSON-RPC error: the model needs to see the message and try
         // again, and a transport-level error is not shown to it.
+        let meta = self.meta.take();
+        let with_meta = |mut payload: Json| {
+            if let Some(meta) = &meta {
+                payload["_meta"] = meta.clone();
+            }
+            payload
+        };
         match result {
             Ok(text) => {
                 let citations = self
@@ -1064,11 +1079,11 @@ impl Server {
                 if !citations.is_empty() {
                     payload["structuredContent"] = json!({ "citations": citations });
                 }
-                success(id, payload)
+                success(id, with_meta(payload))
             }
             Err(message) => success(
                 id,
-                json!({ "content": [text_block(&message)], "isError": true }),
+                with_meta(json!({ "content": [text_block(&message)], "isError": true })),
             ),
         }
     }
@@ -1448,6 +1463,22 @@ impl Server {
         let mut out = String::new();
         for goal in &goals {
             out.push_str(&render_goal(goal));
+            out.push('\n');
+        }
+        let scarce = crate::goals::underserved(&goals);
+        if !scarce.is_empty() {
+            // This server sees no heartbeats, so the ranking here is by open
+            // reward alone; a node's GET /goals divides by its live workers.
+            out.push_str(
+                "Underserved angles -- open reward still payable, richest first (a node's \
+                 GET /goals also divides by the workers live on each):\n",
+            );
+            for row in scarce.iter().take(5) {
+                out.push_str(&format!(
+                    "  {}  {} open, {} units open\n",
+                    row.handle, row.open_objectives, row.open_reward
+                ));
+            }
             out.push('\n');
         }
         out.push_str(
@@ -1971,42 +2002,66 @@ impl Server {
         Ok(out)
     }
 
+    /// Record why `submit_claim` refused, as `_meta`, and hand the words back.
+    fn refuse(&mut self, reason: &str, rule: Option<String>, message: String) -> String {
+        self.meta = Some(match rule {
+            Some(rule) => json!({ "cairn/reason": reason, "cairn/rule": rule }),
+            None => json!({ "cairn/reason": reason }),
+        });
+        message
+    }
+
     fn submit_claim(&mut self, args: &Json) -> Result<String, String> {
-        let objective_id = string_arg(args, "objective_id")?;
+        let objective_id =
+            string_arg(args, "objective_id").map_err(|e| self.refuse("bad_arguments", None, e))?;
         // With a signing key the name is the key, so the agent's `submitter`
         // is ignored rather than checked: a record whose name disagreed with
         // its signature is refused by the rules engine for reasons the agent
         // cannot see or fix.
         let submitter = match &self.identity {
             Some(identity) => identity.submitter_id(),
-            None => string_arg(args, "submitter")?,
+            None => {
+                string_arg(args, "submitter").map_err(|e| self.refuse("bad_arguments", None, e))?
+            }
         };
-        let artifact = value_arg(args, "artifact")?;
-        self.objective(&objective_id)?;
+        let artifact =
+            value_arg(args, "artifact").map_err(|e| self.refuse("bad_arguments", None, e))?;
+        self.objective(&objective_id)
+            .map_err(|e| self.refuse("unknown_objective", None, e))?;
 
         let citations = match args.get("cites") {
             None | Some(Json::Null) => Vec::new(),
             Some(Json::Array(items)) => {
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
-                    let claim_id = item
-                        .get("claim_id")
-                        .and_then(Json::as_str)
-                        .ok_or("every entry in `cites` needs a string claim_id")?;
-                    let capability = item
-                        .get("capability")
-                        .and_then(Json::as_str)
-                        .ok_or("every entry in `cites` needs a string capability")?;
+                    let claim_id = item.get("claim_id").and_then(Json::as_str);
+                    let capability = item.get("capability").and_then(Json::as_str);
+                    let (Some(claim_id), Some(capability)) = (claim_id, capability) else {
+                        return Err(self.refuse(
+                            "bad_arguments",
+                            None,
+                            "every entry in `cites` needs a string claim_id and a string \
+                             capability"
+                                .into(),
+                        ));
+                    };
                     out.push((claim_id.to_string(), capability.to_string()));
                 }
                 out
             }
-            Some(_) => return Err("`cites` must be an array of citation objects".into()),
+            Some(_) => {
+                return Err(self.refuse(
+                    "bad_arguments",
+                    None,
+                    "`cites` must be an array of citation objects".into(),
+                ))
+            }
         };
 
         // The structural half of the injection defence. Before anything else,
         // because a planted citation must cost nothing to refuse.
-        self.check_citation_provenance(&citations)?;
+        self.check_citation_provenance(&citations)
+            .map_err(|e| self.refuse("citation_not_offered", None, e))?;
         let cites: Vec<String> = citations
             .into_iter()
             .map(|(claim_id, _)| claim_id)
@@ -2024,25 +2079,31 @@ impl Server {
         // cite the holder, improvement or not.
         let accepted = self.node.read().accepted_claims();
         if let Some(unknown) = cites.iter().find(|cited| !accepted.contains_key(*cited)) {
-            return Err(format!(
+            let message = format!(
                 "citation {unknown:?} is not an accepted claim in this log, so the reveal \
                  would be refused an epoch from now. Cite the frontier holder from \
                  frontier_status, and claims you actually built on. Nothing was recorded."
-            ));
+            );
+            return Err(self.refuse("citation_not_accepted", None, message));
         }
-        if let Some(frontier) = self.node.read().frontier_of(&objective_id) {
+        let frontier = self.node.read().frontier_of(&objective_id);
+        if let Some(frontier) = frontier {
             if !cites.iter().any(|c| c == &frontier.claim_id) {
-                return Err(format!(
+                let message = format!(
                     "this objective has a frontier at score {}, so every submission must cite \
                      the claim holding it. Add {:?} to `cites` and try again. Nothing was \
                      recorded.",
                     frontier.score, frontier.claim_id
-                ));
+                );
+                return Err(self.refuse("must_cite_frontier", None, message));
             }
         }
 
         let ts = timestamp();
-        let now = epoch_of(unix_seconds(&ts)?, epoch_seconds());
+        let now = epoch_of(
+            unix_seconds(&ts).map_err(|e| self.refuse("internal", None, e))?,
+            epoch_seconds(),
+        );
 
         // Two calls, not one, and that is the epoch rule showing through rather
         // than an API preference. A reveal must land in a strictly later epoch
@@ -2067,7 +2128,7 @@ impl Server {
                 &ts,
                 cites.clone(),
             )
-            .map_err(|e| format!("claim is malformed: {e}"))?;
+            .map_err(|e| self.refuse("malformed", None, format!("claim is malformed: {e}")))?;
             let claim = match &self.identity {
                 Some(identity) => claim.signed_with(identity),
                 None => claim,
@@ -2076,10 +2137,18 @@ impl Server {
             // The same schema gate the CLI's `reveal` applies. The published
             // spec/*.json documents are the contract for what may enter the
             // log; a path around them is a path around the contract.
-            validate_claim(&claim.to_value())
-                .map_err(|e| format!("claim does not satisfy spec/claim.schema.json: {e}"))?;
+            validate_claim(&claim.to_value()).map_err(|e| {
+                self.refuse(
+                    "schema",
+                    None,
+                    format!("claim does not satisfy spec/claim.schema.json: {e}"),
+                )
+            })?;
 
-            let outcome = match self.node.write().reveal(&claim, &ts) {
+            // Bound first, so the node's write guard is released before a
+            // refusal records its reason.
+            let revealed = self.node.write().reveal(&claim, &ts);
+            let outcome = match revealed {
                 Ok(outcome) => outcome,
                 Err(violation) => {
                     // Some refusals are final for this commitment: the epoch
@@ -2096,13 +2165,20 @@ impl Server {
                     if terminal {
                         self.pending.forget(&pending);
                         self.pending.save();
-                        return Err(format!(
+                        let message = format!(
                             "reveal refused: {violation}\nThat commitment can no longer be \
                              opened, so it has been dropped. Call submit_claim again to start \
                              a fresh commit-reveal round for this artifact."
-                        ));
+                        );
+                        let refused =
+                            self.refuse("reveal_refused", Some(violation.code()), message);
+                        if let Some(meta) = &mut self.meta {
+                            meta["cairn/dropped"] = json!(true);
+                        }
+                        return Err(refused);
                     }
-                    return Err(format!("reveal refused: {violation}"));
+                    let message = format!("reveal refused: {violation}");
+                    return Err(self.refuse("reveal_refused", Some(violation.code()), message));
                 }
             };
             self.pending.forget(&pending);
@@ -2127,6 +2203,18 @@ impl Server {
                 outcome.reward,
                 outcome.note,
             );
+            self.meta = Some(json!({
+                "cairn/reason": "revealed",
+                "cairn/claim_id": outcome.claim_id,
+                "cairn/verdict": outcome.verdict.status.as_str(),
+                "cairn/settled": outcome.settled,
+                "cairn/reward": outcome.reward,
+                "cairn/settles_after_epoch": if outcome.is_pending() {
+                    json!(now.saturating_add(crate::partition::finality_epochs()))
+                } else {
+                    Json::Null
+                },
+            }));
             if outcome.is_pending() {
                 out.push_str(&format!(
                     "Accepted and recorded. Payment happens once epoch {} closes and clears a \
@@ -2150,6 +2238,15 @@ impl Server {
         }
 
         if let Some(waiting) = self.pending.waiting(&objective_id, &submitter, &artifact) {
+            self.meta = Some(json!({
+                "cairn/reason": "already_committed",
+                "cairn/wait": {
+                    "for": "reveal",
+                    "committed_in_epoch": waiting.epoch,
+                    "reveal_from_epoch": waiting.epoch.saturating_add(1),
+                    "reveal_in_seconds": seconds_until_next_epoch(&ts),
+                },
+            }));
             return Ok(format!(
                 "Already committed, in epoch {}. Call submit_claim again with the same \
                  objective and artifact once epoch {} has started -- in about {}s -- and the \
@@ -2169,10 +2266,11 @@ impl Server {
             Some(identity) => commitment.signed_with(identity),
             None => commitment,
         };
-        self.node
-            .write()
-            .commit(&commitment, &ts)
-            .map_err(|e| format!("commit refused: {e}"))?;
+        let committed = self.node.write().commit(&commitment, &ts);
+        if let Err(violation) = committed {
+            let message = format!("commit refused: {violation}");
+            return Err(self.refuse("commit_refused", Some(violation.code()), message));
+        }
         self.pending.remember(Pending {
             objective_id,
             submitter,
@@ -2182,6 +2280,16 @@ impl Server {
         });
         self.pending.save();
 
+        self.meta = Some(json!({
+            "cairn/reason": "committed",
+            "cairn/wait": {
+                "for": "reveal",
+                "committed_in_epoch": now,
+                "reveal_from_epoch": now.saturating_add(1),
+                "reveal_in_seconds": seconds_until_next_epoch(&ts),
+                "epoch_seconds": epoch_seconds(),
+            },
+        }));
         Ok(format!(
             "Committed in epoch {now}. Your artifact is bound but hidden; nobody can copy \
              it, and nobody can front-run it. Call submit_claim again with the same \
@@ -2747,6 +2855,58 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string()
+    }
+
+    /// [`call`], with the result's `_meta` beside its text (`Null` when the
+    /// tool sent none).
+    fn call_with_meta(server: &mut Server, name: &str, args: Json) -> (String, Json) {
+        let line = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": name, "arguments": args }
+        })
+        .to_string();
+        let response: Json = serde_json::from_str(&server.handle_line(&line).unwrap()).unwrap();
+        (
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            response["result"]["_meta"].clone(),
+        )
+    }
+
+    #[test]
+    fn a_submission_says_why_in_a_word_beside_the_words() {
+        let (mut s, objective_id, _) = server_with_injected_objective();
+        let (text, meta) = call_with_meta(
+            &mut s,
+            "submit_claim",
+            json!({ "objective_id": "sha256:nope", "submitter": "agent", "artifact": { "n": 1 } }),
+        );
+        assert_eq!(meta["cairn/reason"], "unknown_objective", "{text}");
+        let (_, meta) = call_with_meta(
+            &mut s,
+            "submit_claim",
+            json!({ "objective_id": objective_id.clone(), "submitter": "agent" }),
+        );
+        assert_eq!(meta["cairn/reason"], "bad_arguments");
+
+        let args =
+            json!({ "objective_id": objective_id, "submitter": "agent", "artifact": { "n": 1 } });
+        let (text, meta) = call_with_meta(&mut s, "submit_claim", args.clone());
+        assert_eq!(meta["cairn/reason"], "committed", "{text}");
+        let wait = &meta["cairn/wait"];
+        assert_eq!(wait["for"], "reveal");
+        assert_eq!(
+            wait["reveal_from_epoch"].as_u64(),
+            Some(wait["committed_in_epoch"].as_u64().unwrap() + 1)
+        );
+        let (_, meta) = call_with_meta(&mut s, "submit_claim", args);
+        assert_eq!(meta["cairn/reason"], "already_committed");
+
+        // A read carries none: `_meta` is for outcomes that need a word.
+        let (_, meta) = call_with_meta(&mut s, "list_objectives", json!({}));
+        assert!(meta.is_null(), "{meta}");
     }
 
     // -- post_objective -----------------------------------------------------
