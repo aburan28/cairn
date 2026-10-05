@@ -48,7 +48,7 @@ ground-truth reward signal.** That is worth more than the submission plumbing.
 | `pending_reveals` | no | commitments you still owe a reveal for |
 | `work_assignment` | no | your slice of the search space this epoch; also `GET /work_assignment` over HTTP, and `POST /progress` heartbeats put a worker on the node's `/ui/task?id=…` dashboard ([serving.md](serving.md#progress-what-a-search-looks-like-while-it-runs)) |
 | `submit_claim` | yes | commit, then reveal on a later call |
-| `post_objective` | yes | fund a question: the same record `cairn post` reads, signed by `--identity` when one is set |
+| `post_objective` | yes | fund a question: the same record `cairn post` reads, signed by `--identity` when one is set. A reward above 0 needs the operator's `--max-spend N` (or `CAIRN_MCP_MAX_SPEND`), the total agents may fund while the server runs; the default is 0 |
 | `audit` | no | re-derive the whole log (`rerun: true` re-runs verifiers; slow) |
 | `set_secret` | no† | store a named operator secret on this machine; the value is never returned |
 | `list_secrets` | no | names of those secrets; values never returned |

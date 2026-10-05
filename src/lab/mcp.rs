@@ -426,6 +426,15 @@ impl Server {
                 );
                 request.memory_mb = args.get("memory_mb").and_then(Json::as_u64).unwrap_or(0);
                 request.network = args.get("network").and_then(Json::as_bool).unwrap_or(false);
+                // Nor can it give itself the network: that too is the
+                // operator's, made with $CAIRN_LAB_NETWORK.
+                if request.network && !super::exec::agents_may_use_network() {
+                    return Err(format!(
+                        "lab_exec: network access is off for agents on this server. The \
+                         operator turns it on with {}=1; run without network, or ask them",
+                        super::exec::NETWORK_ENV
+                    ));
+                }
                 // An agent cannot ask for no sandbox: that is a choice for the
                 // person running the node, made with $CAIRN_LAB_SANDBOX.
                 request.sandbox = match std::env::var(super::exec::SANDBOX_ENV) {
@@ -525,7 +534,7 @@ fn tools() -> Json {
           "inputSchema": { "type": "object", "properties": { "msg": { "type": "string" }, "address": { "type": "string" } }, "required": ["msg"] } },
         { "name": "lab_envs", "description": "Execution environments this space names, and whether each is available on this machine.",
           "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "lab_exec", "description": "Run a command in an environment, sandboxed (gVisor when available): read-only root, inputs mounted read-only from the space, outputs written to /out and published as write-once files under `publish`, no network unless asked. The receipt and outputs are recorded as one op. A sandbox failure is reported as sandbox_error, never as the command's result.",
+        { "name": "lab_exec", "description": "Run a command in an environment, sandboxed (gVisor when available): read-only root, inputs mounted read-only from the space, outputs written to /out and published as write-once files under `publish`, no network unless asked and the operator allowed it (CAIRN_LAB_NETWORK=1). The receipt and outputs are recorded as one op. A sandbox failure is reported as sandbox_error, never as the command's result.",
           "inputSchema": { "type": "object", "properties": {
               "env": { "type": "string" },
               "argv": { "type": "array", "items": { "type": "string" } },

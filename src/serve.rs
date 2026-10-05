@@ -957,6 +957,10 @@ struct Request {
     /// The `Authorization` header. Read only for the `CairnMember` scheme
     /// (design §6); any other is ignored, as every header was before.
     authorization: Option<String>,
+    /// Whether a proxy says it forwarded this request (`Forwarded`,
+    /// `X-Forwarded-For`, `X-Real-IP`). Read only to stop a reverse proxy's
+    /// loopback connection standing in for a fleet member; see [`handle`].
+    forwarded: bool,
 }
 
 /// Serve until the process is killed.
@@ -1274,14 +1278,25 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             leases_of(stream, serving, &path["/leases/".len()..])
         }
         ("GET", path) if path == "/ui" || path.starts_with("/ui/") => ui_asset(stream, path),
-        ("POST", "/submit") => submit(
-            stream,
-            serving,
-            &request,
-            remote,
-            body.as_deref().unwrap_or_default(),
-            verified.as_ref(),
-        ),
+        ("POST", "/submit") => {
+            // Behind a reverse proxy every request arrives from loopback, and
+            // loopback is in `CAIRN_FLEET=private` -- so the whole internet
+            // would be a fleet member. A loopback connection that says a proxy
+            // forwarded it is somebody else's request; it is treated as from
+            // an unknown address, which no fleet admits. The forwarded address
+            // itself is not trusted: any client can write the header. An
+            // enrolled member is unaffected: it is admitted by its key, not
+            // its address, so it signs through a proxy as from anywhere.
+            let member_address = remote.filter(|ip| !(ip.is_loopback() && request.forwarded));
+            submit(
+                stream,
+                serving,
+                &request,
+                member_address,
+                body.as_deref().unwrap_or_default(),
+                verified.as_ref(),
+            )
+        }
         ("POST", "/progress") => heartbeat(
             stream,
             serving,
@@ -1369,6 +1384,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
     let mut content_type = None;
     let mut host = None;
     let mut authorization = None;
+    let mut forwarded = false;
     let mut headers = 0usize;
     loop {
         let mut header = String::new();
@@ -1389,6 +1405,9 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
             }
             if name == "authorization" {
                 authorization = Some(value.to_string());
+            }
+            if matches!(name.as_str(), "forwarded" | "x-forwarded-for" | "x-real-ip") {
+                forwarded = true;
             }
             if name == "content-length" {
                 length = value
@@ -1431,6 +1450,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
         content_type,
         host,
         authorization,
+        forwarded,
     })
 }
 
@@ -3901,17 +3921,40 @@ fn deposit_grant(
         },
     };
 
+    let size = match value.get("size") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_u64() {
+            Some(n) => Some(n),
+            None => {
+                return respond(
+                    stream,
+                    400,
+                    "application/json",
+                    error_body("size must be a non-negative integer").as_bytes(),
+                );
+            }
+        },
+    };
+    // Counted per address, so one requester cannot hold every grant. Loopback
+    // is the operator's own machine and is not counted.
+    let requester = stream
+        .peer_addr()
+        .ok()
+        .map(|addr| addr.ip())
+        .filter(|ip| !ip.is_loopback())
+        .map(|ip| ip.to_string());
+
     let dir = DepositDir::at(&serving.deposits);
     let secrets_dir = secrets::default_dir();
-    match deposit::issue_grant(
-        &dir,
+    let grant_request = deposit::GrantRequest {
         deposit,
         submitter,
         max_bytes,
+        size,
         digest,
-        None,
-        &secrets_dir,
-    ) {
+        requester: requester.as_deref(),
+    };
+    match deposit::issue_grant(&dir, &grant_request, None, &secrets_dir) {
         Ok(grant) => {
             let body = grant.public_response(None).to_string();
             respond(stream, 200, "application/json", body.as_bytes())
@@ -6760,6 +6803,25 @@ mod tests {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .contains("relations"));
+
+        // Behind a reverse proxy every request arrives from loopback. One that
+        // says a proxy forwarded it is somebody else's, not a fleet member's.
+        {
+            use std::io::{Read as _, Write as _};
+            let record = commitment(&me);
+            let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+            write!(
+                socket,
+                "POST /submit?kind=commitment HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+                 X-Forwarded-For: 203.0.113.9\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{record}",
+                record.len()
+            )
+            .expect("send");
+            let mut response = String::new();
+            socket.read_to_string(&mut response).expect("read");
+            assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+        }
 
         // Outside the fleet: a fleet of a network this test is not on.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");

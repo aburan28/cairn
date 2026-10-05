@@ -296,6 +296,31 @@ for LOG in "$A" "$B"; do
 done
 echo "  both implementations re-derived every batch's beacon order"
 
+# --- a delay beacon, checked by the implementation that did not compute it --
+rule "a delay beacon: recorded by the primary, its proof checked by the reference"
+# The reference verifies delay proofs on its own bignum (src/vdf.rs). A beacon
+# must be drawn in the epoch it orders, and computing one at the floor takes
+# a moment, so this log uses ten-minute epochs; a boundary crossed during the
+# delay is retried once rather than reported.
+V="$(mktemp -u /tmp/pw-interop-vdf-XXXXXX).jsonl"
+vdf_beacon() {
+  local epoch
+  epoch=$(CAIRN_EPOCH_SECONDS=600 $RUST drand-round | awk '/^epoch/ {print $2}')
+  CAIRN_EPOCH_SECONDS=600 $RUST --log "$V" --root . beacon --orders "$epoch" --delay 65536 >/dev/null
+}
+vdf_beacon || { rm -f "$V"; vdf_beacon; } || fail "the primary could not record a delay beacon"
+VDF_VIEW=$(CAIRN_EPOCH_SECONDS=600 "$REF" --log "$V" --root . audit)
+echo "$VDF_VIEW"
+echo "$VDF_VIEW" | grep -q "log verified" \
+  || fail "the reference refused a delay proof the primary computed"
+VDF_VIEW=$(CAIRN_EPOCH_SECONDS=600 CAIRN_MIN_VDF_DIFFICULTY=1000000 "$REF" --log "$V" --root . audit || true)
+echo "$VDF_VIEW" | grep -q "CAIRN_MIN_VDF_DIFFICULTY" \
+  || fail "the reference ignored a reader's minimum delay"
+VDF_VIEW=$(CAIRN_EPOCH_SECONDS=600 CAIRN_MIN_VDF_DIFFICULTY=1000000 $RUST --log "$V" --root . audit || true)
+echo "$VDF_VIEW" | grep -q "CAIRN_MIN_VDF_DIFFICULTY" \
+  || fail "the primary ignored a reader's minimum delay"
+rm -f "$V"
+
 # --- the roots must agree exactly ----------------------------------------
 rule "Merkle roots agree across implementations"
 for LOG in "$A" "$B"; do

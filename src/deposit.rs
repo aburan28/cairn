@@ -56,6 +56,27 @@ pub const MAX_PROXY_BYTES: u64 = 64 << 20;
 /// node may ask for one, so this is the ceiling on what that costs the disk.
 pub const MAX_OUTSTANDING_GRANTS: usize = 1024;
 
+/// Unexpired grants one network address may hold. Without it, one requester
+/// could take all [`MAX_OUTSTANDING_GRANTS`] and leave nobody else a grant
+/// until they expired. Loopback is the operator and is not counted.
+pub const MAX_GRANTS_PER_ADDRESS: usize = 64;
+
+/// What a contributor asks a grant for.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GrantRequest<'a> {
+    pub deposit: &'a str,
+    pub submitter: &'a str,
+    /// A ceiling below the deposit's own. `None` takes the deposit's.
+    pub max_bytes: Option<u64>,
+    /// The exact length of the object, when the contributor knows it.
+    pub size: Option<u64>,
+    /// SHA-256 hex the object must have, when the contributor knows it.
+    pub digest: Option<&'a str>,
+    /// The network address asking, for [`MAX_GRANTS_PER_ADDRESS`]. `None` from
+    /// the CLI and MCP, which run as the operator.
+    pub requester: Option<&'a str>,
+}
+
 /// A deposit provider. The protocol speaks deposits and grants; these are the
 /// adapters that actually move bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,6 +369,11 @@ pub struct Grant {
     pub max_bytes: u64,
     /// Optional SHA-256 hex the body must match.
     pub digest: Option<String>,
+    /// Optional exact length the body must have.
+    pub size: Option<u64>,
+    /// The address that asked, when it was a remote one. Kept on disk only, to
+    /// count against [`MAX_GRANTS_PER_ADDRESS`]; never in a response.
+    pub issued_to: Option<String>,
     pub expires_at: u64,
     pub consumed: bool,
     pub mode: UploadMode,
@@ -375,6 +401,15 @@ impl Grant {
         );
         if let Some(digest) = &self.digest {
             obj.insert("digest".into(), serde_json::Value::String(digest.clone()));
+        }
+        if let Some(size) = self.size {
+            obj.insert("size".into(), serde_json::Value::Number(size.into()));
+        }
+        if let Some(address) = &self.issued_to {
+            obj.insert(
+                "issued_to".into(),
+                serde_json::Value::String(address.clone()),
+            );
         }
         obj.insert(
             "expires_at".into(),
@@ -427,6 +462,25 @@ impl Grant {
         if let Some(digest) = &self.digest {
             obj.insert("digest".into(), serde_json::Value::String(digest.clone()));
         }
+        if let Some(size) = self.size {
+            obj.insert("size".into(), serde_json::Value::Number(size.into()));
+        }
+        // A presigned URL signs these headers, so the PUT must carry them
+        // exactly: the store, not this node, then refuses any other length or
+        // any other bytes.
+        if self.mode == UploadMode::Presigned {
+            let mut headers = serde_json::Map::new();
+            if let Some(size) = self.size {
+                headers.insert(
+                    "Content-Length".into(),
+                    serde_json::Value::String(size.to_string()),
+                );
+            }
+            if let Some(checksum) = self.digest.as_deref().and_then(checksum_header) {
+                headers.insert(CHECKSUM_HEADER.into(), serde_json::Value::String(checksum));
+            }
+            obj.insert("headers".into(), serde_json::Value::Object(headers));
+        }
         serde_json::Value::Object(obj)
     }
 
@@ -450,6 +504,8 @@ impl Grant {
             max_bytes: optional_u64(obj, "max_bytes")?
                 .ok_or_else(|| DepositError::Invalid(String::from("grant missing max_bytes")))?,
             digest: optional_string(obj, "digest"),
+            size: optional_u64(obj, "size")?,
+            issued_to: optional_string(obj, "issued_to"),
             expires_at: optional_u64(obj, "expires_at")?
                 .ok_or_else(|| DepositError::Invalid(String::from("grant missing expires_at")))?,
             consumed: obj
@@ -600,10 +656,20 @@ impl DepositDir {
     /// A grant that will not parse is left alone and counted: nothing here
     /// deletes a file it cannot read.
     pub fn prune_grants(&self, now: u64) -> Result<usize, DepositError> {
+        self.prune_grants_counting(now, None).map(|(live, _)| live)
+    }
+
+    /// [`DepositDir::prune_grants`], also counting the unexpired grants issued
+    /// to `requester`.
+    pub fn prune_grants_counting(
+        &self,
+        now: u64,
+        requester: Option<&str>,
+    ) -> Result<(usize, usize), DepositError> {
         let dir = self.grants_dir();
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
             Err(source) => {
                 return Err(DepositError::Io {
                     context: format!("listing {}", dir.display()),
@@ -611,23 +677,27 @@ impl DepositDir {
                 })
             }
         };
-        let mut live = 0;
+        let (mut live, mut theirs) = (0, 0);
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-            let expired = fs::read_to_string(&path)
+            let grant = fs::read_to_string(&path)
                 .ok()
-                .and_then(|text| Grant::from_json(&text).ok())
-                .is_some_and(|grant| now > grant.expires_at);
-            if expired {
+                .and_then(|text| Grant::from_json(&text).ok());
+            if grant.as_ref().is_some_and(|grant| now > grant.expires_at) {
                 let _ = fs::remove_file(&path);
-            } else {
-                live += 1;
+                continue;
+            }
+            live += 1;
+            if requester.is_some()
+                && grant.is_some_and(|grant| grant.issued_to.as_deref() == requester)
+            {
+                theirs += 1;
             }
         }
-        Ok(live)
+        Ok((live, theirs))
     }
 
     pub fn load_grant(&self, id: &str) -> Result<Grant, DepositError> {
@@ -646,18 +716,24 @@ impl DepositDir {
 /// Issue a grant against a configured deposit.
 ///
 /// `proxy_base` is the public origin of this node (e.g. `http://host:8080`)
-/// used to fill `put_url` for proxy mode. For S3, a presigned URL is minted
-/// and `mode` is [`UploadMode::Presigned`].
+/// used to fill `put_url` for proxy mode.
+///
+/// For S3, the grant is [`UploadMode::Presigned`] only when the request names
+/// both the exact `size` and the `digest`: the URL then signs `Content-Length`
+/// and `x-amz-checksum-sha256`, so the store itself refuses any other length
+/// or any other bytes, however often the URL is used before it expires.
+/// Otherwise it is [`UploadMode::Proxy`]: the body comes through this node,
+/// which enforces `max_bytes` and signs the exact length and digest of what it
+/// forwards. Before, a presigned PUT signed only `host`, so `max_bytes` was
+/// advisory for S3 and a leaked URL could fill the bucket.
 pub fn issue_grant(
     deposits: &DepositDir,
-    deposit_name: &str,
-    submitter: &str,
-    max_bytes: Option<u64>,
-    digest: Option<&str>,
+    request: &GrantRequest<'_>,
     proxy_base: Option<&str>,
     secrets_dir: &Path,
 ) -> Result<Grant, DepositError> {
-    let spec = deposits.load(deposit_name)?;
+    let spec = deposits.load(request.deposit)?;
+    let submitter = request.submitter;
     if submitter.is_empty() || submitter.len() > 128 {
         return Err(DepositError::Invalid(String::from(
             "submitter must be 1..=128 characters",
@@ -668,14 +744,21 @@ pub fn issue_grant(
             "submitter must not contain path separators",
         )));
     }
-    let max_bytes = max_bytes.unwrap_or(spec.max_bytes);
+    let max_bytes = request.max_bytes.unwrap_or(spec.max_bytes);
     if max_bytes == 0 || max_bytes > spec.max_bytes {
         return Err(DepositError::Invalid(format!(
             "max_bytes must be between 1 and {} for this deposit",
             spec.max_bytes
         )));
     }
-    if let Some(digest) = digest {
+    if let Some(size) = request.size {
+        if size == 0 || size > max_bytes {
+            return Err(DepositError::Invalid(format!(
+                "size must be between 1 and {max_bytes}"
+            )));
+        }
+    }
+    if let Some(digest) = request.digest {
         if hex::decode(digest).as_ref().map(|b| b.len()) != Some(32) {
             return Err(DepositError::Invalid(String::from(
                 "digest must be 64 lowercase hex characters (sha-256)",
@@ -686,10 +769,18 @@ pub fn issue_grant(
     // `POST /deposit/grant` is open to anyone who can reach the node, and
     // each grant is a file. Expired grants are deleted here, and past a
     // ceiling of live ones the answer is "come back later", so a loop of
-    // requests cannot fill the disk.
-    if deposits.prune_grants(now_secs())? >= MAX_OUTSTANDING_GRANTS {
+    // requests cannot fill the disk -- and past a smaller ceiling per
+    // address, one requester cannot take every grant there is.
+    let (live, theirs) = deposits.prune_grants_counting(now_secs(), request.requester)?;
+    if live >= MAX_OUTSTANDING_GRANTS {
         return Err(DepositError::Unavailable(format!(
             "{MAX_OUTSTANDING_GRANTS} grants are outstanding; try again once some expire"
+        )));
+    }
+    if theirs >= MAX_GRANTS_PER_ADDRESS {
+        return Err(DepositError::Unavailable(format!(
+            "this address holds {MAX_GRANTS_PER_ADDRESS} unexpired grants; use or let some \
+             expire first"
         )));
     }
 
@@ -703,10 +794,19 @@ pub fn issue_grant(
     let expires_at = now_secs().saturating_add(spec.ttl_secs);
     let (mode, put_url) = match spec.provider {
         Provider::File => (UploadMode::Proxy, None),
-        Provider::S3 => {
-            let url = presign_s3_put(&spec, &key, max_bytes, expires_at, secrets_dir)?;
-            (UploadMode::Presigned, Some(url))
-        }
+        Provider::S3 => match (request.size, request.digest) {
+            (Some(size), Some(digest)) => {
+                let url = presign_s3_put(&spec, &key, size, digest, expires_at, secrets_dir)?;
+                (UploadMode::Presigned, Some(url))
+            }
+            // Through this node, which signs what it forwards. The credentials
+            // are read now anyway, so a node that could never forward says so
+            // before anyone uploads.
+            _ => {
+                s3_credentials(&spec, secrets_dir)?;
+                (UploadMode::Proxy, None)
+            }
+        },
     };
 
     let grant = Grant {
@@ -715,7 +815,9 @@ pub fn issue_grant(
         submitter: submitter.to_string(),
         key,
         max_bytes,
-        digest: digest.map(str::to_string),
+        digest: request.digest.map(str::to_string),
+        size: request.size,
+        issued_to: request.requester.map(str::to_string),
         expires_at,
         consumed: false,
         mode,
@@ -803,6 +905,14 @@ pub fn redeem_grant(
             max: grant.max_bytes,
         });
     }
+    if let Some(size) = grant.size {
+        if body.len() as u64 != size {
+            return Err(DepositError::Invalid(format!(
+                "the grant is for exactly {size} bytes; this body has {}",
+                body.len()
+            )));
+        }
+    }
     let digest = hex::encode(&Sha256::digest(body));
     if let Some(expected) = &grant.digest {
         if expected != &digest {
@@ -823,17 +933,18 @@ pub fn redeem_grant(
             put_file(root, &grant.key, body)?;
         }
         Provider::S3 => {
-            let url = match &grant.put_url {
-                Some(url) => url.clone(),
-                None => presign_s3_put(
-                    &spec,
-                    &grant.key,
-                    grant.max_bytes,
-                    grant.expires_at,
-                    secrets_dir,
-                )?,
-            };
-            curl_put(&url, body)?;
+            // Signed for exactly these bytes, whatever the grant was issued
+            // with: the length and digest checked above are what the store
+            // will be told to insist on.
+            let url = presign_s3_put(
+                &spec,
+                &grant.key,
+                body.len() as u64,
+                &digest,
+                grant.expires_at,
+                secrets_dir,
+            )?;
+            curl_put(&url, body, &digest)?;
         }
     }
 
@@ -866,17 +977,68 @@ fn put_file(root: &Path, key: &str, body: &[u8]) -> Result<(), DepositError> {
     write_atomic(&dest, body)
 }
 
-/// Mint a SigV4 query-string pre-signed PUT URL for `key`.
+/// The header S3 checks a body's SHA-256 against.
+const CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
+
+/// `x-amz-checksum-sha256`'s value for a hex SHA-256: the same digest in
+/// standard base64.
+fn checksum_header(hex_digest: &str) -> Option<String> {
+    hex::decode(hex_digest)
+        .filter(|bytes| bytes.len() == 32)
+        .map(|bytes| base64(&bytes))
+}
+
+/// Standard base64 with padding. Written out for one 32-byte digest rather
+/// than taking a crate for it.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for (i, shift) in [18u32, 12, 6, 0].into_iter().enumerate() {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[((n >> shift) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The access key, secret key and optional session token an S3 deposit
+/// names, read from the operator's secrets.
+fn s3_credentials(
+    spec: &DepositSpec,
+    secrets_dir: &Path,
+) -> Result<(String, String, Option<String>), DepositError> {
+    let access_key = secrets::get(secrets_dir, &spec.access_key_secret).map_err(map_secrets)?;
+    let secret_key = secrets::get(secrets_dir, &spec.secret_key_secret).map_err(map_secrets)?;
+    let session_token = match &spec.session_token_secret {
+        Some(name) => Some(secrets::get(secrets_dir, name).map_err(map_secrets)?),
+        None => None,
+    };
+    Ok((access_key, secret_key, session_token))
+}
+
+/// Mint a SigV4 query-string pre-signed PUT URL for exactly `length` bytes
+/// whose SHA-256 is `digest`.
 ///
-/// `max_bytes` is recorded on the grant and enforced when this node proxies
-/// the body; it is not bound into the signature because the body length is
-/// not known at issue time, and signing a guessed `Content-Length` would
-/// reject every honest smaller PUT. A future Stage A follow-up can switch
-/// S3 to a POST policy with `content-length-range` for hard cloud-side caps.
+/// Both are signed headers: `Content-Length`, so the store refuses any other
+/// length, and `x-amz-checksum-sha256`, so it refuses any other bytes. Signing
+/// only `host` with `UNSIGNED-PAYLOAD`, as this did before, left `max_bytes`
+/// advisory: a leaked URL could put any amount of anything at the key until it
+/// expired.
 fn presign_s3_put(
     spec: &DepositSpec,
     key: &str,
-    _max_bytes: u64,
+    length: u64,
+    digest: &str,
     expires_at: u64,
     secrets_dir: &Path,
 ) -> Result<String, DepositError> {
@@ -888,12 +1050,12 @@ fn presign_s3_put(
         .region
         .as_deref()
         .ok_or_else(|| DepositError::Invalid(String::from("s3 deposit missing region")))?;
-    let access_key = secrets::get(secrets_dir, &spec.access_key_secret).map_err(map_secrets)?;
-    let secret_key = secrets::get(secrets_dir, &spec.secret_key_secret).map_err(map_secrets)?;
-    let session_token = match &spec.session_token_secret {
-        Some(name) => Some(secrets::get(secrets_dir, name).map_err(map_secrets)?),
-        None => None,
-    };
+    let checksum = checksum_header(digest).ok_or_else(|| {
+        DepositError::Invalid(String::from(
+            "digest must be 64 lowercase hex characters (sha-256)",
+        ))
+    })?;
+    let (access_key, secret_key, session_token) = s3_credentials(spec, secrets_dir)?;
 
     let now = now_secs();
     let expires_in = expires_at.saturating_sub(now).max(1);
@@ -919,7 +1081,7 @@ fn presign_s3_put(
         ("X-Amz-Credential".into(), credential),
         ("X-Amz-Date".into(), amz_date.clone()),
         ("X-Amz-Expires".into(), expires_in.to_string()),
-        ("X-Amz-SignedHeaders".into(), "host".into()),
+        ("X-Amz-SignedHeaders".into(), SIGNED_HEADERS.into()),
     ];
     if let Some(token) = &session_token {
         query.push(("X-Amz-Security-Token".into(), token.clone()));
@@ -932,10 +1094,12 @@ fn presign_s3_put(
         .collect::<Vec<_>>()
         .join("&");
 
-    let canonical_headers = format!("host:{host}\n");
-    let signed_headers = "host";
+    // Lowercase names, sorted, as SigV4 requires; SIGNED_HEADERS lists the
+    // same names in the same order.
+    let canonical_headers =
+        format!("content-length:{length}\nhost:{host}\n{CHECKSUM_HEADER}:{checksum}\n");
     let canonical_request = format!(
-        "PUT\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\nUNSIGNED-PAYLOAD"
+        "PUT\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{SIGNED_HEADERS}\nUNSIGNED-PAYLOAD"
     );
     let canonical_hash = hex::encode(&Sha256::digest(canonical_request.as_bytes()));
     let string_to_sign =
@@ -949,6 +1113,9 @@ fn presign_s3_put(
         "https://{host}{canonical_uri}?{canonical_query}&X-Amz-Signature={signature}"
     ))
 }
+
+/// The headers a presigned PUT signs, in SigV4's order.
+const SIGNED_HEADERS: &str = "content-length;host;x-amz-checksum-sha256";
 
 /// Derive an AWS SigV4 signing key. Pure HMAC — no network, no TLS.
 pub fn aws_signing_key(secret: &[u8], date_stamp: &str, region: &str, service: &str) -> Vec<u8> {
@@ -970,7 +1137,12 @@ pub fn aws_signing_key(secret: &[u8], date_stamp: &str, region: &str, service: &
     k_signing.finalize().into_bytes().to_vec()
 }
 
-fn curl_put(url: &str, body: &[u8]) -> Result<(), DepositError> {
+fn curl_put(url: &str, body: &[u8], digest: &str) -> Result<(), DepositError> {
+    let checksum = checksum_header(digest).ok_or_else(|| {
+        DepositError::Invalid(String::from(
+            "digest must be 64 lowercase hex characters (sha-256)",
+        ))
+    })?;
     // Temp file rather than stdin: some curl builds buffer differently, and a
     // named file makes Content-Length unambiguous for the presigned binding.
     // A random name created exclusively at 0600: `pid-seconds` was shared by
@@ -989,6 +1161,8 @@ fn curl_put(url: &str, body: &[u8]) -> Result<(), DepositError> {
         .arg(&tmp)
         .arg("--header")
         .arg(format!("Content-Length: {}", body.len()))
+        .arg("--header")
+        .arg(format!("{CHECKSUM_HEADER}: {checksum}"))
         .arg(url)
         .output()
         .map_err(|source| DepositError::Io {
@@ -1274,8 +1448,32 @@ mod tests {
         let secrets = scratch("prune-secrets");
         secrets::prepare(&secrets).unwrap();
         dir.add(&DepositSpec::file("demo", &root)).unwrap();
-        let live = issue_grant(&dir, "demo", "alice", None, None, None, &secrets).unwrap();
-        let mut stale = issue_grant(&dir, "demo", "bob", None, None, None, &secrets).unwrap();
+        let live = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "demo",
+                submitter: "alice",
+                max_bytes: None,
+                digest: None,
+                ..GrantRequest::default()
+            },
+            None,
+            &secrets,
+        )
+        .unwrap();
+        let mut stale = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "demo",
+                submitter: "bob",
+                max_bytes: None,
+                digest: None,
+                ..GrantRequest::default()
+            },
+            None,
+            &secrets,
+        )
+        .unwrap();
         stale.expires_at = 1;
         stale.put_url = None;
         dir.save_grant(&stale).unwrap();
@@ -1316,10 +1514,13 @@ mod tests {
 
         let grant = issue_grant(
             &dir,
-            "demo",
-            "alice",
-            Some(1024),
-            None,
+            &GrantRequest {
+                deposit: "demo",
+                submitter: "alice",
+                max_bytes: Some(1024),
+                digest: None,
+                ..GrantRequest::default()
+            },
             Some("http://127.0.0.1:8080"),
             &secrets,
         )
@@ -1360,7 +1561,19 @@ mod tests {
         dir.add(&DepositSpec::file("d", &root)).unwrap();
 
         let want = hex::encode(&Sha256::digest(b"right"));
-        let grant = issue_grant(&dir, "d", "bob", Some(64), Some(&want), None, &secrets).unwrap();
+        let grant = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "d",
+                submitter: "bob",
+                max_bytes: Some(64),
+                digest: Some(&want),
+                ..GrantRequest::default()
+            },
+            None,
+            &secrets,
+        )
+        .unwrap();
         assert!(matches!(
             redeem_grant(&dir, &grant.id, b"wrong", &secrets),
             Err(DepositError::DigestMismatch { .. })
@@ -1379,7 +1592,19 @@ mod tests {
         let secrets = scratch("size-secrets");
         secrets::prepare(&secrets).unwrap();
         dir.add(&DepositSpec::file("d", &root)).unwrap();
-        let grant = issue_grant(&dir, "d", "c", Some(4), None, None, &secrets).unwrap();
+        let grant = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "d",
+                submitter: "c",
+                max_bytes: Some(4),
+                digest: None,
+                ..GrantRequest::default()
+            },
+            None,
+            &secrets,
+        )
+        .unwrap();
         assert!(matches!(
             redeem_grant(&dir, &grant.id, b"12345", &secrets),
             Err(DepositError::TooLarge { .. })
@@ -1404,7 +1629,19 @@ mod tests {
 
         // Missing secrets → unavailable, not a panic and not a refusal that
         // looks like the artifact is wrong.
-        let err = issue_grant(&dir, "camp", "alice", None, None, None, &secrets).unwrap_err();
+        let err = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "camp",
+                submitter: "alice",
+                max_bytes: None,
+                digest: None,
+                ..GrantRequest::default()
+            },
+            None,
+            &secrets,
+        )
+        .unwrap_err();
         assert!(matches!(err, DepositError::Unavailable(_)), "{err}");
 
         secrets::set(&secrets, "AWS_ACCESS_KEY_ID", "AKIAEXAMPLEKEY00000").unwrap();
@@ -1415,15 +1652,168 @@ mod tests {
         )
         .unwrap();
 
-        let grant = issue_grant(&dir, "camp", "alice", Some(1024), None, None, &secrets).unwrap();
+        // Without the exact size and digest, the upload comes through this
+        // node, which enforces max_bytes and signs what it forwards.
+        let proxied = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "camp",
+                submitter: "alice",
+                max_bytes: Some(1024),
+                digest: None,
+                ..GrantRequest::default()
+            },
+            None,
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(proxied.mode, UploadMode::Proxy);
+        assert!(proxied
+            .put_url
+            .as_deref()
+            .unwrap()
+            .contains("/deposit/upload/"));
+
+        // With both, the URL is presigned for exactly those bytes: the store
+        // checks the signed length and checksum, not this node.
+        let body = b"distinguished points";
+        let digest = hex::encode(&Sha256::digest(body));
+        let grant = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "camp",
+                submitter: "alice",
+                max_bytes: Some(1024),
+                size: Some(body.len() as u64),
+                digest: Some(&digest),
+                requester: None,
+            },
+            None,
+            &secrets,
+        )
+        .unwrap();
         assert_eq!(grant.mode, UploadMode::Presigned);
         let url = grant.put_url.as_deref().unwrap();
         assert!(url.starts_with("https://ecc2k130-example.s3.us-west-2.amazonaws.com/"));
         assert!(url.contains("X-Amz-Signature="));
+        assert!(url.contains("X-Amz-SignedHeaders=content-length%3Bhost%3Bx-amz-checksum-sha256"));
         assert!(url.contains("dp/camp/alice/"));
         // No secret material in the URL beyond the signature of a request.
         assert!(!url.contains("wJalrXUtnFEMI"));
+        let public = grant.public_response(None);
+        assert_eq!(public["headers"]["Content-Length"], body.len().to_string());
+        assert_eq!(
+            public["headers"]["x-amz-checksum-sha256"],
+            base64(&Sha256::digest(body))
+        );
+        // A size above the ceiling is refused at issue.
+        let too_big = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "camp",
+                submitter: "alice",
+                max_bytes: Some(8),
+                size: Some(9),
+                ..GrantRequest::default()
+            },
+            None,
+            &secrets,
+        );
+        assert!(
+            matches!(too_big, Err(DepositError::Invalid(_))),
+            "{too_big:?}"
+        );
 
+        let _ = fs::remove_dir_all(dir.path());
+        let _ = fs::remove_dir_all(secrets);
+    }
+
+    #[test]
+    fn base64_matches_the_rfc_vectors() {
+        // RFC 4648 §10, and the checksum S3 expects for the empty body.
+        for (input, output) in [
+            (&b""[..], ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+            (b"fooba", "Zm9vYmE="),
+            (b"foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(input), output);
+        }
+        assert_eq!(
+            checksum_header(&hex::encode(&Sha256::digest(b""))).as_deref(),
+            Some("47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=")
+        );
+    }
+
+    #[test]
+    fn a_grant_for_an_exact_size_takes_no_other() {
+        let root = scratch("exact-root");
+        let dir = DepositDir::at(scratch("exact-cfg"));
+        let secrets = scratch("exact-secrets");
+        secrets::prepare(&secrets).unwrap();
+        dir.add(&DepositSpec::file("d", &root)).unwrap();
+        let grant = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "d",
+                submitter: "c",
+                size: Some(4),
+                ..GrantRequest::default()
+            },
+            None,
+            &secrets,
+        )
+        .unwrap();
+        assert!(matches!(
+            redeem_grant(&dir, &grant.id, b"123", &secrets),
+            Err(DepositError::Invalid(_))
+        ));
+        redeem_grant(&dir, &grant.id, b"1234", &secrets).unwrap();
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(dir.path());
+        let _ = fs::remove_dir_all(secrets);
+    }
+
+    #[test]
+    fn one_address_cannot_hold_every_grant() {
+        let root = scratch("per-address-root");
+        let dir = DepositDir::at(scratch("per-address-cfg"));
+        let secrets = scratch("per-address-secrets");
+        secrets::prepare(&secrets).unwrap();
+        dir.add(&DepositSpec::file("d", &root)).unwrap();
+        let ask = |requester: Option<&str>| {
+            issue_grant(
+                &dir,
+                &GrantRequest {
+                    deposit: "d",
+                    submitter: "s",
+                    requester,
+                    ..GrantRequest::default()
+                },
+                None,
+                &secrets,
+            )
+        };
+        for _ in 0..MAX_GRANTS_PER_ADDRESS {
+            ask(Some("203.0.113.7")).unwrap();
+        }
+        assert!(matches!(
+            ask(Some("203.0.113.7")),
+            Err(DepositError::Unavailable(_))
+        ));
+        // Somebody else still gets one, and so does the operator.
+        ask(Some("198.51.100.2")).unwrap();
+        ask(None).unwrap();
+        // The address is kept on disk to count with, never handed out.
+        let grant = ask(Some("198.51.100.2")).unwrap();
+        assert!(!grant
+            .public_response(None)
+            .to_string()
+            .contains("198.51.100.2"));
+        let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(dir.path());
         let _ = fs::remove_dir_all(secrets);
     }

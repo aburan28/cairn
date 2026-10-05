@@ -141,6 +141,7 @@ pub mod gf;
 pub mod identity;
 pub mod kem;
 pub mod shamir;
+pub mod vss;
 
 pub use envelope::{
     CommitteeKey, CommitteeMember, EnvelopeError, SealedEnvelope, SealedShare, Secret32,

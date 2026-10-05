@@ -526,11 +526,28 @@ fn sub_threshold_shares_fail_with_an_error_not_garbage() {
     let envelope =
         SealedEnvelope::seal(payload, AAD_A, &committee.members, 3, &mut OsRng).expect("seal");
 
+    // Version 3 knows the threshold and says how many checked shares it had.
     for k in 1..=2 {
         for subset in combinations(5, k) {
             let shares = open_shares(&committee, &envelope, &subset);
             assert_eq!(
                 envelope.open_with_shares(&shares),
+                Err(EnvelopeError::NotEnoughValidShares {
+                    valid: k,
+                    threshold: 3
+                }),
+                "subset {subset:?} of size {k}"
+            );
+        }
+    }
+    // Version 2 reconstructs *a* key from any points; the tag refuses it.
+    let legacy = SealedEnvelope::seal_legacy(payload, AAD_A, &committee.members, 3, &mut OsRng)
+        .expect("seal");
+    for k in 1..=2 {
+        for subset in combinations(5, k) {
+            let shares = open_shares(&committee, &legacy, &subset);
+            assert_eq!(
+                legacy.open_with_shares(&shares),
                 Err(EnvelopeError::Authentication { context: "payload" }),
                 "subset {subset:?} of size {k}"
             );
@@ -680,9 +697,27 @@ fn shares_from_another_envelope_do_not_open_this_payload() {
     let envelope_b =
         SealedEnvelope::seal(b"payload B", AAD_A, &committee.members, 2, &mut OsRng).expect("seal");
 
+    // Version 3: `a`'s shares are points on `a`'s polynomials, so none checks
+    // against `b`'s commitments and none is interpolated.
     let shares_a = open_shares(&committee, &envelope_a, &[0, 1]);
     assert_eq!(
         envelope_b.open_with_shares(&shares_a),
+        Err(EnvelopeError::NotEnoughValidShares {
+            valid: 0,
+            threshold: 2
+        })
+    );
+
+    // Version 2, which commits to nothing: the payload tag is the defence.
+    let legacy_a =
+        SealedEnvelope::seal_legacy(b"payload A", AAD_A, &committee.members, 2, &mut OsRng)
+            .expect("seal");
+    let legacy_b =
+        SealedEnvelope::seal_legacy(b"payload B", AAD_A, &committee.members, 2, &mut OsRng)
+            .expect("seal");
+    let shares_a = open_shares(&committee, &legacy_a, &[0, 1]);
+    assert_eq!(
+        legacy_b.open_with_shares(&shares_a),
         Err(EnvelopeError::Authentication { context: "payload" })
     );
 }
@@ -798,26 +833,54 @@ fn a_tampered_sealed_share_fails_to_open() {
 #[test]
 fn malformed_share_sets_are_refused_before_decryption() {
     let committee = committee(4);
+
+    // Version 3: a truncated share is not a share, and a duplicate counts once.
     let envelope =
         SealedEnvelope::seal(b"payload", AAD_A, &committee.members, 2, &mut OsRng).expect("seal");
-
     let mut shares = open_shares(&committee, &envelope, &[0, 1]);
     for share in shares.iter_mut() {
         share.data.truncate(16);
     }
     assert_eq!(
         envelope.open_with_shares(&shares),
-        Err(EnvelopeError::ContentKeyLength { actual: 16 })
+        Err(EnvelopeError::NotEnoughValidShares {
+            valid: 0,
+            threshold: 2
+        })
+    );
+    let one = open_shares(&committee, &envelope, &[0]);
+    let doubled = [
+        one.first().cloned().expect("share"),
+        one.first().cloned().expect("share"),
+    ];
+    assert_eq!(
+        envelope.open_with_shares(&doubled),
+        Err(EnvelopeError::NotEnoughValidShares {
+            valid: 1,
+            threshold: 2
+        }),
+        "a duplicated share counts once"
     );
 
-    let one = open_shares(&committee, &envelope, &[0]);
+    // Version 2: the sharing layer refuses both before the AEAD sees them.
+    let legacy = SealedEnvelope::seal_legacy(b"payload", AAD_A, &committee.members, 2, &mut OsRng)
+        .expect("seal");
+    let mut shares = open_shares(&committee, &legacy, &[0, 1]);
+    for share in shares.iter_mut() {
+        share.data.truncate(16);
+    }
+    assert_eq!(
+        legacy.open_with_shares(&shares),
+        Err(EnvelopeError::ContentKeyLength { actual: 16 })
+    );
+    let one = open_shares(&committee, &legacy, &[0]);
     let doubled = [
         one.first().cloned().expect("share"),
         one.first().cloned().expect("share"),
     ];
     assert!(
         matches!(
-            envelope.open_with_shares(&doubled),
+            legacy.open_with_shares(&doubled),
             Err(EnvelopeError::Shamir(_))
         ),
         "a duplicated share must be refused by the sharing layer"

@@ -106,19 +106,39 @@ if [ "$SIG_COUNT" -eq 0 ] || [ "$SIG_COUNT" -lt "$QUORUM" ]; then
   exit 1
 fi
 
-agreed="${sigs[0]}"
-for sig in "${sigs[@]}"; do
-  if [ "$sig" != "$agreed" ]; then
-    # At most one of them can verify, so this is not a safety question -- it is
-    # a "something is badly wrong with a public good" question, and stopping is
-    # how a human hears about it.
-    echo "relays disagree about round $round -- recording nothing." >&2
-    printf '%s\n' "${sigs[@]}" >&2
-    exit 1
+# Relays that disagree are not a vote to count. At most one signature can
+# verify against the pinned key, so the answer is to ask the pairing check,
+# not the majority: stopping on any disagreement let one bad relay -- or one
+# serving a stale cache -- leave the epoch on the grindable fallback. The
+# disagreement is still said out loud, because it means something is wrong
+# with a public good.
+# A read loop rather than `mapfile`, which macOS's Bash 3.2 does not have.
+declare -a distinct=()
+while IFS= read -r sig; do
+  distinct+=("$sig")
+done < <(printf '%s\n' "${sigs[@]}" | sort -u)
+if [ "${#distinct[@]}" -gt 1 ]; then
+  echo "relays disagree about round $round; recording the one that verifies:" >&2
+  printf '  %s\n' "${distinct[@]}" >&2
+fi
+agreed=""
+for sig in "${distinct[@]}"; do
+  if [ "$GLOBAL_COUNT" -eq 0 ]; then
+    verified=$("$CAIRN" drand-verify --round "$round" --signature "$sig" >/dev/null 2>&1 && echo yes || true)
+  else
+    verified=$("$CAIRN" "${GLOBAL[@]}" drand-verify --round "$round" --signature "$sig" >/dev/null 2>&1 && echo yes || true)
+  fi
+  if [ "$verified" = yes ]; then
+    agreed="$sig"
+    break
   fi
 done
+if [ -z "$agreed" ]; then
+  echo "no relay's signature for round $round verifies against the pinned key -- recording nothing." >&2
+  exit 1
+fi
 
-echo "$SIG_COUNT relays agree on round $round; the pairing check is cairn's, below" >&2
+echo "round $round's signature verifies; recording it (cairn checks the pairing again)" >&2
 if [ "$GLOBAL_COUNT" -eq 0 ]; then
   exec "$CAIRN" beacon --orders "$epoch" --drand-signature "$agreed"
 else

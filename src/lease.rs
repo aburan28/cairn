@@ -76,6 +76,13 @@ pub const MAX_TASKS_PER_OBJECTIVE: usize = 4096;
 /// one task is a flood or a very popular unit, and both are visible at this
 /// size.
 pub const MAX_LEASES_PER_TASK: usize = 64;
+/// Leases kept at once, across every objective and task.
+///
+/// The per-objective, per-task and per-holder caps multiply to some 67
+/// million, which is a ceiling on nothing: one client naming fresh tasks and
+/// holders could fill memory well before reaching any of them. This is the
+/// "overall" the module docs promise.
+pub const MAX_LEASES: usize = 65_536;
 
 const MAX_NAME_LEN: usize = 128;
 const MAX_TEXT_LEN: usize = 200;
@@ -429,15 +436,39 @@ pub struct Standing {
 }
 
 /// Every lease this process has been sent and not yet forgotten.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Leases {
     objectives: BTreeMap<String, BTreeMap<String, TaskLeases>>,
+    /// Leases kept, as [`Leases::forget`] last counted them plus those added
+    /// since. Kept rather than recounted per claim.
+    kept: usize,
+    /// The overall ceiling, [`MAX_LEASES`] outside tests.
+    cap: usize,
+}
+
+impl Default for Leases {
+    fn default() -> Leases {
+        Leases {
+            objectives: BTreeMap::new(),
+            kept: 0,
+            cap: MAX_LEASES,
+        }
+    }
 }
 
 impl Leases {
+    #[cfg(test)]
+    fn with_cap(cap: usize) -> Leases {
+        Leases {
+            cap,
+            ..Leases::default()
+        }
+    }
+
     /// Take or renew a lease. The earliest live claim on a task holds it.
     pub fn claim(&mut self, claim: Claim, now: u64) -> Result<Standing, Refusal> {
         self.forget(now);
+        let (kept, cap) = (self.kept, self.cap);
         let is_new_objective = !self.objectives.contains_key(&claim.objective_id);
         if is_new_objective && self.objectives.len() >= MAX_OBJECTIVES {
             return Err(Refusal::Full(RosterFull(
@@ -498,6 +529,13 @@ impl Leases {
                         "this node is holding as many leases on this task as it will",
                     )));
                 }
+                if kept >= cap {
+                    return Err(Refusal::Full(RosterFull(
+                        "this node is holding as many leases as it will; try again when some \
+                         are released or expire",
+                    )));
+                }
+                self.kept += 1;
                 task.leases.push(Lease {
                     holder: claim.holder.clone(),
                     since: now,
@@ -550,6 +588,7 @@ impl Leases {
     /// Drop leases that ended more than [`FORGET_SECONDS`] ago, then tasks
     /// and objectives with nothing left.
     fn forget(&mut self, now: u64) {
+        let mut kept = 0;
         for tasks in self.objectives.values_mut() {
             for task in tasks.values_mut() {
                 task.leases.retain(|lease| {
@@ -557,10 +596,12 @@ impl Leases {
                         .ended_at(now)
                         .is_none_or(|ended| now.saturating_sub(ended) <= FORGET_SECONDS)
                 });
+                kept += task.leases.len();
             }
             tasks.retain(|_, task| !task.leases.is_empty());
         }
         self.objectives.retain(|_, tasks| !tasks.is_empty());
+        self.kept = kept;
     }
 
     /// Objectives with any lease on the roster.
@@ -742,6 +783,37 @@ mod tests {
             .iter()
             .find(|task| task.get("task").and_then(Value::as_str) == Some(name))
             .expect("the task")
+    }
+
+    /// The overall ceiling binds before the product of the per-objective,
+    /// per-task and per-holder caps does.
+    #[test]
+    fn leases_are_capped_overall_not_just_per_task() {
+        // The real cap is MAX_LEASES; a small one exercises the same rule in
+        // a test that does not insert sixty-five thousand leases.
+        const CAP: usize = 50;
+        const _: () = assert!(MAX_LEASES < MAX_OBJECTIVES * MAX_TASKS_PER_OBJECTIVE);
+        let mut leases = Leases::with_cap(CAP);
+        for n in 0..CAP {
+            let mut c = claim(&format!("unit:{}", n % 10), &format!("h{}", n / 10), 600);
+            c.objective_id = format!("sha256:obj{}", n % 3);
+            leases.claim(c, 1_000).expect("under the overall cap");
+        }
+        let mut one_more = claim("unit:extra", "h", 600);
+        one_more.objective_id = "sha256:another".into();
+        assert!(matches!(
+            leases.claim(one_more, 1_000),
+            Err(Refusal::Full(_))
+        ));
+        // A renewal is not a new lease and still answers.
+        let mut renew = claim("unit:0", "h0", 600);
+        renew.objective_id = "sha256:obj0".into();
+        assert!(leases.claim(renew, 1_001).expect("renews").renewed);
+        // And once leases are forgotten, there is room again.
+        let later = 1_000 + 600 + FORGET_SECONDS + 1;
+        let mut fresh = claim("unit:new", "h", 600);
+        fresh.objective_id = "sha256:another".into();
+        leases.claim(fresh, later).expect("room after forgetting");
     }
 
     #[test]

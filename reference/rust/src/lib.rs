@@ -13,9 +13,11 @@
 //! byte; everything else is local behaviour that can differ without anybody
 //! disagreeing about what was settled.
 
+pub mod aead;
 pub mod attribution;
 pub mod canonical;
 pub mod drand;
+pub mod envelope;
 pub mod frontier;
 pub mod ledger;
 pub mod node;
@@ -24,5 +26,7 @@ pub mod piecework;
 pub mod records;
 pub mod sig;
 pub mod time;
+pub mod vdf;
 pub mod verifiers;
+pub mod vss;
 pub mod workspace;

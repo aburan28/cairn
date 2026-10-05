@@ -119,11 +119,15 @@ one-of-five is one every drawn member opens alone the moment the epoch turns.
 `Node::commit` therefore pins `t` and `n` against the constants the draw uses
 and refuses anything else.
 
-**What is still not checkable: which member lied.** A Shamir point cannot be
-verified on its own, and the schemes that would fix that — Feldman, Pedersen —
-rest on discrete log being hard in a group, which is precisely the assumption a
-post-quantum network has declined to make. So a member who publishes garbage
-cannot be identified, only routed around. Once more than `t` shares are
+**A published share is checkable on its own, without discrete log.** The
+schemes usually reached for — Feldman, Pedersen — rest on discrete log being
+hard in a group, which is precisely the assumption a post-quantum network has
+declined to make. They are not needed for this: a member publishes, with its
+share, the AEAD key it derived for its seat, and anyone decrypts that seat's
+sealed share from the envelope and compares. A key that opens it to anything
+else is refused at admission, and the key opens that one share only. Keyed
+shares are tried first, so `t` of them always open the submission. A share
+published without its key is still only routed around. Once more than `t` shares are
 published they are a Reed–Solomon codeword, so `open_sealed` decodes them
 (`shamir::agreeing`) and finds up to `⌊(m − t)/2⌋` wrong ones among the `m`
 published, then falls back to trying `t`-subsets, capped. At the default
@@ -189,9 +193,77 @@ run` publishes the shares owed by every seat registered to its
 opens every sealed submission whose published shares meet the threshold.
 `committee_share` records sync between nodes like objectives, commitments and
 claims, so the shares meet wherever they are needed. A submitter seals with
-`cairn commit --sealed`. Until per-share verification lands, one bad share at a
-grown committee can still stall a reveal; the subset search is capped so that
-costs a node a bounded search rather than one per tick for ever.
+`cairn commit --sealed`. Every share is checked against the envelope's
+commitments (below), so a bad share is refused at the door and cannot stall a
+reveal; the subset search survives only for version-2 envelopes, which no node
+admits any more.
+
+### The dealer is held to its sharing
+
+The submitter deals the shares, and until version 3 of the envelope nothing
+held the dealer to them. Two attacks followed, and both bought the dealer the
+same thing: the choice, after the commitment was public, of whether it opens.
+
+- **Garbage to honest seats.** A dealer who sealed something that is not a
+  share to enough honest seats left the honest members unable to open it
+  alone. Members who colluded with the dealer then decided whether it opened.
+  The honest seat could not show the garbage was the dealer's doing: proving
+  what it decapsulated needs the KEM's internals (for McEliece, the error
+  vector), which no crate exposes, and the 261 KB keys it would need to check
+  are not on the log.
+- **A polynomial of the wrong degree.** Plain Shamir publishes nothing about
+  the polynomial, so a dealer could split with degree `t` or more. Then
+  *which* `t` members published decided what reconstructed, and a dealer with
+  one colluding member could choose.
+
+Version 3 answers both without the KEMs' help.
+
+**The sharing is committed.** The content key is a scalar `k` shared by
+Pedersen VSS over Ristretto255 (`src/crypto/vss.rs`). The envelope carries
+`t` commitments `C_j = a_j·G + b_j·H` to the coefficients of `f` (with
+`f(0) = k`) and a blinding `g`. A seat's share is `f(i) ‖ g(i)` at abscissa
+`i`, its seat number. Anyone checks a share against the envelope alone:
+`s·G + r·H = Σ i^j·C_j`. Exactly `t` coefficients are committed, so every
+share that checks lies on one polynomial of degree below `t`, and any `t` of
+them open the same submission. The degree is bound at commit time. The
+commitments hide `k` unconditionally, so a quantum adversary reading the log
+later learns nothing from them; binding rests on discrete log, and is only
+needed while the submission is live.
+
+**A complaint obliges an answer.** A seat whose share does not open, or opens
+to something that does not check, posts a signed `share_complaint` in the
+commitment's epoch or the next (`COMPLAINT_EPOCHS`). The dealer must answer
+with a `share_answer`: that seat's share in the clear, which anyone checks
+against the commitments. An answer that checks restores the seat and counts
+toward the reveal exactly as the seat's own share would have. A complaint
+still unanswered two epochs after the commitment's (`ANSWER_EPOCHS`)
+**disqualifies** the submission: neither the committee nor the submitter can
+ever reveal it. A dealer who sealed garbage cannot produce an answer that
+checks, so the attack now costs them the submission. A member who complains
+falsely makes an honest dealer publish the member's own share, which the
+member already had, and nothing more.
+
+**The reveal waits for the window.** A sealed claim is admitted once every
+seat is accounted for (it published a share that checks, or was answered for),
+or once the complaint window has closed. When the whole committee publishes in
+the epoch after the commitment, that is no wait at all. A reveal past an
+unanswered complaint is refused on both reveal paths, and `audit` reports one
+found in a log written by other means, in both implementations.
+
+**What the dealer must do, and keeps.** `commit --sealed` keeps the dealer's
+32-byte seed, from which every share is derived again, owner-only in
+`<log>.dealings/`. `cairn run` answers complaints from it every round and
+deletes it when the window closes; `cairn answer` does the same without a
+daemon. The seed determines the content key, so it is exactly as sensitive as
+the artifact, and it is kept for two epochs, not for ever.
+
+**What remains.** A submitter who is offline for the whole answer window and
+draws a false complaint from a corrupt member loses the submission. That is a
+second action required of the submitter, but only when a corrupt member forces
+it, and only for two epochs after the commitment. With the threshold at a strict
+majority, no rule could tell that member from an honest seat sealed garbage
+without the dealer answering. The KEM-level proof that would tell them apart
+stays unbuilt, for the reasons above.
 
 This caveat is now load-bearing in the p2p layer, not only a warning. Peer
 records gossip between nodes as *routing hints* — the discovery exchange in

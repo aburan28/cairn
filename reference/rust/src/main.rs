@@ -1160,6 +1160,21 @@ fn decode_record(kind: &str, value: &Value) -> Result<String, String> {
                 Ok(record.id())
             })
             .map_err(|e| e.to_string()),
+        // Signed by the seat's holder, like a committee share.
+        "share_complaint" => cairn_reference::records::ShareComplaint::from_value(value)
+            .and_then(|record| {
+                record.validate()?;
+                record.verify_signature()?;
+                Ok(record.id())
+            })
+            .map_err(|e| e.to_string()),
+        // Unsigned: it checks against the envelope it answers for, a node rule.
+        "share_answer" => cairn_reference::records::ShareAnswer::from_value(value)
+            .and_then(|record| {
+                record.validate()?;
+                Ok(record.id())
+            })
+            .map_err(|e| e.to_string()),
         other => Err(format!("unknown record kind {other:?}")),
     }
 }

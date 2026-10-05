@@ -573,6 +573,8 @@ enum Command {
         policy: ConfidencePolicy,
     },
     Settle,
+    /// Answer complaints about this node's own sealed submissions.
+    Answer,
     /// Record the randomness one epoch's settlement is ordered against.
     ///
     /// Separate from `settle` on purpose. The value has to be drawn *in the
@@ -948,6 +950,7 @@ struct RunRequest {
     fanout: Option<usize>,
     max_queue: Option<usize>,
     mcp_identity: Option<String>,
+    mcp_max_spend: Option<u64>,
     committee_identity: Option<String>,
     attest_identity: Option<String>,
     no_mcp: bool,
@@ -1292,6 +1295,9 @@ enum DepositAction {
         deposit: String,
         submitter: String,
         bytes: Option<u64>,
+        /// The object's exact length. With `digest`, an S3 grant is presigned
+        /// for exactly those bytes; without both, it goes through the node.
+        size: Option<u64>,
         digest: Option<String>,
     },
     /// Redeem a grant by uploading a file through this node.
@@ -1462,6 +1468,10 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
         "settle" => {
             expect_end(&mut cursor, "settle")?;
             Command::Settle
+        }
+        "answer" => {
+            expect_end(&mut cursor, "answer")?;
+            Command::Answer
         }
         "beacon" => parse_beacon(&mut cursor)?,
         "drand-round" => parse_drand_round(&mut cursor)?,
@@ -1703,6 +1713,7 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
         fanout: None,
         max_queue: None,
         mcp_identity: None,
+        mcp_max_spend: None,
         committee_identity: None,
         attest_identity: None,
         no_mcp: false,
@@ -1748,6 +1759,12 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
                 }
             }
             "--mcp-identity" => request.mcp_identity = Some(cursor.value("run: --mcp-identity")?),
+            "--mcp-max-spend" => {
+                request.mcp_max_spend = Some(parse_u64(
+                    &cursor.value("run: --mcp-max-spend")?,
+                    "run: --mcp-max-spend",
+                )?)
+            }
             "--committee-identity" => {
                 request.committee_identity = Some(cursor.value("run: --committee-identity")?)
             }
@@ -3098,12 +3115,17 @@ fn parse_secret(cursor: &mut Cursor) -> Result<Command, CliError> {
                             "secret set: unknown option {other:?}"
                         )))
                     }
-                    other if value.is_none() && file.is_none() && !stdin => {
-                        // Positional value, so `cairn secret set NAME VALUE`
-                        // works without a flag. Prefer `--value` / `--file` /
-                        // `--stdin` in scripts so a value that looks like a
-                        // flag is not swallowed.
-                        value = Some(other.to_string());
+                    _ if value.is_none() && file.is_none() && !stdin => {
+                        // A positional value was accepted once, and it is the
+                        // form that puts a key on the command line without a
+                        // second thought: in shell history, and readable by
+                        // every user on the host while the command runs.
+                        return Err(CliError::Usage(format!(
+                            "secret set {name}: a value on the command line is visible to other \
+                             processes and kept in shell history. Pipe it: \
+                             `printf %s \"$VALUE\" | cairn secret set {name} --stdin`, or \
+                             `--file PATH`; `--value V` remains for values that are not secret"
+                        )));
                     }
                     other => {
                         return Err(CliError::Usage(format!(
@@ -3118,7 +3140,7 @@ fn parse_secret(cursor: &mut Cursor) -> Result<Command, CliError> {
                 .count();
             if sources != 1 {
                 return Err(CliError::Usage(String::from(
-                    "secret set needs exactly one of a positional value, --value, --file, or --stdin",
+                    "secret set needs exactly one of --stdin, --file, or --value",
                 )));
             }
             SecretAction::Set {
@@ -3265,10 +3287,14 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
             let mut deposit: Option<String> = None;
             let mut submitter: Option<String> = None;
             let mut bytes: Option<u64> = None;
+            let mut size: Option<u64> = None;
             let mut digest: Option<String> = None;
             while let Some(token) = cursor.take() {
                 match token.as_str() {
                     "--deposit" => deposit = Some(cursor.value("--deposit")?),
+                    "--size" => {
+                        size = Some(parse_u64(&cursor.value("--size")?, "deposit grant --size")?)
+                    }
                     "--submitter" => submitter = Some(cursor.value("--submitter")?),
                     "--bytes" => {
                         let raw = cursor.value("--bytes")?;
@@ -3299,6 +3325,7 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
                 deposit,
                 submitter,
                 bytes,
+                size,
                 digest,
             }
         }
@@ -3798,6 +3825,16 @@ fn print_help(out: &mut dyn Write) {
     );
     say(out, "  settle");
     say(out, "      pay out every reveal epoch that has closed");
+    say(out, "  answer");
+    say(
+        out,
+        "      answer complaints about your sealed submissions with the seat's share;",
+    );
+    say(
+        out,
+        "      `cairn run` does this every round. Unanswered past the window, a",
+    );
+    say(out, "      submission can never be revealed");
     say(out, "  drand-verify --round N --signature HEX");
     say(
         out,
@@ -4165,6 +4202,10 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
+        "      --mcp-max-spend N lets agents fund up to N units of objectives (default 0)",
+    );
+    say(
+        out,
         "      --committee-identity FILE serves the committee seats that identity registered",
     );
     say(
@@ -4294,7 +4335,7 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
-        "  secret set <name> (<value> | --value V | --file PATH | --stdin)",
+        "  secret set <name> (--stdin | --file PATH | --value V)",
     );
     say(
         out,
@@ -4337,7 +4378,7 @@ fn print_help(out: &mut dyn Write) {
     say(out, "      public location; never credential values");
     say(
         out,
-        "  deposit grant --deposit N --submitter S [--bytes N] [--digest HEX]",
+        "  deposit grant --deposit N --submitter S [--bytes N] [--size N] [--digest HEX]",
     );
     say(
         out,
@@ -4556,6 +4597,7 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
         .unwrap_or(cairn::serve::DEFAULT_MAX_QUEUED);
     config.mcp = !request.no_mcp;
     config.mcp_identity = request.mcp_identity.as_ref().map(PathBuf::from);
+    config.mcp_max_spend = request.mcp_max_spend;
     config.committee_identity = request.committee_identity.as_ref().map(PathBuf::from);
     config.attest_identity = request.attest_identity.as_ref().map(PathBuf::from);
     config.store = store.limit().is_some().then(|| store.clone());
@@ -5063,6 +5105,22 @@ fn cmd_decode(out: &mut dyn Write, kind: &str, record_path: &str) -> Result<i32,
                 record.verify_signature().map_err(|e| e.to_string())?;
                 Ok(record.id())
             }),
+        // Signed by the seat's holder, like a committee share.
+        "share_complaint" => cairn::records::ShareComplaint::from_value(&value)
+            .map_err(|error| error.to_string())
+            .and_then(|record| {
+                record.validate().map_err(|e| e.to_string())?;
+                record.verify_signature().map_err(|e| e.to_string())?;
+                Ok(record.id())
+            }),
+        // Unsigned: it proves itself against the envelope it answers for,
+        // which is a node rule, not a record one.
+        "share_answer" => cairn::records::ShareAnswer::from_value(&value)
+            .map_err(|error| error.to_string())
+            .and_then(|record| {
+                record.validate().map_err(|e| e.to_string())?;
+                Ok(record.id())
+            }),
         other => return Err(CliError::Usage(format!("unknown record kind {other:?}"))),
     };
     match decoded {
@@ -5342,7 +5400,7 @@ fn cmd_commit_sealed(
     )
     .map_err(|error| CliError::Refused(error.to_string()))?
     .signed_with(&identity);
-    let submission = cairn::sealed::SealedSubmission::seal_claim(
+    let (submission, dealer) = cairn::sealed::SealedSubmission::seal_claim_dealing(
         &claim,
         epoch,
         &stamp,
@@ -5359,6 +5417,7 @@ fn cmd_commit_sealed(
     )
     .sealed_with(submission.envelope.clone())
     .signed_with(&identity);
+    let commitment_id = commitment.id();
     post_commitment(&mut node, &commitment, &stamp)?;
 
     say(
@@ -5369,10 +5428,33 @@ fn cmd_commit_sealed(
             seats.len()
         ),
     );
-    say(
-        out,
-        "  nothing more to do: the committee reveals it after this epoch closes",
-    );
+    // Kept only through the answer window, owner-only: a seat that says its
+    // share does not open must be answered with that share, or the
+    // submission can never be revealed.
+    let dealings = cairn::sealed::dealings::dir_for(std::path::Path::new(&options.log));
+    match cairn::sealed::dealings::store(&dealings, &commitment_id, &dealer) {
+        Ok(_) => say(
+            out,
+            format!(
+                "  the committee reveals it after this epoch closes. If a seat complains \
+                 that its share does not open, it must be answered within {} epochs: \
+                 `cairn run` does that, or run `cairn answer`",
+                cairn::node::ANSWER_EPOCHS + 1
+            ),
+        ),
+        Err(error) => {
+            say(
+                out,
+                format!(
+                    "  WARNING: could not keep the dealing in {} ({error}); a complaint \
+                     about a seat's share cannot be answered, and an unanswered one \
+                     disqualifies this submission",
+                    dealings.display()
+                ),
+            );
+            return Ok(1);
+        }
+    }
     Ok(0)
 }
 
@@ -5492,6 +5574,59 @@ fn cmd_settle(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
         );
     }
     Ok(0)
+}
+
+/// Answer every complaint about a sealed submission this node dealt, from the
+/// dealer secrets kept beside the log, and delete the ones whose answer window
+/// has closed.
+///
+/// `cairn run` does the same every round. This is for a submitter who sealed
+/// from the command line and runs no daemon: a complaint left unanswered past
+/// its window disqualifies the submission for good.
+fn cmd_answer(out: &mut dyn Write, options: &Options) -> Result<i32, CliError> {
+    let mut node = open_node_for_writing(options)?;
+    let dir = cairn::sealed::dealings::dir_for(std::path::Path::new(&options.log));
+    let dealt = cairn::sealed::dealings::load(&dir);
+    if dealt.is_empty() {
+        say(out, "no dealings kept: nothing to answer");
+        return Ok(0);
+    }
+    let stamp = timestamp();
+    let now_epoch = cairn::time::parse_rfc3339(&stamp)
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .map(|seconds| cairn::partition::epoch_of(seconds, cairn::partition::epoch_seconds()))
+        .ok_or_else(|| CliError::Usage(format!("answer: unreadable clock {stamp}")))?;
+    let mut refused = 0;
+    let answers = node.post_owed_answers(&dealt, now_epoch, &stamp);
+    if answers.is_empty() {
+        say(out, "no complaint is waiting on an answer");
+    }
+    for (commitment, result) in answers {
+        match result {
+            Ok(id) => say(
+                out,
+                format!("answered {} with {}", short(&commitment), short(&id)),
+            ),
+            Err(violation) => {
+                refused += 1;
+                say(out, format!("refused  {}: {violation}", short(&commitment)));
+            }
+        }
+    }
+    for commitment in dealt.keys() {
+        if node.answer_window_closed(commitment, now_epoch) {
+            cairn::sealed::dealings::forget(&dir, commitment)
+                .map_err(|error| CliError::Refused(format!("deleting a dealing: {error}")))?;
+            say(
+                out,
+                format!(
+                    "forgot   {}: its answer window has closed",
+                    short(commitment)
+                ),
+            );
+        }
+    }
+    Ok(if refused == 0 { 0 } else { 1 })
 }
 
 /// Print the drand round an epoch is settled against.
@@ -8128,18 +8263,19 @@ fn cmd_deposit(
             deposit,
             submitter,
             bytes,
+            size,
             digest,
         } => {
-            let grant = deposit::issue_grant(
-                &dir,
+            let request = deposit::GrantRequest {
                 deposit,
                 submitter,
-                *bytes,
-                digest.as_deref(),
-                None,
-                &secrets_dir,
-            )
-            .map_err(CliError::Deposit)?;
+                max_bytes: *bytes,
+                size: *size,
+                digest: digest.as_deref(),
+                requester: None,
+            };
+            let grant = deposit::issue_grant(&dir, &request, None, &secrets_dir)
+                .map_err(CliError::Deposit)?;
             // JSON on stdout so scripts capture the grant id / put_url.
             say(out, grant.public_response(None).to_string());
             Ok(0)
@@ -8167,6 +8303,11 @@ fn cmd_secret(out: &mut dyn Write, action: &SecretAction) -> Result<i32, CliErro
             stdin,
         } => {
             let body = if let Some(value) = value {
+                eprintln!(
+                    "warning: secret {name}: --value puts the value on the command line, where \
+                     other processes and your shell history can see it; prefer --stdin or --file \
+                     for anything secret"
+                );
                 value.clone()
             } else if let Some(path) = file {
                 fs::read_to_string(path).map_err(|source| CliError::Io {
@@ -9914,6 +10055,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             relations,
         ),
         Command::Settle => cmd_settle(out, options),
+        Command::Answer => cmd_answer(out, options),
         Command::DrandRound { orders } => cmd_drand_round(out, *orders),
         Command::DrandVerify { round, signature } => cmd_drand_verify(out, *round, signature),
         Command::Beacon {
@@ -11248,14 +11390,26 @@ mod tests {
                 action: SecretAction::List
             }
         );
+        // A positional value is refused: it is the form that puts a key in
+        // shell history and in every process listing.
+        match parse(argv(&["secret", "set", "AWS_ACCESS_KEY_ID", "AKIA"])) {
+            Err(CliError::Usage(why)) => assert!(why.contains("--stdin"), "{why}"),
+            other => panic!("a positional secret value was accepted: {other:?}"),
+        }
         assert_eq!(
-            parse(argv(&["secret", "set", "AWS_ACCESS_KEY_ID", "AKIA"]))
-                .expect("parses")
-                .command,
+            parse(argv(&[
+                "secret",
+                "set",
+                "RHO_DB_HOST",
+                "--value",
+                "db.internal"
+            ]))
+            .expect("parses")
+            .command,
             Command::Secret {
                 action: SecretAction::Set {
-                    name: "AWS_ACCESS_KEY_ID".into(),
-                    value: Some("AKIA".into()),
+                    name: "RHO_DB_HOST".into(),
+                    value: Some("db.internal".into()),
                     file: None,
                     stdin: false,
                 }
@@ -11407,6 +11561,7 @@ mod tests {
                     deposit: "demo".into(),
                     submitter: "alice".into(),
                     bytes: Some(1024),
+                    size: None,
                     digest: None,
                 }
             }
@@ -11482,6 +11637,7 @@ mod tests {
                     deposit: "demo".into(),
                     submitter: "alice".into(),
                     bytes: Some(64),
+                    size: None,
                     digest: None,
                 }
             )
@@ -12566,6 +12722,7 @@ mod tests {
             "commit",
             "reveal",
             "settle",
+            "answer",
             "beacon",
             "drand-round",
             "drand-verify",

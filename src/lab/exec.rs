@@ -160,6 +160,62 @@ impl Preference {
 /// Environment variable naming the sandbox preference.
 pub const SANDBOX_ENV: &str = "CAIRN_LAB_SANDBOX";
 
+/// Bytes a run's captured stdout, or stderr, may reach before the run is
+/// stopped.
+///
+/// Captures go to files and then into the space's blobs and the receipt, and
+/// the API reads them whole. Uncapped, one `yes` -- or a job written to fill
+/// the disk -- did both to the host. Past this the run is killed the way a
+/// memory overrun is, the receipt says so, and the capture is cut to this
+/// length.
+pub const MAX_CAPTURE_BYTES: u64 = 64 << 20;
+
+/// Has either capture grown past [`MAX_CAPTURE_BYTES`]?
+pub fn captures_over_limit(captures: &[&Path]) -> bool {
+    captures
+        .iter()
+        .any(|path| fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_CAPTURE_BYTES))
+}
+
+/// Cut each capture to [`MAX_CAPTURE_BYTES`], saying which were cut.
+pub fn cut_captures(captures: &[&Path]) -> Vec<String> {
+    let mut notes = Vec::new();
+    for path in captures {
+        let too_long = fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_CAPTURE_BYTES);
+        if too_long
+            && fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_len(MAX_CAPTURE_BYTES))
+                .is_ok()
+        {
+            notes.push(format!(
+                "{} was cut at {MAX_CAPTURE_BYTES} bytes; the run was stopped for its output",
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    notes
+}
+
+/// Environment variable with which the person running the lab's MCP server
+/// lets agents ask for network access in `lab_exec`. Off unless it is `1`.
+///
+/// A sandboxed run with the network on can carry anything mounted into it to
+/// anywhere, and the agent asking for it was steered by text other people
+/// wrote. So it is the operator's choice, like the sandbox itself; the CLI's
+/// `cairn lab exec --network` is already a person at a terminal and is not
+/// gated.
+pub const NETWORK_ENV: &str = "CAIRN_LAB_NETWORK";
+
+/// Has the operator allowed agents to ask for the network? See
+/// [`NETWORK_ENV`].
+pub fn agents_may_use_network() -> bool {
+    std::env::var(NETWORK_ENV).is_ok_and(|value| value.trim() == "1")
+}
+
 /// Pick a backend this host can actually use. Probed, not assumed: an
 /// installed `runsc` or `bwrap` that cannot create a sandbox here (no user
 /// namespaces, no ptrace, an old kernel) is the common failure, and it looks
@@ -660,15 +716,21 @@ fn run_gvisor(runsc: &Path, spec: &Spec, work: &Path, outcome: &mut Outcome) -> 
         .stderr(File::create(&outcome.stderr).map_err(|e| e.to_string())?)
         .spawn()
         .map_err(|e| format!("runsc run: {e}"))?;
-    let finished = wait_with_deadline(child, spec.timeout, || {
-        let mut kill = Command::new(runsc);
-        base(&mut kill);
-        let _ = kill
-            .args(["kill", "--all", &id, "KILL"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    });
+    let captures = [outcome.stdout.clone(), outcome.stderr.clone()];
+    let finished = wait_with_deadline(
+        child,
+        spec.timeout,
+        || {
+            let mut kill = Command::new(runsc);
+            base(&mut kill);
+            let _ = kill
+                .args(["kill", "--all", &id, "KILL"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        },
+        || captures_over_limit(&[&captures[0], &captures[1]]),
+    );
     let mut delete = Command::new(runsc);
     base(&mut delete);
     let _ = delete
@@ -676,8 +738,13 @@ fn run_gvisor(runsc: &Path, spec: &Spec, work: &Path, outcome: &mut Outcome) -> 
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    let (output, timed_out) = finished.map_err(|e| format!("runsc run: {e}"))?;
+    let (output, timed_out, over) = finished.map_err(|e| format!("runsc run: {e}"))?;
     outcome.timed_out = timed_out;
+    if over {
+        outcome.limit_exceeded = true;
+    }
+    let cut = cut_captures(&[&outcome.stdout, &outcome.stderr]);
+    outcome.notes.extend(cut);
     let status = output.status.code().map(i64::from);
     let started = pid_file.is_file();
     let last_line = tail_of(&outcome.stderr);
@@ -970,7 +1037,18 @@ fn run_unconfined(spec: &Spec, work: &Path, outcome: &mut Outcome) -> Result<(),
 }
 
 /// Wait for a host child with the deadline and the resident-set watchdog.
-fn supervise(mut child: Child, spec: &Spec, outcome: &mut Outcome) -> Result<(), String> {
+fn supervise(child: Child, spec: &Spec, outcome: &mut Outcome) -> Result<(), String> {
+    let result = supervise_until_done(child, spec, outcome);
+    let cut = cut_captures(&[&outcome.stdout, &outcome.stderr]);
+    outcome.notes.extend(cut);
+    result
+}
+
+fn supervise_until_done(
+    mut child: Child,
+    spec: &Spec,
+    outcome: &mut Outcome,
+) -> Result<(), String> {
     let deadline = Instant::now() + spec.timeout;
     let limit_kib = spec.memory_mb.saturating_mul(1024);
     loop {
@@ -984,6 +1062,13 @@ fn supervise(mut child: Child, spec: &Spec, outcome: &mut Outcome) -> Result<(),
         }
         if Instant::now() >= deadline {
             outcome.timed_out = true;
+            kill_tree(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(());
+        }
+        if captures_over_limit(&[&outcome.stdout, &outcome.stderr]) {
+            outcome.limit_exceeded = true;
             kill_tree(child.id());
             let _ = child.kill();
             let _ = child.wait();
@@ -1076,27 +1161,35 @@ fn kill_tree(leader: u32) {
     }
 }
 
-/// Wait for `child`, killing it via `kill` past `timeout`. Returns its output
-/// and whether the deadline fired.
+/// Wait for `child`, killing it via `kill` past `timeout` or once `over`
+/// says its output passed the cap. Returns its output, whether the deadline
+/// fired, and whether the output cap did.
 fn wait_with_deadline(
     mut child: Child,
     timeout: Duration,
     kill: impl Fn(),
-) -> std::io::Result<(std::process::Output, bool)> {
+    over: impl Fn() -> bool,
+) -> std::io::Result<(std::process::Output, bool, bool)> {
     let deadline = Instant::now() + timeout;
     let mut timed_out = false;
+    let mut exceeded = false;
     loop {
         if child.try_wait()?.is_some() {
             break;
         }
-        if !timed_out && Instant::now() >= deadline {
-            timed_out = true;
-            kill();
+        if !timed_out && !exceeded {
+            if Instant::now() >= deadline {
+                timed_out = true;
+                kill();
+            } else if over() {
+                exceeded = true;
+                kill();
+            }
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     let output = child.wait_with_output()?;
-    Ok((output, timed_out))
+    Ok((output, timed_out, exceeded))
 }
 
 fn tail_of(path: &Path) -> String {
@@ -1115,6 +1208,41 @@ fn nonce() -> [u8; 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_capture_past_the_cap_is_noticed_and_cut() {
+        // Sparse files, so the test costs no disk: only the length matters.
+        let dir = std::env::temp_dir().join(format!(
+            "cairn-capture-cap-{}-{}",
+            std::process::id(),
+            crate::hex::encode(&nonce())
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let small = dir.join("stdout");
+        let large = dir.join("stderr");
+        fs::write(&small, b"fine").unwrap();
+        fs::File::create(&large)
+            .unwrap()
+            .set_len(MAX_CAPTURE_BYTES)
+            .unwrap();
+        assert!(
+            !captures_over_limit(&[&small, &large]),
+            "at the cap is allowed"
+        );
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&large)
+            .unwrap()
+            .set_len(MAX_CAPTURE_BYTES + 1)
+            .unwrap();
+        assert!(captures_over_limit(&[&small, &large]));
+        let notes = cut_captures(&[&small, &large]);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("stderr"), "{notes:?}");
+        assert_eq!(fs::metadata(&large).unwrap().len(), MAX_CAPTURE_BYTES);
+        assert_eq!(fs::read(&small).unwrap(), b"fine");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_oci_config_mounts_inputs_read_only_and_the_output_writable() {
