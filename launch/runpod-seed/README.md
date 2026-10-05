@@ -12,10 +12,12 @@ so a wrong name fails the handshake and does not make a stranger into this
 seed. That split is [docs/discovery.md](../../docs/discovery.md) and
 [docs/p2p.md](../../docs/p2p.md), *Running a seed on a public host*.
 
-On 2026-10-05 a connect to the published `us-west` seed
-(`44.251.117.84:8080`) timed out from a cloud agent. This launcher does
-not replace that entry. Nothing here is a seed until `cairn seeds publish`
-has been reviewed into [`../seeds.json`](../seeds.json).
+On 2026-10-05 `44.251.117.84` did not answer, and `launch/seeds.json` was
+pointed at a node that does: p2p at `bore.pub:56276`, with the HTTPS front
+at `https://auto-controls-healing-player.trycloudflare.com`. That forward
+ends when the process behind it stops. This launcher is how that entry
+moves onto a CPU pod that keeps running: rent the pod, publish its key,
+and replace the `tunnel` entry.
 
 ## What it rents
 

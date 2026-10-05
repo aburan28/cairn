@@ -26,21 +26,24 @@ section.
   loopback and its status line says *Listening on this Mac only* while it is.
   macOS asks for local-network permission the first time a node binds past
   loopback, and a refusal there looks like silence.
-- **The published seed may be down.** The seed list compiled into the binary
-  names one seed (`us-west`, `44.251.117.84:9000`). As of 2026-10-04 it
-  answers nothing: the site's mirror job (`.github/workflows/node-sync.yml`)
-  has been red on every five-minute run, and from a GitHub runner `curl
-  http://44.251.117.84:8080/health` times out. A node still starts without it
-  and says `seeds: us-west at 44.251.117.84:9000 did not hand over its key`
-  once a minute; `CAIRN_SEEDS=off` silences that for a test that does not
-  need it. Check it yourself from either machine:
+- **The published seed list is a hint, and the old address is dead.**
+  Binaries built before this change still dial `us-west` at
+  `44.251.117.84:9000`, which does not answer. The list in
+  `launch/seeds.json` now names `tunnel` at `bore.pub:56276`. On 2026-10-05
+  a second node dialed that name, and the seed handed over the key the
+  entry names (`seeds: tunnel answered`). `CAIRN_SEEDS=off` still silences
+  seed dials for a test that does not need them. Check the published entry
+  from either machine:
 
   ```sh
-  nc -vz 44.251.117.84 9000
+  curl -fsS https://auto-controls-healing-player.trycloudflare.com/health
+  nc -vz bore.pub 56276
   ```
 
-  A seed that is down *drops* rather than refuses, so this takes a few seconds
-  to say so. Bringing it back is the last section.
+  The first is the HTTPS front of the same node and should print `ok`. The
+  second should connect. Both forwards end when the process behind them
+  stops; a later process is a new port and a new tunnel name. Bringing a
+  durable host up is the last section.
 
 Everything below reads the node's own answer at `GET /sessions` (and the
 Network page, `/ui/network`, which renders the same). Two fields matter:
