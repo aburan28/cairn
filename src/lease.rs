@@ -782,7 +782,7 @@ mod tests {
         // The real cap is MAX_LEASES; a small one exercises the same rule in
         // a test that does not insert sixty-five thousand leases.
         const CAP: usize = 50;
-        assert!(MAX_LEASES < MAX_OBJECTIVES * MAX_TASKS_PER_OBJECTIVE);
+        const _: () = assert!(MAX_LEASES < MAX_OBJECTIVES * MAX_TASKS_PER_OBJECTIVE);
         let mut leases = Leases::with_cap(CAP);
         for n in 0..CAP {
             let mut c = claim(&format!("unit:{}", n % 10), &format!("h{}", n / 10), 600);
