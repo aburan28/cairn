@@ -605,9 +605,12 @@ fn seatbelt_profile(program: &Path, plan: &Confinement<'_>, writable: &[PathBuf]
     readable.extend(plan.readable.iter().map(|path| resolve(path)));
     readable.extend(writable.iter().cloned());
 
-    // A Homebrew, rustup, pyenv, or elan executable normally loads libraries
-    // and adjacent resources from the version root two levels above `bin`.
-    // Allow that version root, not the whole package manager or home directory.
+    // A Homebrew or system executable normally loads libraries and adjacent
+    // resources from the version root two levels above `bin`. Allow that
+    // version root, not the whole package manager. rustup, pyenv and elan
+    // roots sit under the home directory and are never allowed here; the
+    // operator grants one explicitly (`CAIRN_PYTHON_ROOT`, `CAIRN_LEAN_ROOT`),
+    // and `interpreter_problem` says so before a Python that needs it runs.
     if let Some(runtime_root) = narrow_runtime_root(&resolve(program)) {
         // A runtime root is an installation prefix such as
         // `/opt/homebrew/Cellar/python@3.13/3.13.2`, never the filesystem
@@ -657,24 +660,117 @@ fn narrow_runtime_root(executable: &Path) -> Option<PathBuf> {
     if root == Path::new("/") {
         return None;
     }
+    if beneath_home(&root, configured_home().as_deref()) {
+        return None;
+    }
+    Some(root)
+}
 
-    let configured_home = std::env::var_os("HOME")
+fn configured_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|path| resolve(&path));
+        .map(|path| resolve(&path))
+}
+
+/// Whether `path` is inside `home` or inside anything shaped like a home
+/// directory (`/Users/<name>`, `/home/<name>`, `/root`), whatever `$HOME` says.
+fn beneath_home(path: &Path, home: Option<&Path>) -> bool {
     let structural_home = |path: &Path| {
         path == Path::new("/root")
             || path
                 .parent()
                 .is_some_and(|parent| parent == Path::new("/Users") || parent == Path::new("/home"))
     };
-    if configured_home
-        .as_deref()
-        .is_some_and(|home| root.starts_with(home))
-        || root.ancestors().any(structural_home)
-    {
-        return None;
+    home.is_some_and(|home| path.starts_with(home)) || path.ancestors().any(structural_home)
+}
+
+/// Binaries that decide which tool to be from the name they were run by, and
+/// that version managers link their shims to: mise (formerly rtx), Volta,
+/// proto. Run in the jail, each looks for its configuration under a `$HOME`
+/// the jail has replaced, and for its installs under a home it does not show.
+const MULTIPLEXERS: &[&str] = &["mise", "rtx", "volta-shim", "proto-shim"];
+
+/// Why an interpreter cannot run inside a jail, when that is knowable before
+/// running it.
+///
+/// Running it is how this was found out before, and the answer came back as
+/// `exited 126` (127 under bubblewrap) on every pinned check, which reads as a broken
+/// node rather than a node with the wrong `python3` first on `PATH`. Both
+/// cases below fail under every jail mechanism this module has, and neither
+/// is fixed by widening the profile: the fix is the operator naming the real
+/// interpreter and, if it lives under a home directory, granting its prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unjailable {
+    /// A version-manager shim (pyenv, asdf, mise, ...): a script, or a link to
+    /// a multiplexer binary, that re-execs through the manager's own files.
+    /// Those live under the operator's home, which the jail never shows.
+    Shim { found: PathBuf, what: String },
+    /// A real interpreter, but under a home directory and outside any
+    /// operator-granted root, so the jail would show the binary and not the
+    /// standard library beside it. `prefix` is the installation prefix two
+    /// levels above `bin/`, the directory the operator would grant.
+    UnderHome {
+        interpreter: PathBuf,
+        prefix: Option<PathBuf>,
+    },
+}
+
+/// [`Unjailable`] for `program`, given the root the operator granted it.
+///
+/// Called only for interpreters (`python3`), never for a `replay` command: a
+/// pinned checker's contract is "the interpreter, its source, nothing else",
+/// and a script is by definition not the interpreter, while a replay command
+/// that is a script in its own bundle is ordinary and readable.
+pub fn interpreter_problem(program: &Path, granted: Option<&Path>) -> Option<Unjailable> {
+    // `HOME=/` (a service account, some container images) would put every
+    // path beneath it. That is not a home directory, and refusing every
+    // interpreter on such a host would be the wrong answer to a non-question.
+    let home = configured_home().filter(|home| home != Path::new("/"));
+    interpreter_problem_under(program, granted, home.as_deref())
+}
+
+fn interpreter_problem_under(
+    program: &Path,
+    granted: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<Unjailable> {
+    if let Some(what) = shim(program) {
+        return Some(Unjailable::Shim {
+            found: program.to_path_buf(),
+            what,
+        });
     }
-    Some(root)
+    let interpreter = resolve(program);
+    let covered = granted.is_some_and(|root| interpreter.starts_with(resolve(root)));
+    if !covered && beneath_home(&interpreter, home) {
+        let prefix = interpreter
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
+        return Some(Unjailable::UnderHome {
+            interpreter,
+            prefix,
+        });
+    }
+    None
+}
+
+/// What makes `program` a shim, if it is one.
+fn shim(program: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut head = [0u8; 2];
+    let script = std::fs::File::open(program)
+        .and_then(|mut file| file.read_exact(&mut head))
+        .is_ok()
+        && &head == b"#!";
+    if script {
+        return Some("a script, not an interpreter".to_string());
+    }
+    let target = resolve(program);
+    let name = target.file_name()?.to_str()?;
+    MULTIPLEXERS
+        .contains(&name)
+        .then(|| format!("a link to the {name} multiplexer at {}", target.display()))
 }
 
 /// Prefix the child with a shell that sets `ulimit`s, when a shell exists.
@@ -870,6 +966,88 @@ mod tests {
             narrow_runtime_root(Path::new("/Users/alice/Projects/private/bin/python")),
             None
         );
+    }
+
+    #[test]
+    fn a_home_interpreter_needs_a_grant_and_a_system_one_does_not() {
+        let pyenv = Path::new("/Users/alice/.pyenv/versions/3.12.2/bin/python3.12");
+        assert_eq!(
+            interpreter_problem_under(pyenv, None, None),
+            Some(Unjailable::UnderHome {
+                interpreter: pyenv.to_path_buf(),
+                prefix: Some(PathBuf::from("/Users/alice/.pyenv/versions/3.12.2")),
+            })
+        );
+        // `$HOME` counts even where it is not shaped like a home directory.
+        let elsewhere = Path::new("/srv/op/.local/share/uv/python/cpython-3.12/bin/python3");
+        assert!(matches!(
+            interpreter_problem_under(elsewhere, None, Some(Path::new("/srv/op"))),
+            Some(Unjailable::UnderHome { .. })
+        ));
+        // The operator's grant of the prefix is the fix, and only that prefix.
+        let granted = Path::new("/Users/alice/.pyenv/versions/3.12.2");
+        assert_eq!(interpreter_problem_under(pyenv, Some(granted), None), None);
+        let other = Path::new("/Users/alice/.pyenv/versions/3.11.9");
+        assert!(interpreter_problem_under(pyenv, Some(other), None).is_some());
+        // A system interpreter is no problem at all.
+        assert_eq!(
+            interpreter_problem_under(
+                Path::new("/opt/homebrew/Cellar/python@3.13/3.13.2/bin/python3.13"),
+                None,
+                None
+            ),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_manager_shims_are_named_before_they_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_guard, base) = scratch("proofwork-shim");
+
+        // pyenv's and asdf's shims: a script that execs the manager.
+        let script = base.join("shims").join("python3");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(
+            &script,
+            "#!/usr/bin/env bash\nexec \"$PYENV_ROOT/libexec/pyenv\" exec python3 \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        match interpreter_problem_under(&script, None, None) {
+            Some(Unjailable::Shim { found, what }) => {
+                assert_eq!(found, script);
+                assert!(what.contains("script"), "{what}");
+            }
+            other => panic!("a shim script was not named: {other:?}"),
+        }
+        // A grant does not make a shim runnable: it execs outside the grant.
+        assert!(matches!(
+            interpreter_problem_under(&script, Some(&base), None),
+            Some(Unjailable::Shim { .. })
+        ));
+
+        // mise's: a link, by the tool's name, to the mise binary.
+        let mise = base.join("bin").join("mise");
+        std::fs::create_dir_all(mise.parent().unwrap()).unwrap();
+        std::fs::write(&mise, b"\x7fELF").unwrap();
+        let linked = base.join("mise-shims").join("python3");
+        std::fs::create_dir_all(linked.parent().unwrap()).unwrap();
+        link(&mise, &linked);
+        match interpreter_problem_under(&linked, None, None) {
+            Some(Unjailable::Shim { what, .. }) => assert!(what.contains("mise"), "{what}"),
+            other => panic!("a mise shim was not named: {other:?}"),
+        }
+
+        // A binary reached through a link is an interpreter, not a shim.
+        let real = base.join("prefix").join("bin").join("python3.12");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, b"\x7fELF").unwrap();
+        let named = base.join("usr-local").join("python3");
+        std::fs::create_dir_all(named.parent().unwrap()).unwrap();
+        link(&real, &named);
+        assert_eq!(interpreter_problem_under(&named, None, None), None);
     }
 
     #[test]

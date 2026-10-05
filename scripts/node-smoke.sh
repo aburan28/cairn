@@ -83,12 +83,28 @@ await_log() {  # file pattern
 # and grep finds nothing in ciphertext however well the daemon is working. That
 # is a better check anyway -- it asks the public surface, which is where an
 # outside contributor would look.
-await_kind() {  # port kind
+await_in_log() {  # port pattern -- a line of GET /log matches the grep pattern
   for _ in $(seq 1 60); do
-    curl -s "http://127.0.0.1:$1/log" | grep -q "\"kind\": *\"$2\"" && return 0
+    curl -s "http://127.0.0.1:$1/log" | grep -q "$2" && return 0
     sleep 0.5
   done
   return 1
+}
+await_kind() { await_in_log "$1" "\"kind\": *\"$2\""; }  # port kind
+await_queue_empty() {  # dir -- the daemon's own drain took every spooled file
+  for _ in $(seq 1 60); do
+    [ -z "$(ls -A "$1" 2>/dev/null)" ] && return 0
+    sleep 0.5
+  done
+  return 1
+}
+epoch_start() {
+  # Sleep until just after a six-second epoch boundary, as submit() does, so
+  # the daemon's next five-second tick admits what is posted next in the
+  # epoch it declares rather than refusing it as stale.
+  python3 -c 'import time
+r = time.time() % 6
+if r > 0.5: time.sleep(6 - r + 0.1)'
 }
 
 submit() {  # port oid kind payload-python
@@ -183,17 +199,58 @@ import json, sys
 print(json.load(sys.stdin)["node"]["fleet"]["signs_as"])')
 [ "$SIGNS_AS" = "$LEADER" ] || fail "GET /network says the leader signs as $SIGNS_AS, not $LEADER"
 echo "  node.fleet.signs_as is the identity made for it"
+# Posted just after an epoch boundary, as submit() posts, so the daemon's next
+# tick admits both in the epoch they declare rather than refusing them as
+# stale -- and then waited for. The 202's signed_as says the leader signed the
+# record; only the drain says the rules accepted that signature. Waiting here
+# is also what keeps the next section honest: its question is whether the
+# queue emptied itself of *its* record, which it cannot ask while these two
+# may still be in the queue or, drained a tick earlier, already in the log.
+LEADER_HASH=sha256:0000000000000000000000000000000000000000000000000000000000000002
+WORKER_HASH=sha256:0000000000000000000000000000000000000000000000000000000000000003
+epoch_start
 NOW=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
 SIGNED=$(curl -s -H 'content-type: application/json' \
-  -d "{\"type\":\"commitment\",\"objective_id\":\"$OID\",\"submitter\":\"$LEADER\",\"hash\":\"sha256:0000000000000000000000000000000000000000000000000000000000000002\",\"created_at\":\"$NOW\"}" \
+  -d "{\"type\":\"commitment\",\"objective_id\":\"$OID\",\"submitter\":\"$LEADER\",\"hash\":\"$LEADER_HASH\",\"created_at\":\"$NOW\"}" \
   "http://127.0.0.1:$HTTP/submit?kind=commitment" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("signed_as"))')
 [ "$SIGNED" = "$LEADER" ] || fail "an unsigned commitment naming the leader was not signed (signed_as=$SIGNED)"
 echo "  POST /submit from the fleet network -> signed_as the leader"
 PLAIN=$(curl -s -H 'content-type: application/json' \
-  -d "{\"type\":\"commitment\",\"objective_id\":\"$OID\",\"submitter\":\"smoke-worker\",\"hash\":\"sha256:0000000000000000000000000000000000000000000000000000000000000003\",\"created_at\":\"$NOW\"}" \
+  -d "{\"type\":\"commitment\",\"objective_id\":\"$OID\",\"submitter\":\"smoke-worker\",\"hash\":\"$WORKER_HASH\",\"created_at\":\"$NOW\"}" \
   "http://127.0.0.1:$HTTP/submit?kind=commitment" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("signed_as"))')
 [ "$PLAIN" = "None" ] || fail "a worker's own nickname was signed as $PLAIN"
 echo "  a worker's own name is left alone"
+await_in_log "$HTTP" "$LEADER_HASH" \
+  || { cat "$A/node.log" >&2; fail "the daemon never admitted the commitment it signed for the leader"; }
+await_in_log "$HTTP" "$WORKER_HASH" \
+  || { cat "$A/node.log" >&2; fail "the daemon never admitted the worker's own commitment"; }
+# Fetched inside Python: a pipe into `python3 -` would hand the heredoc, not
+# the log, to stdin.
+python3 - "$HTTP" "$LEADER_HASH" "$LEADER" <<'PY'
+import json, sys, urllib.request
+
+def fields(value, out):
+    # Every (key, value) at any depth: the record's shape in the log is not
+    # this check's business, the admitted signature is.
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            out.setdefault(key, inner)
+            fields(inner, out)
+    elif isinstance(value, list):
+        for inner in value:
+            fields(inner, out)
+    return out
+
+port, wanted, leader = sys.argv[1:4]
+with urllib.request.urlopen(f"http://127.0.0.1:{port}/log", timeout=10) as response:
+    lines = response.read().decode().splitlines()
+hits = [fields(json.loads(line), {}) for line in lines if wanted in line]
+assert len(hits) == 1, f"expected one admitted record with the leader's hash, found {len(hits)}"
+assert hits[0].get("submitter") == leader, f"admitted under {hits[0].get('submitter')!r}, not the leader"
+assert hits[0].get("signature"), "the admitted record carries no signature"
+PY
+await_queue_empty "$A/queue" || fail "the fleet's records were admitted but left in the queue"
+echo "  both admitted by the rules, the leader's under its signature; the queue is empty again"
 
 rule "the node says why it asked no router to forward a loopback port"
 # `this_node.external` is the port-mapping report. On a loopback listen the
@@ -265,10 +322,14 @@ esac
 
 rule "a submission is admitted by the process that received it"
 submit "$HTTP" "$OID" commitment
-await_kind "$HTTP" commitment \
+# Its own record, by submitter: the fleet section's commitments are in the log
+# already, so "any commitment" was true before this one had left the queue --
+# which is what made this check fail on whichever runs the daemon's tick fell
+# between the two sections.
+await_in_log "$HTTP" "\"submitter\": *\"stranger\"" \
   || { cat "$A/node.log" >&2; fail "the daemon never admitted the commitment"; }
 echo "  the commitment reached the log with no external drain"
-[ -z "$(ls -A "$A/queue" 2>/dev/null)" ] || fail "the queue was not emptied"
+await_queue_empty "$A/queue" || fail "the queue was not emptied"
 echo "  the queue emptied itself"
 
 rule "reveal in a later epoch, same process"
