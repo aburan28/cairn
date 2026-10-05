@@ -854,10 +854,47 @@ pub fn serve_on(listener: TcpListener, mut serving: Serving) -> io::Result<()> {
             let _slot = slot;
             let mut stream = stream;
             let _ = handle(&mut stream, &serving);
+            linger(&mut stream);
         });
     }
     Ok(())
 }
+
+/// Close an answered connection without destroying the answer.
+///
+/// A request refused part-way -- a line past [`MAX_LINE_BYTES`], a header
+/// flood, a body nobody read -- leaves the client's bytes unread in the
+/// socket, and closing a socket with unread input sends RST, not FIN. A RST
+/// that reaches the client before it has read the response discards what is
+/// still queued, so the client sees half a 400 or none at all (it happened in
+/// CI: headers, then nothing). So the write side is shut first, which sends
+/// the response and a FIN, and the input is read and dropped until the client
+/// closes, for at most [`LINGER_BYTES`] and [`LINGER`]. A client that keeps
+/// sending past either is cut off as before.
+fn linger(stream: &mut TcpStream) {
+    if stream.shutdown(Shutdown::Write).is_err() {
+        return;
+    }
+    let until = Instant::now() + LINGER;
+    let mut scratch = [0u8; 8 * 1024];
+    let mut drained = 0usize;
+    while drained < LINGER_BYTES {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+            return;
+        }
+        match stream.read(&mut scratch) {
+            Ok(0) | Err(_) => return,
+            Ok(read) => drained += read,
+        }
+    }
+}
+
+/// How long [`linger`] waits for a refused client to finish sending.
+const LINGER: Duration = Duration::from_secs(2);
+
+/// How much unread input [`linger`] reads and drops before closing anyway.
+const LINGER_BYTES: usize = 1024 * 1024;
 
 /// The connections being served, each with the moment it must be gone by.
 #[derive(Default)]
@@ -3217,8 +3254,9 @@ fn read_bounded_line(
     Ok(read)
 }
 
-/// Names, beyond the ones [`host_may_write`] always accepts, that a write may
-/// be addressed to: the public name of a node behind a TLS proxy, say.
+/// Public DNS names a write may be addressed to, beyond the ones always
+/// accepted (IP literals, `localhost`, single-label names and the reserved LAN
+/// suffixes): the public name of a node behind a TLS proxy, say.
 /// Comma-separated.
 pub const ALLOWED_HOSTS_ENV: &str = "CAIRN_HTTP_HOSTS";
 
@@ -3707,8 +3745,19 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
          \r\n",
         body.len()
     );
-    stream.write_all(head.as_bytes())?;
-    stream.write_all(body)?;
+    // A small answer goes in one write, not two: a second small write waits
+    // behind Nagle for the first one's ACK, a delayed-ACK stall on every
+    // response, and a body still queued when the socket closes is lost (see
+    // [`linger`]). A large body fills its own segments; it is not copied.
+    if body.len() <= 64 * 1024 {
+        let mut response = Vec::with_capacity(head.len() + body.len());
+        response.extend_from_slice(head.as_bytes());
+        response.extend_from_slice(body);
+        stream.write_all(&response)?;
+    } else {
+        stream.write_all(head.as_bytes())?;
+        stream.write_all(body)?;
+    }
     stream.flush()
 }
 
@@ -5322,6 +5371,41 @@ mod tests {
 
         let healthy = ask(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
         assert!(healthy.starts_with("HTTP/1.1 200"), "{healthy}");
+    }
+
+    #[test]
+    fn a_refusal_ends_in_a_clean_close_while_its_request_is_still_unread() {
+        // Refused at 8 KiB with 56 KiB unread. Closing a socket with unread
+        // input sends RST, and a RST purges whatever of the answer is still
+        // queued: in CI a 400 arrived as headers alone. `linger` shuts the
+        // write side and drains, so the client reads the answer, then EOF --
+        // never a reset. The reset is certain without it; the lost body was
+        // the timing-dependent half.
+        let dir = TempDir::new("clean-refusals");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, Serving::new(&log, "."));
+        });
+        let mut oversized = b"GET /goals?q=".to_vec();
+        oversized.extend(std::iter::repeat_n(b'a', 64 * 1024));
+        for _ in 0..5 {
+            let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("timeout");
+            socket
+                .write_all(&oversized)
+                .expect("the server reads it all");
+            let mut response = Vec::new();
+            let ended = std::io::Read::read_to_end(&mut socket, &mut response);
+            let response = String::from_utf8_lossy(&response).into_owned();
+            assert!(ended.is_ok(), "{ended:?} after {response:?}");
+            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+            assert!(response.contains("longer than"), "{response}");
+        }
     }
 
     #[test]
