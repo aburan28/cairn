@@ -12,12 +12,13 @@ so a wrong name fails the handshake and does not make a stranger into this
 seed. That split is [docs/discovery.md](../../docs/discovery.md) and
 [docs/p2p.md](../../docs/p2p.md), *Running a seed on a public host*.
 
-On 2026-10-05 `44.251.117.84` did not answer, and `launch/seeds.json` was
-pointed at a node that does: p2p at `bore.pub:56276`, with the HTTPS front
-at `https://auto-controls-healing-player.trycloudflare.com`. That forward
-ends when the process behind it stops. This launcher is how that entry
-moves onto a CPU pod that keeps running: rent the pod, publish its key,
-and replace the `tunnel` entry.
+The pod this launcher rented on 2026-10-05 is `0qf12swbexftjr`: 2 vCPU
+`cpu3g`, public address `103.196.86.88`, p2p on mapped port `19812`, HTTP
+on `19813`. `GET /health` returned `ok`, and a second node completed the
+handshake. That is the `runpod` entry in `launch/seeds.json`. Resetting
+the pod changes the mapped ports and, because there is no volume, the
+peer id. Publish again after a reset. Delete it with `down.sh` to stop
+the charge, about $0.08/hour while it runs.
 
 ## What it rents
 
