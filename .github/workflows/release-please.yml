@@ -33,6 +33,54 @@ name: release-please
 # (version.preRelease || major === 0)`), so on 1.15.3 it did nothing and
 # the redirect moved the moment the release was published, as before.
 #
+# One changelog line per pull request.
+#
+# release-please does not read what a PR lands on main as one change. It reads
+# every commit reachable from main, one by one (github.ts mergeCommitsGraphQL
+# walks `history`, not the first-parent line), and it makes one entry for every
+# blank-line-separated paragraph of a commit message that opens with a
+# conventional type (commit.ts splitMessages). A merge commit puts the PR's
+# branch commits on main beside the merge commit, whose body is the PR title,
+# so a PR whose commits are all `feat:` is listed once for each of them and
+# once more for the merge. 1.16.0 listed #224 five times and every other
+# merge-commit PR twice. #224's merge message also carried its title as both
+# subject and body, which on its own is two entries from one commit.
+#
+# There is no setting for it, and the two things that look like one are not:
+#
+#   - BEGIN_COMMIT_OVERRIDE in a PR body is the only way a PR's text reaches
+#     the changelog for the `rust` strategy (commit.ts preprocessCommitMessage),
+#     and it applies to every commit GitHub associates with the PR, branch
+#     commits included. On a merge-commit PR it repeats the line once per
+#     commit instead of replacing them: replayed over 1.16.0, 16 entries became
+#     15.
+#   - `changelog-type: github` does list each PR once, but it writes GitHub's
+#     "What's Changed" list in place of the changelog: no Features / Fixes, no
+#     scopes, and the hidden types below appear. It trades the format for the
+#     fix. There is no first-parent switch and no "prefer the PR title" key in
+#     the config schema.
+#
+# So the fix is a convention, and it needs no change to how PRs are merged and
+# no rewriting of history. Exactly one release-visible message per PR, and it
+# is the PR title:
+#
+#   - The PR title is a conventional commit. It is the merge commit's body (or
+#     a squash commit's subject), so it is the changelog line.
+#   - Branch commits do not use a visible type (feat, fix, perf, deps, docs).
+#     Use chore, refactor or test, or no type at all.
+#   - A merge or squash message names the title once, as subject or as body,
+#     never both.
+#
+# Replayed offline over 1.16.0's real commits with release-please 17.11.2: 16
+# entries as merged, 8 under this convention, one per PR. The functions named
+# above are the same from 16.18 through 17.11.
+#
+# What to watch is the title, not the branch commits. A duplicate is noise; a
+# PR whose title has no type is missing from the changelog and from the version
+# bump (CONTRIBUTING.md, "Commit messages"). The case that bites is a squash
+# merge of a one-commit PR, because GitHub fills the squash message from that
+# commit, which under this convention is hidden: put the PR title there.
+#
 # ONE-TIME REPOSITORY SETTING, without which this workflow fails at the last
 # step. The `permissions:` block below is necessary and not sufficient: there
 # is a separate repository-level switch that forbids Actions from opening pull
