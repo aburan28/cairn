@@ -9,11 +9,16 @@
 # receipt that says which.
 #
 # So: serve a log, probe this host, register with `--once`, read the host back
-# off GET /hosts and GET /network, run one job through the queue and one
-# through `exec`, and show the unit `install` would write. On a runner with
-# gVisor or bubblewrap the job runs jailed; on one without, the `auto` job
-# must be refused with a receipt that says why, and only a job that asked for
-# `none` runs -- the same branch lab-demo.sh takes.
+# off GET /hosts and GET /network, run jobs through the queue and one through
+# `exec`, and show the unit `install` would write. On a runner with gVisor or
+# bubblewrap the `auto` job runs jailed; on one without, it must be refused
+# with a receipt that says why -- the same branch lab-demo.sh takes.
+#
+# The operator's `--sandbox` is a floor (src/agent/sandbox.rs `floor`), so an
+# unconfined job runs only on a host whose operator chose `none`. The queue is
+# therefore run twice: once as a default operator, where a job that asks for
+# `none` is refused and moved aside, and once as an operator who passed
+# `--sandbox none`, where it runs and its receipt says so.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -72,13 +77,15 @@ done
 kill -0 "$SERVER_PID" 2>/dev/null || { cat "$WORK/serve.out" >&2; fail "the server exited at startup"; }
 echo "  serving on 127.0.0.1:$PORT"
 
-rule "queue a job that must run anywhere, and one that needs a jail"
+rule "queue a job that asks for less than the floor, and one that needs a jail"
 mkdir -p "$DATA/jobs/queue"
-cat > "$WORK/unconfined.json" <<JSON
-{"id":"demo-unconfined","rootfs":"/","argv":["/bin/sh","-c","echo hello from a job > \"\$CAIRN_LAB_OUT/hello\" && echo ran"],
- "sandbox":"none","timeout_seconds":60,"note":"explicitly unconfined; the receipt must say so"}
+# The operator below passes no `--sandbox`, so the floor is `auto`: a job that
+# asks for `none` is weaker than that and must be refused, not run.
+cat > "$WORK/refused.json" <<JSON
+{"id":"demo-refused","rootfs":"/","argv":["/bin/sh","-c","echo must not run"],
+ "sandbox":"none","timeout_seconds":60,"note":"asks for less than the host's floor; must be moved aside"}
 JSON
-"$RUST" agent submit "$WORK/unconfined.json" --data-dir "$DATA"
+"$RUST" agent submit "$WORK/refused.json" --data-dir "$DATA"
 cat > "$WORK/jailed.json" <<JSON
 {"id":"demo-jailed","rootfs":"/","argv":["/bin/sh","-c","echo jailed > /out/jailed && cat /proc/1/comm"],
  "sandbox":"auto","timeout_seconds":120,"cpus":1,"memory_mb":512}
@@ -99,6 +106,7 @@ cat "$WORK/run.out"
 # anything else is the agent itself failing.
 [ "$STATUS" -eq 0 ] || [ "$STATUS" -eq 1 ] || fail "agent run exited $STATUS"
 grep -q "registered with 1 node" "$WORK/run.out" || fail "the agent did not report registering"
+grep -q 'asked for `none`' "$WORK/run.err" || fail "a job below the operator's floor was not refused by name"
 
 rule "the node shows the host, and the log is untouched"
 python3 - "$PORT" <<'PY'
@@ -135,12 +143,9 @@ data, usable = sys.argv[1], sys.argv[2].split()
 done = os.path.join(data, "jobs", "done")
 assert os.path.exists(os.path.join(done, "broken.json.invalid")), os.listdir(done)
 print("  the unparsable spec was moved aside, not run")
-unconfined = json.load(open(os.path.join(done, "demo-unconfined", "receipt.json")))
-assert unconfined["sandbox"] == "none", unconfined
-assert unconfined["succeeded"] is True, unconfined
-assert open(os.path.join(done, "demo-unconfined", "out", "hello")).read().strip() == "hello from a job"
-assert "unconfined" in " ".join(unconfined["unenforced"]), unconfined
-print("  demo-unconfined: ran, exit 0, receipt says sandbox=none and lists isolation as unenforced")
+assert os.path.exists(os.path.join(done, "demo-refused.json.invalid")), os.listdir(done)
+assert not os.path.exists(os.path.join(done, "demo-refused")), os.listdir(done)
+print("  demo-refused: asked for `none` under a default operator, moved aside, never run")
 jailed = json.load(open(os.path.join(done, "demo-jailed", "receipt.json")))
 if usable:
     assert jailed["sandbox"] in usable, (jailed, usable)
@@ -152,6 +157,28 @@ else:
     assert "no sandbox" in jailed["error"], jailed
     assert jailed["succeeded"] is False
     print("  demo-jailed: refused --", jailed["error"][:80], "...")
+PY
+
+rule "an operator who chose --sandbox none runs the unconfined job"
+cat > "$WORK/unconfined.json" <<JSON
+{"id":"demo-unconfined","rootfs":"/","argv":["/bin/sh","-c","echo hello from a job > \"\$CAIRN_LAB_OUT/hello\" && echo ran"],
+ "sandbox":"none","timeout_seconds":60,"note":"explicitly unconfined; the receipt must say so"}
+JSON
+"$RUST" agent submit "$WORK/unconfined.json" --data-dir "$DATA"
+"$RUST" agent run --node "http://127.0.0.1:$PORT" --name demo-host --roles executor \
+  --data-dir "$DATA" --interval 5 --sandbox none --once > "$WORK/run-none.out" 2> "$WORK/run-none.err" \
+  || { cat "$WORK/run-none.err" >&2; fail "the agent run with --sandbox none failed"; }
+cat "$WORK/run-none.err"
+cat "$WORK/run-none.out"
+python3 - "$DATA" <<'PY'
+import json, os, sys
+done = os.path.join(sys.argv[1], "jobs", "done")
+unconfined = json.load(open(os.path.join(done, "demo-unconfined", "receipt.json")))
+assert unconfined["sandbox"] == "none", unconfined
+assert unconfined["succeeded"] is True, unconfined
+assert open(os.path.join(done, "demo-unconfined", "out", "hello")).read().strip() == "hello from a job"
+assert "unconfined" in " ".join(unconfined["unenforced"]), unconfined
+print("  demo-unconfined: ran, exit 0, receipt says sandbox=none and lists isolation as unenforced")
 PY
 
 rule "exec runs one job now and prints its receipt"
