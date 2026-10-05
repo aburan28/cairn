@@ -550,6 +550,13 @@ pub enum RuleViolation {
     },
     /// A delay beacon whose proof does not show the work it claims.
     BeaconDoesNotVerify { epoch: u64 },
+    /// This node's own share of a sealed submission does not decrypt.
+    ///
+    /// Not a fault of the node: the submitter sealed something to this seat
+    /// that is not a share of the key. Nothing honest can be posted for it,
+    /// so the seat reads as unpublished, and saying so is the only evidence
+    /// the seat has that it did not simply withhold.
+    ShareWillNotOpen { commitment: String, seat: u8 },
     /// A delay beacon that claims less work than [`MIN_VDF_DIFFICULTY`].
     BeaconDelayTooShort {
         epoch: u64,
@@ -1081,6 +1088,12 @@ impl fmt::Display for RuleViolation {
                 "the delay proof for epoch {epoch} does not check; a beacon nobody had \
                  to wait for is a value the sequencer chose, which is the grinding this \
                  record exists to price"
+            ),
+            RuleViolation::ShareWillNotOpen { commitment, seat } => write!(
+                f,
+                "this node's share of {commitment} (seat {seat}) does not decrypt: the \
+                 submitter sealed something to this seat that is not a share of its key, \
+                 so nothing honest can be posted and the seat will read as unpublished"
             ),
             RuleViolation::BeaconDelayTooShort {
                 epoch,
@@ -3953,13 +3966,13 @@ impl Node {
     /// declined to make. Publishing a commitment to the polynomial in a
     /// lattice- or code-based analogue is real work and is not done.
     ///
-    /// So the fallback is search: try every `t`-subset of the published shares
-    /// until one opens. That is `C(n, t)` AEAD checks — ten for the default
-    /// three-of-five — and it is bounded rather than open-ended, because a
-    /// committee is `COMMITTEE_SIZE` seats and one share per seat. A member who
-    /// publishes garbage therefore costs the network a handful of hashes and
-    /// costs itself an entry that every reader can see it wrote. What it
-    /// cannot do is stop the reveal, as long as `t` honest members published.
+    /// So the fallback is to route around it. With more than `t` shares
+    /// published the shares are a Reed–Solomon codeword, and decoding finds up
+    /// to `⌊(m − t)/2⌋` wrong ones among `m`; past that, `t`-subsets are tried,
+    /// capped (see `open_with_any_subset`). A member who publishes garbage
+    /// costs the network a decode and costs itself an entry every reader can
+    /// see it wrote. What it cannot do alone is stop the reveal; more than
+    /// `⌊(m − t)/2⌋` of them among the published shares still can.
     ///
     /// `docs/threat-model.md` carries the row: a *dishonest* member is
     /// detectable only in aggregate, and attributing the lie needs VSS.
@@ -4076,8 +4089,16 @@ impl Node {
             };
             // A share that will not open is a dealer who sealed garbage to this
             // seat. Nothing honest can be posted for it, and posting anything
-            // else would be this node lying.
+            // else would be this node lying -- but it is said, because silence
+            // here is indistinguishable from this seat withholding.
             let Ok(share) = key.open_share(&envelope, seat) else {
+                out.push((
+                    commitment_id.clone(),
+                    Err(RuleViolation::ShareWillNotOpen {
+                        commitment: commitment_id,
+                        seat,
+                    }),
+                ));
                 continue;
             };
             let record = CommitteeShare::new(
@@ -8525,89 +8546,180 @@ fn render_previous(previous: Option<i64>) -> String {
     }
 }
 
-/// Open a sealed submission by trying every `threshold`-sized subset of the
-/// published shares.
+/// AEAD checks [`open_with_any_subset`] makes past the decoding bound before
+/// giving up.
 ///
-/// The search exists because **Shamir cannot say which share was wrong.** Any
-/// `t` points define a polynomial, so a bad share yields a well-formed wrong key
-/// and the AEAD tag reports only that the *set* was wrong. The scheme that would
-/// let a share be checked on its own — verifiable secret sharing — needs a group
-/// where discrete log is hard, which is the assumption this network has
-/// deliberately declined to make. See [`Node::open_sealed`].
-///
-/// Bounded only by the committee: shares come from `committee_shares_for`,
-/// which admits at most one per seat, so this is at most `C(n, threshold)` AEAD
-/// checks for a committee of `n`. That is ten at the default three-of-five, but
-/// [`Node::committee_size_at`] grows `n` towards `MAX_COMMITTEE_SIZE` as the
-/// value sealed grows, and the count does not stay small: with one bad share
-/// published first it is `C(n - 1, threshold - 1)` failed checks before an
-/// honest subset is reached — about a second at nineteen seats, and
-/// effectively forever at sixty-four. One seat-holder posting a garbage share
-/// can therefore stall the reveal of a large committee; [`MAX_SUBSET_TRIALS`]
-/// bounds what that costs a node, not the stall itself. Making each published
-/// share checkable on its own, without a discrete-log assumption, is the fix;
-/// see the MPC notes in `docs/review/mpc-censorship-discovery.md`.
-///
-/// Subsets are tried in lexicographic index order, which is log order, which is
-/// the same order on every node: two nodes opening the same submission from the
-/// same shares produce the same artifact by the same route. That matters even
-/// though every subset that opens yields the *same* plaintext — the binding
-/// check makes that a theorem — because "deterministic for a reason anyone can
-/// restate" is cheaper to trust than "deterministic because the output happens
-/// to be unique".
-/// AEAD checks [`open_with_any_subset`] makes before giving up.
-///
-/// Every subset of a five-seat committee is ten; of a nineteen-seat one, with
-/// one bad share published first, about 48,000. This cap is a few hundred
-/// milliseconds of work at most: enough to step past bad shares at the default
-/// committee size, not at grown ones, where only shares checkable one at a
-/// time fix it (`docs/review/mpc-censorship-discovery.md` §1).
+/// A few hundred milliseconds of work at most. Every subset of a five-seat
+/// committee is ten, so there the search is complete; at a grown committee it
+/// is a sample, which finds an honest subset quickly while the liars are a
+/// modest fraction past the bound and not at all once they are near half.
 const MAX_SUBSET_TRIALS: usize = 4096;
 
+/// Open a sealed submission from its published shares, whichever of them are
+/// honest.
+///
+/// **`t` shares cannot say which of them was wrong.** Any `t` points define a
+/// polynomial, so a bad share yields a well-formed wrong key and the AEAD tag
+/// reports only that the *set* was wrong. More than `t` can: shares are a
+/// Reed–Solomon codeword, and [`crate::crypto::shamir::agreeing`] decodes `m`
+/// published shares with up to `⌊(m − t) / 2⌋` wrong ones and names those —
+/// no verifiable secret sharing, so no discrete-log assumption, which this
+/// network has deliberately declined to make. See [`Node::open_sealed`].
+///
+/// So the order is: the first `t` shares (one AEAD check when everyone was
+/// honest), then the decoded set, then subsets, at most [`MAX_SUBSET_TRIALS`].
+/// Shares come from `committee_shares_for`, one per seat, and
+/// [`Node::committee_size_at`] grows the committee towards
+/// `MAX_COMMITTEE_SIZE` as the value sealed grows.
+///
+/// Before decoding, subsets were tried in lexicographic order of *log
+/// position*, so every subset holding the first share came before any without
+/// it, and one seat-holder who posted garbage first stalled the reveal of any
+/// committee from sixteen seats up (`C(m − 1, t − 1)` failed checks, past the
+/// cap). Now the search starts past the decoding bound, and it does not let
+/// liars choose its order: when every subset fits under the cap they are all
+/// tried, by seat index; otherwise subsets are drawn from a stream seeded by
+/// the commitment, by seat index, so where a liar sits in the log moves
+/// nothing and each draw avoids `b` liars with probability
+/// `C(m − b, t) / C(m, t)`. Either way every node tries the same subsets in
+/// the same order, which matters even though every subset that opens yields
+/// the *same* plaintext — the binding check makes that a theorem — because
+/// "deterministic for a reason anyone can restate" is cheaper to trust than
+/// "deterministic because the output happens to be unique".
+///
+/// What remains is stated in the threat model: enough liars past the bound
+/// still stall a reveal, and none of this says *which* seat lied.
 fn open_with_any_subset(
     submission: &SealedSubmission,
     shares: &[crate::crypto::shamir::Share],
     threshold: usize,
 ) -> Option<OpenedSubmission> {
+    use crate::crypto::shamir::Share;
     if threshold == 0 || shares.len() < threshold {
         return None;
     }
-    // The common case, and worth taking first rather than as subset number one:
-    // when every published share is honest, this is a single AEAD check.
-    let mut chosen: Vec<usize> = (0..threshold).collect();
-    let mut trials = 0usize;
-    loop {
-        // A cap on liveness, not on correctness: any subset that opens yields
-        // the same claim, so giving up only means this node does not open it
-        // *now*. Without it one bad share at a grown committee is a search a
-        // daemon would run for the rest of its life, once per tick.
-        trials += 1;
-        if trials > MAX_SUBSET_TRIALS {
-            return None;
-        }
-        let subset: Vec<crate::crypto::shamir::Share> =
-            chosen.iter().map(|&i| shares[i].clone()).collect();
-        if let Ok(opened) = crate::sealed::open(submission, &subset) {
+    let try_open = |chosen: &[usize]| -> Option<OpenedSubmission> {
+        let subset: Vec<Share> = chosen.iter().map(|&i| shares[i].clone()).collect();
+        crate::sealed::open(submission, &subset).ok()
+    };
+    // The common case, and worth taking first: when every published share is
+    // honest, this is a single AEAD check.
+    let first: Vec<usize> = (0..threshold).collect();
+    if let Some(opened) = try_open(&first) {
+        return Some(opened);
+    }
+    // Some share is wrong. With redundancy, decoding names the wrong ones;
+    // the AEAD still decides, because past the bound the decoder can be wrong.
+    if let Some(good) = crate::crypto::shamir::agreeing(shares, threshold) {
+        if let Some(opened) = try_open(&good[..threshold]) {
             return Some(opened);
         }
-        // Next combination in lexicographic order: advance the rightmost index
-        // that still has room, then repack everything after it.
-        let mut i = threshold;
+    }
+
+    // By seat index, not log position: a liar picks when to publish, not which
+    // seat it was drawn to.
+    let mut by_seat: Vec<usize> = (0..shares.len()).collect();
+    by_seat.sort_by_key(|&i| shares[i].index);
+    let count = shares.len();
+
+    if subsets_at_most(count, threshold, MAX_SUBSET_TRIALS) {
+        // Small enough to be complete: every subset, lexicographically.
+        let mut chosen: Vec<usize> = (0..threshold).collect();
         loop {
-            if i == 0 {
-                return None;
+            let subset: Vec<usize> = chosen.iter().map(|&i| by_seat[i]).collect();
+            if let Some(opened) = try_open(&subset) {
+                return Some(opened);
             }
-            i -= 1;
-            if chosen[i] != i + shares.len() - threshold {
-                break;
-            }
-            if i == 0 {
-                return None;
+            // Advance the rightmost index that still has room, then repack
+            // everything after it; none has room once every subset was tried.
+            let i = (0..threshold)
+                .rev()
+                .find(|&i| chosen[i] != i + count - threshold)?;
+            chosen[i] += 1;
+            for j in i + 1..threshold {
+                chosen[j] = chosen[j - 1] + 1;
             }
         }
-        chosen[i] += 1;
-        for j in i + 1..threshold {
-            chosen[j] = chosen[j - 1] + 1;
+    }
+
+    // Too many to try them all: draw them. A partial Fisher–Yates over the
+    // seat order, its randomness a counter-mode SHA-256 stream over the
+    // commitment, which every node holds and no seat-holder chooses.
+    let mut stream = SubsetStream::new(submission.commitment.as_bytes());
+    for _ in 0..MAX_SUBSET_TRIALS {
+        let mut order = by_seat.clone();
+        for i in 0..threshold {
+            let j = i + stream.below(count - i);
+            order.swap(i, j);
+        }
+        if let Some(opened) = try_open(&order[..threshold]) {
+            return Some(opened);
+        }
+    }
+    None
+}
+
+/// Is `C(n, k)` at most `cap`? Computed incrementally so it never overflows:
+/// `C(n, i + 1) = C(n, i) · (n − i) / (i + 1)` is exact at every step.
+fn subsets_at_most(n: usize, k: usize, cap: usize) -> bool {
+    let k = k.min(n - k);
+    let mut value: u128 = 1;
+    for i in 0..k {
+        value = value * (n - i) as u128 / (i + 1) as u128;
+        if value > cap as u128 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Uniform indices from SHA-256 in counter mode over a fixed seed. Not a
+/// CSPRNG for secrets -- nothing here is secret -- only a stream every node
+/// derives identically, so a subset search is the same search everywhere.
+struct SubsetStream {
+    seed: Vec<u8>,
+    counter: u64,
+    block: [u8; 32],
+    used: usize,
+}
+
+impl SubsetStream {
+    fn new(seed: &[u8]) -> SubsetStream {
+        let mut seeded = b"cairn/sealed/subset-stream".to_vec();
+        seeded.extend_from_slice(seed);
+        SubsetStream {
+            seed: seeded,
+            counter: 0,
+            block: [0; 32],
+            used: 32,
+        }
+    }
+
+    fn byte(&mut self) -> u8 {
+        if self.used == self.block.len() {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&self.seed);
+            hasher.update(self.counter.to_be_bytes());
+            self.block.copy_from_slice(&hasher.finalize());
+            self.counter += 1;
+            self.used = 0;
+        }
+        let byte = self.block[self.used];
+        self.used += 1;
+        byte
+    }
+
+    /// Uniform in `0..bound` for `1 <= bound <= 256`, by rejecting the top
+    /// sliver of byte values that would bias the remainder.
+    fn below(&mut self, bound: usize) -> usize {
+        debug_assert!((1..=256).contains(&bound));
+        let limit = 256 - 256 % bound;
+        loop {
+            let value = usize::from(self.byte());
+            if value < limit {
+                return value % bound;
+            }
         }
     }
 }
@@ -13093,6 +13205,99 @@ mod tests {
                 .iter()
                 .any(|problem: &String| problem.contains("does not check")),
             "a forged delay went unreported: {problems:?}"
+        );
+    }
+
+    /// A garbage share posted first used to cost `C(m - 1, t - 1)` AEAD
+    /// checks before an honest subset came up -- 6,436 at nine-of-sixteen,
+    /// past the cap, so the reveal stalled on one liar. Decoding names the
+    /// liars up to `(m - t) / 2` of them, here three.
+    #[test]
+    fn garbage_shares_posted_first_do_not_stall_a_grown_committee() {
+        use crate::crypto::{envelope::CommitteeKey, kem::Suite, shamir::Share};
+        use rand_core::OsRng;
+        let keys: Vec<CommitteeKey> = (0..16)
+            .map(|_| CommitteeKey::generate_over(&[Suite::McEliece], &mut OsRng))
+            .collect();
+        let members: Vec<_> = keys.iter().zip(1u8..).map(|(k, i)| k.member(i)).collect();
+        let submission = SealedSubmission::seal(
+            "sha256:36dc4eb23ddd295b12608a6d84e2b03b48d437ce278105f93143215d260bb711",
+            "alice",
+            &crate::obj! { "n" => Value::Int(42) },
+            "n1",
+            7,
+            TS,
+            &members,
+            9,
+            &mut OsRng,
+        )
+        .expect("seals");
+        let honest: Vec<Share> = keys
+            .iter()
+            .zip(1u8..)
+            .map(|(k, i)| k.open_share(&submission.envelope, i).expect("own share"))
+            .collect();
+        assert!(open_with_any_subset(&submission, &honest, 9).is_some());
+
+        // Independent garbage, as liars who do not coordinate send. Flipping
+        // the same bit in every liar's share would not do: Shamir is linear,
+        // so identical offsets are themselves a sharing, and mixed subsets
+        // can reconstruct the true key from them.
+        let garbage = |share: &mut Share| {
+            use rand_core::RngCore;
+            OsRng.fill_bytes(&mut share.data);
+        };
+
+        // Up to the bound decoding names them; one past it, the sampled
+        // search finds one of the C(12, 9) honest subsets about every fifty
+        // draws, where log order needed 11,221.
+        for liars in [1usize, 2, 3, 4] {
+            let mut published = honest.clone();
+            for share in published.iter_mut().take(liars) {
+                garbage(share);
+            }
+            let opened = open_with_any_subset(&submission, &published, 9)
+                .unwrap_or_else(|| panic!("{liars} garbage share(s) first stalled the reveal"));
+            assert_eq!(opened.artifact, crate::obj! { "n" => Value::Int(42) });
+        }
+
+        // Fewer honest shares than the threshold: nothing opens it, and the
+        // search gives up at its cap rather than run for ever.
+        let mut published = honest.clone();
+        for share in published.iter_mut().take(8) {
+            garbage(share);
+        }
+        assert!(open_with_any_subset(&submission, &published, 9).is_none());
+    }
+
+    #[test]
+    fn a_small_committee_still_tries_every_subset() {
+        // C(5, 3) = 10 is under the cap, so the search is complete: with two
+        // liars of five there is exactly one honest subset, and it is found.
+        assert!(subsets_at_most(5, 3, MAX_SUBSET_TRIALS));
+        assert!(!subsets_at_most(16, 9, MAX_SUBSET_TRIALS));
+        assert!(subsets_at_most(64, 64, MAX_SUBSET_TRIALS));
+        assert!(!subsets_at_most(64, 33, MAX_SUBSET_TRIALS));
+    }
+
+    #[test]
+    fn the_subset_stream_is_uniform_and_the_same_everywhere() {
+        let mut a = SubsetStream::new(b"sha256:commitment");
+        let mut b = SubsetStream::new(b"sha256:commitment");
+        let drawn: Vec<usize> = (0..1000).map(|_| a.below(7)).collect();
+        assert_eq!(drawn, (0..1000).map(|_| b.below(7)).collect::<Vec<_>>());
+        assert!(drawn.iter().all(|&v| v < 7));
+        let mut counts = [0usize; 7];
+        for v in drawn {
+            counts[v] += 1;
+        }
+        // 1000 / 7 is about 143; a byte-modulo bias would show as a skew this
+        // loose a check still catches only grossly, which is all it is for.
+        assert!(counts.iter().all(|&c| (90..200).contains(&c)), "{counts:?}");
+        let mut other = SubsetStream::new(b"sha256:another");
+        assert_ne!(
+            (0..32).map(|_| other.below(256)).collect::<Vec<_>>(),
+            (0..32).map(|_| a.below(256)).collect::<Vec<_>>()
         );
     }
 

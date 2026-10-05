@@ -474,6 +474,176 @@ pub fn combine(shares: &[Share]) -> Result<Vec<u8>, ShamirError> {
     Ok(secret)
 }
 
+// -- decode ----------------------------------------------------------------
+
+/// The shares that lie on the sharing polynomial, found by decoding rather
+/// than by trying subsets.
+///
+/// Shamir shares are a Reed–Solomon codeword: share `i` is `P(x_i)` for one
+/// polynomial `P` of degree below `threshold`, byte by byte. So once more than
+/// `threshold` shares are published they carry redundancy, and Berlekamp–Welch
+/// decoding recovers `P` from `m` shares of which at most
+/// `⌊(m − threshold) / 2⌋` are wrong — which names the wrong ones. No
+/// commitment and no discrete-log assumption: only the extra points. That is
+/// what a bad share at a grown committee needed, where trying `threshold`-sized
+/// subsets in order costs `C(m − 1, threshold − 1)` checks once a single
+/// garbage share is first.
+///
+/// Returns the positions (into `shares`) of every share that agrees with the
+/// decoded polynomial at every byte, or `None` when the input is malformed,
+/// there is no redundancy (`m < threshold + 2`), or the wrong shares exceed the
+/// bound. Past the bound a decoder can name the wrong polynomial, so this is a
+/// **search hint, not a verdict**: confirm it the way every reconstruction is
+/// confirmed — combine, open the AEAD envelope, check the commitment. It is
+/// also not *attribution*: a submitter who sealed a wrong share to an honest
+/// seat makes that seat's honest share look wrong here.
+///
+/// Published shares are public, so nothing here is secret and no timing
+/// property is claimed; the arithmetic is the module's own branch-free multiply
+/// anyway.
+pub fn agreeing(shares: &[Share], threshold: usize) -> Option<Vec<usize>> {
+    let count = shares.len();
+    if threshold == 0 || count < threshold + 2 {
+        return None;
+    }
+    let width = shares.first()?.data.len();
+    if width == 0 {
+        return None;
+    }
+    for (position, share) in shares.iter().enumerate() {
+        if share.index == 0
+            || share.data.len() != width
+            || shares[..position]
+                .iter()
+                .any(|other| other.index == share.index)
+        {
+            return None;
+        }
+    }
+    let bound = (count - threshold) / 2;
+    let mut wrong = vec![false; count];
+    for byte in 0..width {
+        let polynomial = berlekamp_welch(shares, byte, threshold, bound)?;
+        for (share, flag) in shares.iter().zip(wrong.iter_mut()) {
+            if evaluate(&polynomial, share.index) != share.data[byte] {
+                *flag = true;
+            }
+        }
+    }
+    // Each byte decodes on its own, so a share wrong at different bytes is
+    // counted once. More than `bound` wrong shares means some byte was decoded
+    // past what decoding can promise, and the answer is not to be trusted.
+    let good: Vec<usize> = (0..count).filter(|&i| !wrong[i]).collect();
+    if count - good.len() > bound || good.len() < threshold {
+        return None;
+    }
+    Some(good)
+}
+
+/// Berlekamp–Welch for one byte position: find `E` monic of degree `errors` and
+/// `Q` of degree below `errors + threshold` with `Q(x_i) = y_i · E(x_i)` at every
+/// share, then `P = Q / E`. Any solution of that linear system gives the same
+/// `P` when at most `errors` points are wrong, so free variables are set to
+/// zero. `None` when the system is inconsistent or `E` does not divide `Q`,
+/// both of which mean too many wrong points.
+fn berlekamp_welch(
+    shares: &[Share],
+    byte: usize,
+    threshold: usize,
+    errors: usize,
+) -> Option<Vec<u8>> {
+    // Unknowns: E_0..E_{errors-1}, then Q_0..Q_{errors+threshold-1}.
+    let unknowns = 2 * errors + threshold;
+    let mut rows: Vec<Vec<u8>> = shares
+        .iter()
+        .map(|share| {
+            let (x, y) = (share.index, share.data[byte]);
+            let mut row = vec![0u8; unknowns + 1];
+            let mut power = 1u8;
+            for i in 0..errors + threshold {
+                if i < errors {
+                    row[i] = gf::mul(y, power);
+                }
+                row[errors + i] = power;
+                if i + 1 == errors {
+                    // `x^errors` is the next power; the right-hand side is
+                    // `y · x^errors`, E's leading term moved across.
+                    row[unknowns] = gf::mul(y, gf::mul(power, x));
+                }
+                power = gf::mul(power, x);
+            }
+            if errors == 0 {
+                row[unknowns] = y;
+            }
+            row
+        })
+        .collect();
+
+    // Gauss–Jordan elimination over GF(2^8), where subtraction is XOR.
+    let mut pivots: Vec<usize> = Vec::new();
+    let mut rank = 0usize;
+    for column in 0..unknowns {
+        if rank == rows.len() {
+            break;
+        }
+        let Some(found) = (rank..rows.len()).find(|&r| rows[r][column] != 0) else {
+            continue;
+        };
+        rows.swap(rank, found);
+        let scale = gf::inv(rows[rank][column])?;
+        for value in rows[rank].iter_mut() {
+            *value = gf::mul(*value, scale);
+        }
+        let pivot = rows[rank].clone();
+        for (r, row) in rows.iter_mut().enumerate() {
+            let factor = row[column];
+            if r != rank && factor != 0 {
+                for (value, &p) in row.iter_mut().zip(pivot.iter()) {
+                    *value ^= gf::mul(factor, p);
+                }
+            }
+        }
+        pivots.push(column);
+        rank += 1;
+    }
+    if rows[rank..].iter().any(|row| row[unknowns] != 0) {
+        return None;
+    }
+    let mut solution = vec![0u8; unknowns];
+    for (row, &column) in rows.iter().zip(pivots.iter()) {
+        solution[column] = row[unknowns];
+    }
+
+    // P = Q / E, with E monic, by long division from the top.
+    let mut locator = solution[..errors].to_vec();
+    locator.push(1);
+    let mut remainder = solution[errors..].to_vec();
+    let mut quotient = vec![0u8; threshold];
+    for degree in (0..threshold).rev() {
+        let coefficient = remainder[degree + errors];
+        quotient[degree] = coefficient;
+        if coefficient != 0 {
+            for (offset, &e) in locator.iter().enumerate() {
+                remainder[degree + offset] ^= gf::mul(coefficient, e);
+            }
+        }
+    }
+    if remainder[..errors].iter().any(|&value| value != 0) {
+        return None;
+    }
+    Some(quotient)
+}
+
+/// `P(x)` by Horner's rule; coefficients lowest degree first.
+fn evaluate(polynomial: &[u8], x: u8) -> u8 {
+    polynomial
+        .iter()
+        .rev()
+        .fold(0u8, |accumulator, &coefficient| {
+            gf::mul(accumulator, x) ^ coefficient
+        })
+}
+
 // -- hex -------------------------------------------------------------------
 
 /// Lowercase hex. Written out rather than `format!("{:02x}")` per byte to avoid
@@ -689,6 +859,95 @@ mod tests {
         let shares = split(&secret, 200, 255, TestRng(5)).expect("valid parameters");
         let chosen: Vec<Share> = shares.iter().take(200).cloned().collect();
         assert_eq!(combine(&chosen).expect("ok"), secret);
+    }
+
+    // -- decoding ----------------------------------------------------------
+
+    /// Corrupt `which` shares, each at a different byte, the way a garbage
+    /// share or a flipped bit would arrive.
+    fn corrupted(shares: &[Share], which: &[usize]) -> Vec<Share> {
+        let mut out: Vec<Share> = shares.to_vec();
+        for (n, &i) in which.iter().enumerate() {
+            let byte = n % out[i].data.len();
+            out[i].data[byte] ^= 0x5a;
+        }
+        out
+    }
+
+    #[test]
+    fn decoding_names_every_wrong_share_up_to_the_bound() {
+        let secret = b"a content key, thirty-two bytes!";
+        // 9-of-16, the shape of a grown committee: the bound is (16 - 9) / 2.
+        let shares = split(secret, 9, 16, rand_core::OsRng).expect("valid parameters");
+        assert_eq!(agreeing(&shares, 9), Some((0..16).collect()));
+        for bad in [vec![0], vec![0, 1], vec![0, 7, 15]] {
+            let published = corrupted(&shares, &bad);
+            let good = agreeing(&published, 9).expect("within the bound");
+            let expected: Vec<usize> = (0..16).filter(|i| !bad.contains(i)).collect();
+            assert_eq!(good, expected, "bad = {bad:?}");
+            let chosen: Vec<Share> = good.iter().take(9).map(|&i| published[i].clone()).collect();
+            assert_eq!(combine(&chosen).expect("ok"), secret);
+        }
+    }
+
+    #[test]
+    fn decoding_a_share_wrong_in_one_byte_only() {
+        // A share that differs in a single late byte is still wrong, and the
+        // union over bytes is what catches it.
+        let secret = [7u8; 32];
+        let shares = split(&secret, 3, 7, rand_core::OsRng).expect("valid parameters");
+        let mut published = shares.clone();
+        published[2].data[31] ^= 1;
+        assert_eq!(agreeing(&published, 3), Some(vec![0, 1, 3, 4, 5, 6]));
+    }
+
+    #[test]
+    fn decoding_declines_rather_than_guessing() {
+        let secret = b"k";
+        let shares = split(secret, 3, 7, rand_core::OsRng).expect("valid parameters");
+        // No redundancy: threshold + 1 points determine nothing extra.
+        assert_eq!(agreeing(&shares[..4], 3), None);
+        // Malformed input.
+        let mut duplicate = shares.clone();
+        duplicate[1].index = duplicate[0].index;
+        assert_eq!(agreeing(&duplicate, 3), None);
+        let mut zero = shares.clone();
+        zero[0].index = 0;
+        assert_eq!(agreeing(&zero, 3), None);
+        assert_eq!(agreeing(&shares, 0), None);
+        // Past the bound (7 - 3) / 2 = 2. The true answer would leave three
+        // shares out, more than the bound, so it is never reported; whatever
+        // is reported instead keeps a wrong share, which is why a caller
+        // confirms with the AEAD rather than trusting the set.
+        let published = corrupted(&shares, &[0, 1, 2]);
+        if let Some(good) = agreeing(&published, 3) {
+            assert!(good.iter().any(|i| [0, 1, 2].contains(i)), "{good:?}");
+        }
+    }
+
+    #[test]
+    fn decoding_agrees_with_interpolation_at_every_size() {
+        // Every (threshold, count) a committee can take up to 64 seats, with
+        // the most wrong shares the bound allows, placed first.
+        let secret = b"0123456789abcdef0123456789abcdef";
+        for count in [5u8, 8, 15, 16, 33, 64] {
+            for threshold in [1u8, 2, count / 2 + 1, count - 2] {
+                let shares =
+                    split(secret, threshold, count, rand_core::OsRng).expect("valid parameters");
+                let bound = (usize::from(count) - usize::from(threshold)) / 2;
+                let bad: Vec<usize> = (0..bound).collect();
+                let published = corrupted(&shares, &bad);
+                let good = agreeing(&published, usize::from(threshold))
+                    .unwrap_or_else(|| panic!("{threshold}-of-{count} with {bound} wrong"));
+                assert_eq!(good.len(), usize::from(count) - bound);
+                let chosen: Vec<Share> = good
+                    .iter()
+                    .take(usize::from(threshold))
+                    .map(|&i| published[i].clone())
+                    .collect();
+                assert_eq!(combine(&chosen).expect("ok"), secret);
+            }
+        }
     }
 
     #[test]

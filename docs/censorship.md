@@ -123,10 +123,15 @@ and refuses anything else.
 verified on its own, and the schemes that would fix that — Feldman, Pedersen —
 rest on discrete log being hard in a group, which is precisely the assumption a
 post-quantum network has declined to make. So a member who publishes garbage
-cannot be identified, only routed around: `open_sealed` tries every `t`-subset
-of the published shares, which is at most `C(5,3) = 10` AEAD checks and is
-bounded because a committee has five seats and one share each. A liar costs the
-network ten hashes and cannot stall a reveal that `t` honest members answered.
+cannot be identified, only routed around. Once more than `t` shares are
+published they are a Reed–Solomon codeword, so `open_sealed` decodes them
+(`shamir::agreeing`) and finds up to `⌊(m − t)/2⌋` wrong ones among the `m`
+published, then falls back to trying `t`-subsets, capped. At the default
+three-of-five that is at most ten AEAD checks. At a grown committee, trying
+subsets alone was not enough: one garbage share posted first stalled any
+committee from sixteen seats up, and decoding is what removed that. A reveal can
+still be stalled by more than `⌊(m − t)/2⌋` liars among the published shares,
+which is fewer than the `n − t + 1` it takes to withhold.
 
 It buys three things at once, which is why it is worth the complexity:
 
