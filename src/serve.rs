@@ -3199,7 +3199,7 @@ fn read_bounded_line(
     Ok(read)
 }
 
-/// Names, beyond the ones [`host_may_write`] always accepts, that a write may
+/// Names, beyond the ones `host_may_write` always accepts, that a write may
 /// be addressed to: the public name of a node behind a TLS proxy, say.
 /// Comma-separated.
 pub const ALLOWED_HOSTS_ENV: &str = "CAIRN_HTTP_HOSTS";
