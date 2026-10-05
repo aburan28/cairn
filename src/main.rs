@@ -867,6 +867,12 @@ enum Command {
     Identity {
         out: String,
     },
+    /// Compile one Lean file under the verifier's jail and print what Lean
+    /// said. For testing a theorem before posting it.
+    LeanCompile {
+        file: String,
+        timeout: u64,
+    },
     /// Announce a peer identity in the log, or move one to a new address.
     ///
     /// The record that makes finding the network part of obtaining the log
@@ -1562,6 +1568,32 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
             }
             Command::Identity {
                 out: require(out, "identity", "--out <file>")?,
+            }
+        }
+        "lean-compile" => {
+            let mut file: Option<String> = None;
+            let mut timeout = 120u64;
+            while let Some(token) = cursor.take() {
+                if token == "--timeout" {
+                    let text = cursor.value("--timeout")?;
+                    timeout = text.parse().map_err(|_| {
+                        CliError::Usage(format!("lean-compile: --timeout {text:?} is not seconds"))
+                    })?;
+                } else if is_flag(&token) {
+                    return Err(CliError::Usage(format!(
+                        "lean-compile: unknown option {token:?}"
+                    )));
+                } else if file.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "lean-compile: unexpected argument {token:?}"
+                    )));
+                } else {
+                    file = Some(token);
+                }
+            }
+            Command::LeanCompile {
+                file: require(file, "lean-compile", "<file.lean>")?,
+                timeout: timeout.clamp(1, 1800),
             }
         }
         "keygen" => parse_keygen(&mut cursor)?,
@@ -4207,6 +4239,15 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      check one record without a log: is it admissible, and what is its id",
     );
+    say(out, "  lean-compile <file.lean> [--timeout <seconds>]");
+    say(
+        out,
+        "      compile one Lean file in the verifier's jail and print what Lean said;",
+    );
+    say(
+        out,
+        "      exit 0 compiled, 1 Lean errors, 3 Lean could not run here",
+    );
     say(out, "  identity --out <file>");
     say(
         out,
@@ -5054,6 +5095,33 @@ fn cmd_peer(
     );
     say(out, "costs a dial and can never cost a wrong result.");
     Ok(0)
+}
+
+/// Exit status of `lean-compile` when Lean could not be run at all.
+const LEAN_COMPILE_UNAVAILABLE: i32 = 3;
+
+/// `cairn lean-compile FILE`: Lean's output on stdout; exit 0 when it
+/// compiled, 1 when Lean reported errors, 3 when Lean could not run here
+/// (the reason on stderr).
+fn cmd_lean_compile(
+    out: &mut dyn Write,
+    options: &Options,
+    file: &str,
+    timeout: u64,
+) -> Result<i32, CliError> {
+    let source = fs::read_to_string(file)
+        .map_err(|error| CliError::Usage(format!("lean-compile: cannot read {file}: {error}")))?;
+    let registry = cairn::verifiers::VerifierRegistry::new(&options.root);
+    match registry.compile_lean(&source, std::time::Duration::from_secs(timeout)) {
+        cairn::verifiers::LeanCompile::Ran { code, output } => {
+            let _ = out.write_all(output.as_bytes());
+            Ok(if code == 0 { 0 } else { 1 })
+        }
+        cairn::verifiers::LeanCompile::Unavailable(why) => {
+            eprintln!("lean-compile: {why}");
+            Ok(LEAN_COMPILE_UNAVAILABLE)
+        }
+    }
 }
 
 fn cmd_identity(out: &mut dyn Write, path: &str) -> Result<i32, CliError> {
@@ -9957,6 +10025,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Canon { input } => cmd_canon(out, input),
         Command::Decode { kind, record } => cmd_decode(out, kind, record),
         Command::Identity { out: path } => cmd_identity(out, path),
+        Command::LeanCompile { file, timeout } => cmd_lean_compile(out, options, file, *timeout),
         Command::Peer {
             identity,
             transport,

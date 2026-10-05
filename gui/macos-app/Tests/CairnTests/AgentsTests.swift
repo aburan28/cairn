@@ -61,5 +61,6 @@ final class AgentsTests: XCTestCase {
         XCTAssertEqual(AgentStanza.shellQuote("it's"), "'it'\\''s'")
         XCTAssertEqual(AgentStanza.shellQuote(""), "''")
         XCTAssertEqual(AgentStanza.tomlString("a\"b\\c"), "\"a\\\"b\\\\c\"")
+        XCTAssertEqual(AgentStanza.tomlString("a\nb\tc\u{1}"), "\"a\\nb\\tc\\u0001\"")
     }
 }

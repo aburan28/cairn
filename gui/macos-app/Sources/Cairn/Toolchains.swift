@@ -50,7 +50,9 @@ enum Toolchains {
 
     /// Lean's own installer, as its documentation gives it: elan into
     /// `~/.elan`, with the stable toolchain. `-y` answers its one question.
-    static let elanInstall = "curl -sSf https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain stable"
+    /// `pipefail`, so a download that fails is a failed install: without it
+    /// the status is `sh`'s, and `sh` reading nothing exits 0.
+    static let elanInstall = "set -o pipefail; curl -sSf https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain stable"
     /// The other way, for a Mac with Homebrew: a system prefix the jail
     /// allow-lists by itself.
     static let brewInstall = "brew install lean"
