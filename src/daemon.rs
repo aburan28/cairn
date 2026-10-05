@@ -157,6 +157,9 @@ pub struct Config {
     /// Ed25519 identity used to sign MCP submissions. This is deliberately
     /// separate from [`Config::identity`], which is the transport KEM key.
     pub mcp_identity: Option<PathBuf>,
+    /// Total reward agents may fund through MCP `post_objective` while this
+    /// process runs. `None` falls back to `CAIRN_MCP_MAX_SPEND`, then zero.
+    pub mcp_max_spend: Option<u64>,
     /// Ed25519 identity this node's committee seats are registered under: the
     /// one that signed the peer record naming [`Config::identity`]'s transport
     /// id. With it, the node publishes the shares its seats owe for sealed
@@ -208,6 +211,7 @@ impl Config {
             proxy: None,
             mcp: false,
             mcp_identity: None,
+            mcp_max_spend: None,
             committee_identity: None,
             store: None,
             attest_identity: None,
@@ -993,6 +997,7 @@ pub fn run(config: Config) -> Result<(), String> {
                 config.mcp_identity.as_deref(),
                 &config.log,
                 &config.key_path(),
+                crate::mcp::SpendCeiling::from_flag_or_env(config.mcp_max_spend)?,
             )
             .map_err(|error| format!("mcp: {error}"))?,
         )

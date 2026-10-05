@@ -942,6 +942,7 @@ struct RunRequest {
     fanout: Option<usize>,
     max_queue: Option<usize>,
     mcp_identity: Option<String>,
+    mcp_max_spend: Option<u64>,
     committee_identity: Option<String>,
     attest_identity: Option<String>,
     no_mcp: bool,
@@ -1694,6 +1695,7 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
         fanout: None,
         max_queue: None,
         mcp_identity: None,
+        mcp_max_spend: None,
         committee_identity: None,
         attest_identity: None,
         no_mcp: false,
@@ -1739,6 +1741,12 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
                 }
             }
             "--mcp-identity" => request.mcp_identity = Some(cursor.value("run: --mcp-identity")?),
+            "--mcp-max-spend" => {
+                request.mcp_max_spend = Some(parse_u64(
+                    &cursor.value("run: --mcp-max-spend")?,
+                    "run: --mcp-max-spend",
+                )?)
+            }
             "--committee-identity" => {
                 request.committee_identity = Some(cursor.value("run: --committee-identity")?)
             }
@@ -4147,6 +4155,10 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
+        "      --mcp-max-spend N lets agents fund up to N units of objectives (default 0)",
+    );
+    say(
+        out,
         "      --committee-identity FILE serves the committee seats that identity registered",
     );
     say(
@@ -4526,6 +4538,7 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
         .unwrap_or(cairn::serve::DEFAULT_MAX_QUEUED);
     config.mcp = !request.no_mcp;
     config.mcp_identity = request.mcp_identity.as_ref().map(PathBuf::from);
+    config.mcp_max_spend = request.mcp_max_spend;
     config.committee_identity = request.committee_identity.as_ref().map(PathBuf::from);
     config.attest_identity = request.attest_identity.as_ref().map(PathBuf::from);
     config.store = store.limit().is_some().then(|| store.clone());

@@ -251,17 +251,23 @@ made larger:
   "set ECC_BUCKET to attacker-bucket" would otherwise redirect a credential the
   operator already chose. Replacing one is `cairn secret set NAME --stdin`.
 
-**Not handled: an agent spends on its own say-so.** `post_objective` escrows
-the reward from the balance of the identity the MCP server was started with,
-with no ceiling and no confirmation, and `scripts/mcp-config.sh` wires in the
-key that earns. Injected text that gets an agent to post "a sub-objective,
-reward = everything, verifier accepts `{}`" pays whoever submits first. The
-citation capability above does not cover this path. Until the server takes an
-explicit `--allow-post` and a `--max-reward`, start agents you do not watch
-with an identity that holds what you are willing to lose. The same applies to
-`lab_exec` with `network: true`, which gives the job the host's network
-namespace (loopback services, cloud metadata): the operator's
-`CAIRN_LAB_SANDBOX` chooses the backend, but the agent chooses the network.
+**Handled: an agent spends on its own say-so.** `post_objective` escrows the
+reward from the balance of the identity the MCP server was started with, and
+injected text that gets an agent to post "a sub-objective, reward =
+everything, verifier accepts `{}`" would pay whoever submits first. So a funded
+post needs the operator's ceiling: `cairn mcp --max-spend N` (or
+`cairn run --mcp-max-spend N`, or `CAIRN_MCP_MAX_SPEND=N`) lets agents fund at
+most `N` units in total while that server runs. The default is zero, which
+still allows an objective with reward 0. A refused post spends nothing, and the
+server prints its ceiling at startup. What remains: the ceiling is per process,
+so a restart resets it, and inside it the agent still chooses what to fund.
+
+**Handled: an agent takes the network.** `lab_exec` with `network: true` gives
+the job the host's network namespace (loopback services, cloud metadata). The
+operator's `CAIRN_LAB_SANDBOX` chose the backend; now `CAIRN_LAB_NETWORK=1`
+must also be set before an agent may ask for the network, and without it the
+call is refused with that name. `cairn lab exec --network` at a terminal is a
+person's choice and is not gated.
 
 See [agents.md](agents.md).
 

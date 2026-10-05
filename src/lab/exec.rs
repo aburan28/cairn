@@ -160,6 +160,22 @@ impl Preference {
 /// Environment variable naming the sandbox preference.
 pub const SANDBOX_ENV: &str = "CAIRN_LAB_SANDBOX";
 
+/// Environment variable with which the person running the lab's MCP server
+/// lets agents ask for network access in `lab_exec`. Off unless it is `1`.
+///
+/// A sandboxed run with the network on can carry anything mounted into it to
+/// anywhere, and the agent asking for it was steered by text other people
+/// wrote. So it is the operator's choice, like the sandbox itself; the CLI's
+/// `cairn lab exec --network` is already a person at a terminal and is not
+/// gated.
+pub const NETWORK_ENV: &str = "CAIRN_LAB_NETWORK";
+
+/// Has the operator allowed agents to ask for the network? See
+/// [`NETWORK_ENV`].
+pub fn agents_may_use_network() -> bool {
+    std::env::var(NETWORK_ENV).is_ok_and(|value| value.trim() == "1")
+}
+
 /// Pick a backend this host can actually use. Probed, not assumed: an
 /// installed `runsc` or `bwrap` that cannot create a sandbox here (no user
 /// namespaces, no ptrace, an old kernel) is the common failure, and it looks
