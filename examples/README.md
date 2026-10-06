@@ -22,7 +22,10 @@ the tree on 2026-08-25 (19 directories, 32 objective files), and the *status*
 column for every committed artifact is what `cairn try` reported on that date.
 `hash-differential` was added on 2026-08-29, taking the tree to 20 directories
 and 40 objective files; its own row was measured then. `replay-reproduction`
-was added on 2026-10-04 (21 directories, 41 objective files).
+was added on 2026-10-04 (21 directories, 41 objective files). `bound-frontier`
+was added on 2026-10-06; `find examples -name 'objective*.json'` then counted
+52 files in 25 directories, two of which this table does not list (`lab/`,
+a lab policy and its environments, and `workspace-network/`).
 
 | example | verifier | reward | status | needs | worked artifact |
 |---|---|---|---|---|---|
@@ -41,6 +44,7 @@ was added on 2026-10-04 (21 directories, 41 objective files).
 | [`attested-fact`](attested-fact/) | certificate | 100000 | worked — verifies **provenance, not truth**; read its README | python3 | `artifacts/sourced.json`; `misquoted`, `one-source` and `tampered-source` are there to be refused |
 | [`programbench-vetted`](programbench-vetted/) | evaluator (maximize) + ratchet | 1000000 | worked — a held-out benchmark task graded on a log | python3 | `artifacts/resolved.json`; `partial`, `almost`, `cheating`, `hanging` score lower or are refused, by design |
 | [`replay-reproduction`](replay-reproduction/) | replay | 10000 | worked — the one `replay` example: exact integers a pinned command prints again | python3 | `artifact.json` |
+| [`bound-frontier`](bound-frontier/) | evaluator (maximize) + ratchet | 1000000 | worked — a **measured** ECDLP bound rescored from its own counts against the generic floor; an accept is a receipt for a self-consistent record, not a replay | python3 | `artifacts/prime-rho-neg.json` (score 682064), `artifacts/prime-bsgs-neg.json` (866743); `tampered-mean-gae.json` is there to be refused |
 | [`lean`](lean/) | lean | 50000 | worked, if you have Lean — `unavailable` on a node without it | a Lean 4 toolchain on PATH | `artifact.json`; `hole.json` is the `sorry` the verifier refuses |
 | [`elliptic-rank`](elliptic-rank/) | certificate + exact evaluator | 20000000 – 64000000 | **4 open rank-record bounties** | python3 | `artifacts/rank-30-record.json` — a baseline, rejected by the rank-31 objective |
 | [`certicom-ecdlp`](certicom-ecdlp/) | certificate | 120000 / 400000 / 2000000 | **open bounty** ×3 — two solvable NUMS rungs (50 and 60 bits) and Certicom's ECCp-131, posted as a frontier and not expected to settle | python3 | none |
@@ -88,6 +92,15 @@ was added on 2026-10-04 (21 directories, 41 objective files).
   it, the same question is a minimum-weight-codeword search, and the
   objective can offer an upper bound and no lower bound at all. Read it for
   what an honest target looks like when nothing is proved.
+- **[`bound-frontier`](bound-frontier/) is an objective about a measurement
+  rather than a construction.** The artifact is a sealed record of what an
+  ECDLP method cost, and the evaluator recomputes its every stated figure from
+  the counts it carries, so a better headline typed over a worse measurement
+  scores zero. What it cannot do is re-run the sessions, and its README is
+  where that limit is written down before the accept is read as more than a
+  receipt. It is also the example of a record that had to be *rendered* for
+  the network: the canonical encoding has no floats, so every non-integer
+  number travels as a decimal string.
 - **open bounty** — no known solution ships. Submitting requires actually
   solving the problem; scoring a candidate is still free.
 - Without a Lean toolchain the `lean` objective verifies as `unavailable` on
