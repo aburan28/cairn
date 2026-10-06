@@ -377,6 +377,13 @@ authenticates nothing.
 
 ## `POST /objective/prepare`: the bytes a funder signs
 
+For a local identity file, `cairn sign-objective draft.json --identity
+funder.identity.json` prints the fully signed objective JSON without opening
+the node's log. A coordinator can send that record to a running node with
+`POST /submit?kind=objective`; the HTTP answer is queued, and `GET
+/objective/{id}` confirms later admission. This avoids a second writer on
+the live node's exclusive log. The command refuses an already signed draft.
+
 A funder authorizes an objective by signing `Objective::funding_signing_payload`
 in its canonical encoding, and canonical encoding is consensus-critical: it
 lives in `src/` and `reference/rust/`, which must agree, and nowhere else.
@@ -392,6 +399,12 @@ bytes yields a signature that fails at the door (`/submit` checks it eagerly)
 rather than one that passes. The route reads no log and writes nothing; it is
 a `POST` only because it has a body, which also means a browser preflights it
 and, like `/submit`, it is reachable from the node's own origin alone.
+
+`GET /claim/{id}` returns the public claim record and its content id. A
+receipt collector can compare its artifact to an archived run before treating
+`GET /knowledge/{id}` and an objective's settlement as evidence about that
+run. These bytes were already available in `GET /log`; the route saves clients
+from implementing canonical claim IDs just to find the matching row.
 
 ## Why a submission was queued or refused, in a word
 

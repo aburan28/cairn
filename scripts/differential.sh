@@ -37,7 +37,8 @@ REF="${REF_BIN:-./reference/rust/target/release/cairn-reference}"
 rule() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 
-WORK=$(mktemp -d /tmp/pw-differential-XXXXXX)
+# Honour a spacious temporary volume when the system /tmp is full.
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/pw-differential-XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 # These are public conformance fixtures. An operator's default
 # ~/.proofwork/key must not silently seal newly-created primary logs and make
