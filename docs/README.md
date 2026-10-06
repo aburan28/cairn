@@ -23,6 +23,7 @@ below is either reference (what a command, a setting, or a word does) or design
 | know what a word means | [glossary.md](glossary.md) |
 | fix something that is not working | [troubleshooting.md](troubleshooting.md) |
 | understand the whole design | [architecture.md](architecture.md), then [diagrams.md](diagrams.md) |
+| read it as one paper | [whitepaper.md](whitepaper.md) |
 | attack it | [threat-model.md](threat-model.md) |
 | work on this repository | [../AGENTS.md](../AGENTS.md), [../CONTRIBUTING.md](../CONTRIBUTING.md) |
 
@@ -89,6 +90,8 @@ The six pages a user needs and nothing else in this repository provides.
 
 ## The design
 
+- [whitepaper.md](whitepaper.md) — the system as one paper. It names what
+  the code settles and what it still does not.
 - [architecture.md](architecture.md) — the full design, and which work shapes
   fit it.
 - [diagrams.md](diagrams.md) — architecture and detailed design, drawn from the

@@ -3,8 +3,12 @@
 //! The ECC2K-130 search does not fit in one log. Orbits live here, sharded by
 //! the first byte of `sha256(name)`, which is the same function every node
 //! can recompute. A second witness for the same name is a collision candidate:
-//! both are kept, and the answer objective is what gets paid, not this index.
+//! both are kept. [`OrbitIndex::collisions`] reports a name once two
+//! *distinct* bodies are stored. Identical bytes stored twice are one
+//! witness. Nothing here pays: the answer objective is what a collision is
+//! claimed against, and this directory is not on the swarm.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -74,6 +78,44 @@ impl OrbitIndex {
         Ok(out)
     }
 
+    /// Orbit names with at least two distinct witness bodies.
+    ///
+    /// A second copy of the same bytes is not a second arrival. Two different
+    /// trails that canonicalise to one name are. The list is sorted so two
+    /// nodes holding the same files report the same names in the same order.
+    /// Paying the finder is a claim against the answer objective; this index
+    /// does not mint.
+    pub fn collisions(&self) -> std::io::Result<Vec<String>> {
+        let mut names = BTreeSet::new();
+        if !self.root.exists() {
+            return Ok(Vec::new());
+        }
+        for shard in fs::read_dir(&self.root)? {
+            let shard = shard?;
+            if !shard.file_type()?.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(shard.path())? {
+                let path = entry?.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("orbit") {
+                    continue;
+                }
+                names.insert(fs::read_to_string(&path)?);
+            }
+        }
+        let mut out = Vec::new();
+        for name in names {
+            let mut bodies = BTreeSet::new();
+            for witness in self.get(&name)? {
+                bodies.insert(witness.body);
+            }
+            if bodies.len() >= 2 {
+                out.push(name);
+            }
+        }
+        Ok(out)
+    }
+
     fn shard_dir(&self, orbit: &str) -> PathBuf {
         let mut hasher = Sha256::new();
         hasher.update(orbit.as_bytes());
@@ -125,6 +167,24 @@ mod tests {
         let shard = dir.join("orbits").join(format!("{byte:02x}"));
         assert!(shard.is_dir(), "{}", shard.display());
         assert_eq!(index.get("orbit-a").unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_collision_is_two_distinct_bodies_and_a_replay_is_not() {
+        let dir = std::env::temp_dir().join(format!("cairn-orbits-hit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let index = OrbitIndex::open(&dir).unwrap();
+        assert!(index.collisions().unwrap().is_empty());
+        index.put("orbit-a", b"walker-1").unwrap();
+        index.put("orbit-a", b"walker-1").unwrap();
+        index.put("orbit-b", b"only").unwrap();
+        assert!(
+            index.collisions().unwrap().is_empty(),
+            "re-storing one witness must not look like a collision"
+        );
+        index.put("orbit-a", b"walker-2").unwrap();
+        assert_eq!(index.collisions().unwrap(), vec!["orbit-a".to_string()]);
         let _ = fs::remove_dir_all(&dir);
     }
 }

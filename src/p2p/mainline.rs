@@ -216,6 +216,14 @@ pub fn enabled_from_env() -> bool {
     )
 }
 
+/// `CAIRN_DHT_STATIC=1` keeps one announce key across epochs. The rotating key
+/// is the default: a single crawler key would enumerate the network forever.
+pub const STATIC_ENV: &str = "CAIRN_DHT_STATIC";
+
+pub fn static_rendezvous(flag: Option<&str>) -> bool {
+    matches!(flag.map(str::trim), Some("1") | Some("on") | Some("true"))
+}
+
 /// What a bootstrap reply contained. The addresses are dial hints.
 pub struct BootstrapReply {
     pub bytes: usize,
@@ -262,18 +270,20 @@ pub fn find_bootstrap(epoch: u64) -> std::io::Result<BootstrapReply> {
 }
 
 /// Ask `bootstrap` who has announced under this epoch's key, then announce
-/// `port`. Returns the addresses the neighbourhood already held. Empty is a
-/// rendezvous with nobody else on it, not an error; an error is a bootstrap
-/// that did not answer the first `find_node`.
+/// `port`. `static_key` ignores the epoch, which is what
+/// [`STATIC_ENV`] asks for. Returns the addresses the neighbourhood already
+/// held. Empty is a rendezvous with nobody else on it, not an error; an error
+/// is a bootstrap that did not answer the first `find_node`.
 pub fn meet(
     bootstrap: SocketAddr,
     node_id: [u8; 20],
     epoch: u64,
     port: u16,
+    static_key: bool,
 ) -> io::Result<Vec<SocketAddr>> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.set_read_timeout(Some(Duration::from_secs(2)))?;
-    let hash = infohash(epoch, false);
+    let hash = infohash(epoch, static_key);
     let find = query(b"fn", "find_node", &node_id, Some(&hash));
     let reply = exchange(&socket, bootstrap, &find)?;
     let mut contacts: Vec<SocketAddr> = extract_compact_nodes(&reply)
@@ -319,7 +329,14 @@ pub fn meet_public(epoch: u64, port: u16) -> io::Result<Vec<SocketAddr>> {
     let bootstrap: SocketAddr = "router.bittorrent.com:6881"
         .parse()
         .expect("bootstrap address");
-    meet(bootstrap, [7u8; 20], epoch, port)
+    let flag = std::env::var(STATIC_ENV).ok();
+    meet(
+        bootstrap,
+        [7u8; 20],
+        epoch,
+        port,
+        static_rendezvous(flag.as_deref()),
+    )
 }
 
 fn collect_peers(packet: &[u8], found: &mut Vec<SocketAddr>) {
@@ -569,6 +586,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_static_flag_accepts_the_same_spellings_as_mainline() {
+        assert!(static_rendezvous(Some("1")));
+        assert!(static_rendezvous(Some(" on ")));
+        assert!(static_rendezvous(Some("true")));
+        assert!(!static_rendezvous(Some("0")));
+        assert!(!static_rendezvous(Some("")));
+        assert!(!static_rendezvous(None));
+    }
+
+    #[test]
     fn the_announce_key_rotates_with_the_epoch_unless_asked_not_to() {
         assert_ne!(infohash(1, false), infohash(2, false));
         assert_eq!(infohash(1, true), infohash(2, true));
@@ -673,31 +700,46 @@ mod tests {
         let mut buf = [0u8; 512];
         probe.recv_from(&mut buf).unwrap();
 
-        let first = meet(bootstrap, [1u8; 20], epoch, 9001).unwrap();
+        let first = meet(bootstrap, [1u8; 20], epoch, 9001, false).unwrap();
         assert!(
             first.iter().all(|addr| addr.port() != 1),
             "a token that was not issued must not publish an address: {first:?}"
         );
-        let second = meet(bootstrap, [2u8; 20], epoch, 9002).unwrap();
+        let second = meet(bootstrap, [2u8; 20], epoch, 9002, false).unwrap();
         assert!(
             second
                 .iter()
                 .any(|addr| *addr == "127.0.0.1:9001".parse().unwrap()),
             "the second node did not learn the first: {second:?}"
         );
-        let again = meet(bootstrap, [1u8; 20], epoch, 9001).unwrap();
+        let again = meet(bootstrap, [1u8; 20], epoch, 9001, false).unwrap();
         assert!(
             again
                 .iter()
                 .any(|addr| *addr == "127.0.0.1:9002".parse().unwrap()),
             "the first node did not learn the second: {again:?}"
         );
-        let other_epoch = meet(bootstrap, [3u8; 20], epoch + 1, 9003).unwrap();
+        let other_epoch = meet(bootstrap, [3u8; 20], epoch + 1, 9003, false).unwrap();
         assert!(
             other_epoch
                 .iter()
                 .all(|addr| addr.port() != 9001 && addr.port() != 9002),
             "an epoch key must not return another epoch's peers: {other_epoch:?}"
+        );
+        // The static key is a different meeting place from either epoch above.
+        // Two callers in different epochs must still find each other on it.
+        let stable = meet(bootstrap, [5u8; 20], 99, 9102, true).unwrap();
+        let _ = meet(bootstrap, [4u8; 20], 1, 9101, true).unwrap();
+        let stable_again = meet(bootstrap, [5u8; 20], 99, 9102, true).unwrap();
+        assert!(
+            stable.iter().all(|addr| addr.port() != 9001),
+            "the static key must not see a rotating-key announce: {stable:?}"
+        );
+        assert!(
+            stable_again
+                .iter()
+                .any(|addr| *addr == "127.0.0.1:9101".parse().unwrap()),
+            "a static key must meet across epochs: {stable_again:?}"
         );
 
         stop.store(true, Ordering::Relaxed);
