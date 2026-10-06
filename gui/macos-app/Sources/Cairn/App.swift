@@ -119,40 +119,16 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup {
                 if case .running(let url) = node.state {
-                    // One status button rather than two raw addresses run
-                    // together ("127.0.0.1:8080p2p 127.0.0.1:9000") and a
-                    // full-width strip of prose above the page. The addresses
-                    // and the explanation are one click away, in its popover.
+                    // One status button rather than a strip of actions. New
+                    // Challenge, Tasks, Peers, Agent, Secrets, Reload and Open
+                    // in Browser used to sit here beside a sidebar that already
+                    // listed most of them, so the window had two maps. They
+                    // stay in the Node menu, and the status popover still
+                    // opens Peers, Test and the browser.
                     NodeStatusButton(node: node, url: url)
-                    Button { node.newChallenge() } label: {
-                        Label("New Challenge", systemImage: "sparkles")
-                    }
-                    .help("Describe a problem in plain words; Cairn drafts the challenge and tests its checker")
-                    .disabled(node.isAttached)
-                    Button { node.presentTasks = true } label: {
-                        Label("Tasks", systemImage: "target")
-                    }
-                    .help("Post a curated objective (e.g. ECC2K-130) into this node's log")
-                    .disabled(node.isAttached)
-                    Button { node.presentPeers = true } label: {
-                        Label("Peers", systemImage: "person.badge.plus")
-                    }
-                    .help("Announce a peer, manage bootstrap, or copy what to give someone adding this node")
-                    Button { node.presentAgents = true } label: {
-                        Label("Agent", systemImage: "terminal")
-                    }
-                    .help("Point Claude Code, Codex or OpenCode at this node over MCP")
-                    Button { browser.reload() } label: { Label("Reload", systemImage: "arrow.clockwise") }
-                        .help("Reload the page")
-                    Button { NSWorkspace.shared.open(url) } label: { Label("Open in Browser", systemImage: "safari") }
-                        .help("Open this page in your browser")
                 }
-                Button { node.presentSecrets = true } label: {
-                    Label("Secrets", systemImage: "key.fill")
-                }
-                .help("Paste AWS keys and other named secrets for campaign scripts")
                 OpenSettingsButton(iconOnly: true)
-                    .help("How much of this Mac the node may use, where it keeps its data, and how it reaches peers")
+                    .help("Where this node runs, and who can reach it")
             }
         }
         .sheet(isPresented: $node.presentPeers) {

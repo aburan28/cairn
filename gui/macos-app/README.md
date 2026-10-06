@@ -106,10 +106,13 @@ via `cairn secret set --stdin` — values are never shown again after Save,
 and never go on the command line. **Peers…** announces a peer in the log
 (stopping the node briefly — a ledger has one writer), points at bootstrap
 management in Settings, and copies what to hand someone adding this node.
-The status button in the toolbar says, in a word or two, whether
-the node is on this Mac only, attached to another node's URL, or has reached
-peers. Its popover has the reader and P2P addresses, the peer id and the
-session count, each with a copy button, and **Test…**.
+The toolbar is that status, in a word or two — whether the node is on
+this Mac only, attached to another node's URL, or has reached peers — and
+Settings. New Challenge, Tasks, Peers, Agent, Secrets, Reload and Open in
+Browser used to be buttons beside it; they are the Node menu, because the
+window was a second copy of the sidebar. The status popover still has the
+reader and P2P addresses, the peer id and the session count, each with a
+copy button, and **Test…**.
 
 **Test Connectivity…** (⇧⌘K, or **Test…** in that popover) checks the ports
 themselves rather than reading a status word, each attempt made now from
@@ -168,7 +171,7 @@ has the release side and the one secret it needs.
 
 ## New challenge
 
-**Node → New Challenge…**, or the sparkles in the toolbar: describe a problem
+**Node → New Challenge…** (⇧⌘N): describe a problem
 in plain words, set a reward, and post a challenge without meeting the
 objective schema. **A drafted challenge is a Lean 4 theorem**, and what it
 pays for is a proof the Lean kernel accepts: the node's `lean` verifier
@@ -299,7 +302,7 @@ writes. A match is a suggestion from the node's alias catalog, never a rule.
 
 ## Connect an agent
 
-**Node → Connect an Agent…** (⇧⌘A), or **Agent** in the toolbar: the MCP
+**Node → Connect an Agent…** (⇧⌘A): the MCP
 stanza that points Claude Code, Codex or OpenCode at cairn, with this Mac's
 real paths and this window's settings in it, and a copy button. The shapes
 are the ones `scripts/mcp-config.sh` writes and

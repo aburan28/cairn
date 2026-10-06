@@ -357,8 +357,7 @@ export default function Page() {
             <div className="mt-3">
               <Note tone="warn">
                 This version of Cairn.app cannot take a description from the page.
-                Use <b>New Challenge</b> — the sparkles in the toolbar — or update
-                the app.
+                Use <b>Node → New Challenge…</b>, or update the app.
               </Note>
             </div>
           )}

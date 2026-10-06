@@ -37,7 +37,7 @@ final class Node: ObservableObject {
     /// `cairn --version` ("cairn 1.8.1"). Nil in attach mode, where this app
     /// runs no binary and the reader's page says the node's.
     @Published private(set) var binaryVersion: String?
-    /// Drives the Peers sheet from the Node menu and the toolbar.
+    /// Drives the Peers sheet from the Node menu and the status popover.
     @Published var presentPeers = false
     @Published var presentTasks = false
     @Published var presentSecrets = false
@@ -45,7 +45,7 @@ final class Node: ObservableObject {
     @Published var presentConnectivity = false
     @Published var presentAgents = false
     /// What New Challenge… opens with: the description the reader's Post a
-    /// challenge page handed over, or nil from the menu and the toolbar.
+    /// challenge page handed over, or nil from the Node menu.
     private(set) var challengeBrief: String?
 
     /// Where the node keeps its log, keys and queue.
