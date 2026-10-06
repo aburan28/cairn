@@ -46,7 +46,7 @@ jobs:
           app=gui/ios/.derived/Build/Products/Release-iphonesimulator/Cairn.app
           test -d "$app"
           ditto -c -k --keepParent "$app" cairn-reader-ios-simulator.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cairn-reader-ios-simulator
           path: cairn-reader-ios-simulator.zip
