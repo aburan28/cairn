@@ -57,6 +57,7 @@ use std::net::SocketAddr;
 
 use super::handshake::{peer_id_hex, PeerId};
 use super::reach;
+use super::sync::About;
 use crate::canonical::Value;
 use crate::time::format_iso8601_utc;
 
@@ -139,6 +140,10 @@ pub struct PeerStanding {
     /// the one number a session changes that a reader can check against
     /// `/chain`.
     pub entries_after: Option<usize>,
+    /// What the peer said it is in its last hello: roles, verifier kinds and
+    /// version. Its word, unchecked -- see [`About`]. `None` from a peer
+    /// older than the field, or one this node has only failed to reach.
+    pub about: Option<About>,
 }
 
 impl PeerStanding {
@@ -271,6 +276,17 @@ impl Sessions {
         Ok(Reach::Reached)
     }
 
+    /// What `peer` said it is, in the hello of a session that completed.
+    /// Kept beside the standing and replaced by the next hello, so the
+    /// roster says what the peer last claimed, not what it ever claimed. A
+    /// peer this node has no row for is not given one: a declaration is
+    /// worth keeping only beside a session that proved the key behind it.
+    pub fn learned(&mut self, peer: PeerId, about: About) {
+        if let Some(standing) = self.peers.get_mut(&peer) {
+            standing.about = Some(about);
+        }
+    }
+
     /// A session with `peer` failed. For an inbound failure the peer is not
     /// known -- see [`Sessions::inbound_failed`].
     pub fn failed(
@@ -328,6 +344,7 @@ impl Sessions {
             outbound_ok: 0,
             failures: 0,
             entries_after: None,
+            about: None,
         });
         if addr.is_some() {
             standing.addr = addr;
@@ -417,9 +434,11 @@ impl Sessions {
                     "Sessions this process ran, from its own memory: a cairn session is one \
                      exchange (handshake, reconcile, close), not a held connection, so a peer \
                      is `reached` when one succeeded recently and nothing here is a record. \
-                     A reached peer proved it holds the key its id names and nothing else. \
-                     `address_book` is whom this node could dial; `GET /peers` is whom the \
-                     log announces; neither is a session.",
+                     A reached peer proved it holds the key its id names and nothing else: \
+                     its `about` -- roles, verifier kinds, version -- is what it said in \
+                     its hello, declared and unchecked, like `CAIRN_ROLES` on its own \
+                     /network. `address_book` is whom this node could dial; `GET /peers` \
+                     is whom the log announces; neither is a session.",
                 ),
             ),
         ])
@@ -535,6 +554,13 @@ fn peer_value(standing: &PeerStanding, now: u64) -> Value {
             "entries_after",
             match standing.entries_after {
                 Some(entries) => Value::Int(i128::from(entries as u64)),
+                None => Value::Null,
+            },
+        ),
+        (
+            "about",
+            match &standing.about {
+                Some(about) => about.to_value(),
                 None => Value::Null,
             },
         ),
@@ -662,6 +688,56 @@ mod tests {
         known[..8].copy_from_slice(&7u64.to_be_bytes());
         full.succeeded(known, None, Direction::Outbound, 9, 2)
             .expect("an existing row is not a new one");
+    }
+
+    #[test]
+    fn what_a_peer_said_it_is_rides_beside_its_session_and_only_there() {
+        let mut sessions = Sessions::new(0);
+        let about = About {
+            version: "1.17.0".into(),
+            roles: vec!["relay".into()],
+            verifiers: vec!["certificate".into()],
+        };
+        // Nothing to attach to: a declaration from a peer with no session
+        // makes no row.
+        sessions.learned(id(9), about.clone());
+        assert!(sessions.peers().next().is_none());
+
+        sessions
+            .succeeded(id(1), Some(addr(1)), Direction::Outbound, 1, 10)
+            .expect("kept");
+        sessions
+            .succeeded(id(2), Some(addr(2)), Direction::Inbound, 1, 10)
+            .expect("kept");
+        sessions.learned(id(1), about.clone());
+        let report = sessions.report(11);
+        let peers = report.get("peers").unwrap().as_array().unwrap();
+        let said = peers
+            .iter()
+            .find(|row| row.get("peer_id").unwrap().as_str() == Some(&peer_id_hex(&id(1))))
+            .unwrap();
+        assert_eq!(said.get("about").unwrap(), &about.to_value());
+        let silent = peers
+            .iter()
+            .find(|row| row.get("peer_id").unwrap().as_str() == Some(&peer_id_hex(&id(2))))
+            .unwrap();
+        assert_eq!(
+            silent.get("about").unwrap(),
+            &Value::Null,
+            "an older peer says nothing"
+        );
+
+        // The next hello replaces the last: the roster is what the peer
+        // last claimed.
+        sessions.learned(
+            id(1),
+            About {
+                roles: vec![],
+                ..about.clone()
+            },
+        );
+        let row = sessions.peers().find(|p| p.peer == id(1)).unwrap();
+        assert!(row.about.as_ref().unwrap().roles.is_empty());
     }
 
     #[test]

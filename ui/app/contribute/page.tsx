@@ -4,14 +4,31 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { type NetworkResponse, fetchNetwork } from "@/lib/network";
 import { type Objective, loadObjectives, resolveNode } from "@/lib/site";
-import { PAY_LABEL, ROLES, type RoleInfo, lanState, workCommand } from "@/lib/contribute";
+import {
+  type AppRole,
+  type AppSheet,
+  DECLARED_BY_ROLE,
+  PAY_LABEL,
+  ROLES,
+  ROLE_TOGGLE,
+  type RoleInfo,
+  lanState,
+  openSheet,
+  setRole,
+  workCommand,
+} from "@/lib/contribute";
+import { type Bridge, appBridge } from "@/lib/draft";
 import { objectiveTitle } from "@/lib/title";
 import { Badge, Box, CopyButton, Note, PageHeader, Skeleton } from "@/components/ui";
 
 /**
- * Ways to take part, what each pays, and how to start -- and, for the one
- * that needs the most setup, the command a second machine on this network
- * runs to join.
+ * Ways to take part, what each pays, and how to start.
+ *
+ * Inside Cairn.app every role is a button: the app flips the toggle, opens
+ * the sheet, or starts the worker, because a window whose whole point is
+ * that there is no terminal must not answer "how do I start" with a shell
+ * line. In a browser tab there is no app to ask, so the same card says
+ * where the control is in the app and what the command is.
  *
  * Everything about *this node* comes from `GET /network`: which roles it
  * declares, the contradictions the node itself found in that declaration,
@@ -25,9 +42,14 @@ export default function Page() {
   const [objectives, setObjectives] = useState<Objective[]>([]);
   const [live, setLive] = useState(false);
   const [origin, setOrigin] = useState("");
+  const [bridge, setBridge] = useState<Bridge | null>(null);
+  /** The change the app is restarting the node for, until the page reloads. */
+  const [restarting, setRestarting] = useState<{ role: AppRole; on: boolean } | null>(null);
+  const [appError, setAppError] = useState<string | null>(null);
 
   useEffect(() => {
     setOrigin(window.location.origin);
+    setBridge(appBridge());
     void resolveNode().then(async (url) => {
       setBase(url);
       const [net, feed] = await Promise.all([
@@ -45,6 +67,29 @@ export default function Page() {
 
   const declared = new Set<string>(network?.node.roles.declared ?? []);
 
+  async function toggle(role: AppRole, on: boolean) {
+    if (!bridge) return;
+    setAppError(null);
+    try {
+      await setRole(bridge, role, on);
+      // The app restarts the node and reloads this page when it is back.
+      setRestarting({ role, on });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (message !== "Cancelled.") setAppError(message);
+    }
+  }
+
+  async function open(sheet: AppSheet, objective?: string) {
+    if (!bridge) return;
+    setAppError(null);
+    try {
+      await openSheet(bridge, sheet, objective);
+    } catch (cause) {
+      setAppError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -55,9 +100,32 @@ export default function Page() {
       <div className="flex flex-col gap-5">
         <ThisNode network={network} error={networkError} loading={base === null} />
 
+        {restarting && (
+          <Note title="restarting the node">
+            Cairn.app is starting the node again with{" "}
+            <b className="text-ink">
+              {ROLES.find((r) => r.start.inApp?.role === restarting.role)?.title ?? restarting.role}
+            </b>{" "}
+            {restarting.on ? "on" : "off"}. This page comes back on its own.
+          </Note>
+        )}
+        {appError && (
+          <Note title="Cairn.app said no" tone="warn">
+            {appError}
+          </Note>
+        )}
+
         <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {ROLES.map((role) => (
-            <RoleCard key={role.id} role={role} on={role.declares ? declared.has(role.declares) : false} />
+            <RoleCard
+              key={role.id}
+              role={role}
+              on={role.declares ? declared.has(role.declares) : false}
+              bridge={bridge}
+              busy={restarting !== null}
+              onToggle={toggle}
+              onOpen={open}
+            />
           ))}
         </section>
 
@@ -67,6 +135,10 @@ export default function Page() {
           live={live}
           base={base ?? ""}
           origin={origin}
+          bridge={bridge}
+          busy={restarting !== null}
+          onShare={() => toggle("worker-host", true)}
+          onOpen={open}
         />
 
         <p className="text-[12px] text-ink-3">
@@ -142,8 +214,23 @@ function ThisNode({
   );
 }
 
-function RoleCard({ role, on }: { role: RoleInfo; on: boolean }) {
+function RoleCard({
+  role,
+  on,
+  bridge,
+  busy,
+  onToggle,
+  onOpen,
+}: {
+  role: RoleInfo;
+  on: boolean;
+  bridge: Bridge | null;
+  busy: boolean;
+  onToggle: (role: AppRole, on: boolean) => void;
+  onOpen: (sheet: AppSheet) => void;
+}) {
   const tone = role.pay === "paid" ? "accent" : role.pay === "bonded" ? "warn" : "neutral";
+  const inApp = bridge ? role.start.inApp : undefined;
   return (
     <article className="card card-pad flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -159,19 +246,51 @@ function RoleCard({ role, on }: { role: RoleInfo; on: boolean }) {
         <b className="font-medium text-ink-2">Risk.</b> {role.risk}
       </p>
       <div className="mt-auto flex flex-col gap-1.5 pt-1 text-[12px]">
-        {role.start.app && (
-          <div className="text-ink-2">
-            <span className="text-ink-3">In Cairn.app: </span>
-            {role.start.app}
+        {inApp ? (
+          <div className="flex flex-wrap items-center gap-2">
+            {inApp.open && (
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                onClick={() => onOpen(inApp.open!.sheet)}
+                disabled={busy}
+              >
+                {inApp.open.label}
+              </button>
+            )}
+            {inApp.role && (
+              <button
+                type="button"
+                className={inApp.open ? "btn btn-sm" : on ? "btn btn-sm" : "btn btn-primary btn-sm"}
+                onClick={() => onToggle(inApp.role!, !on)}
+                disabled={busy}
+                title={
+                  on
+                    ? "Turns this role off and restarts the node"
+                    : "Turns this role on and restarts the node; Cairn.app asks first"
+                }
+              >
+                {on ? ROLE_TOGGLE[inApp.role].on : ROLE_TOGGLE[inApp.role].off}
+              </button>
+            )}
           </div>
-        )}
-        {role.start.cli && (
-          <div className="relative">
-            <pre className="code pr-9 text-[11.5px]">{role.start.cli}</pre>
-            <div className="absolute top-1.5 right-1.5">
-              <CopyButton value={role.start.cli} />
-            </div>
-          </div>
+        ) : (
+          <>
+            {role.start.app && (
+              <div className="text-ink-2">
+                <span className="text-ink-3">In Cairn.app: </span>
+                {role.start.app}
+              </div>
+            )}
+            {role.start.cli && (
+              <div className="relative">
+                <pre className="code pr-9 text-[11.5px]">{role.start.cli}</pre>
+                <div className="absolute top-1.5 right-1.5">
+                  <CopyButton value={role.start.cli} />
+                </div>
+              </div>
+            )}
+          </>
         )}
         {role.start.page && (
           <Link href={role.start.page.href} className="text-accent hover:underline">
@@ -185,7 +304,8 @@ function RoleCard({ role, on }: { role: RoleInfo; on: boolean }) {
 
 /**
  * The second-machine walkthrough: is this node reachable from the LAN, and
- * if so, the exact `cairn work` line for the objective picked here.
+ * if so, what that machine does to join -- in its own Cairn.app, or with
+ * the exact `cairn work` line for the objective picked here.
  */
 function AddMachine({
   network,
@@ -193,12 +313,20 @@ function AddMachine({
   live,
   base,
   origin,
+  bridge,
+  busy,
+  onShare,
+  onOpen,
 }: {
   network: NetworkResponse | null;
   objectives: Objective[];
   live: boolean;
   base: string;
   origin: string;
+  bridge: Bridge | null;
+  busy: boolean;
+  onShare: () => void;
+  onOpen: (sheet: AppSheet, objective?: string) => void;
 }) {
   const lan = lanState(network?.node.reach, base || origin);
   const [objective, setObjective] = useState<string>("");
@@ -226,11 +354,26 @@ function AddMachine({
       <div className="flex flex-col gap-4 text-[13px]">
         {lan.state === "local" ? (
           <Note title="only this computer can reach this node" tone="warn">
-            Another machine cannot connect until the node listens on your network. In Cairn.app:
-            Settings ▸ Roles ▸ <b>Worker host</b> (or Network ▸ Share this node on my network), then
-            restart the node. From a terminal:{" "}
-            <code className="mono">cairn run --serve 0.0.0.0:8080</code>. Anyone on that network
-            can then read the log and post answers; nobody can change what has settled.
+            Another machine cannot connect until the node listens on your network.{" "}
+            {bridge ? (
+              <>
+                Anyone on that network can then read the log and post answers; nobody can
+                change what has settled.
+                <div className="mt-2">
+                  <button type="button" className="btn btn-primary btn-sm" onClick={onShare} disabled={busy}>
+                    Share this node on my network
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                In Cairn.app: Contribute ▸ <b>Share this node on my network</b> (or Settings ▸
+                Roles ▸ Worker host), then restart the node. From a terminal:{" "}
+                <code className="mono">cairn run --serve 0.0.0.0:8080</code>. Anyone on that
+                network can then read the log and post answers; nobody can change what has
+                settled.
+              </>
+            )}
           </Note>
         ) : lan.state === "unknown" ? (
           <Note title="this node does not say where it can be reached" tone="warn">
@@ -242,9 +385,10 @@ function AddMachine({
 
         <ol className="flex flex-col gap-3">
           <li>
-            <b className="text-ink">1. Put cairn on the other machine.</b>{" "}
+            <b className="text-ink">1. Put Cairn on the other machine.</b>{" "}
             <span className="text-ink-2">
-              With internet: the install line on the Overview. Without: copy the{" "}
+              A Mac: install Cairn from the same disk image, which brings Cairn.app. Anything
+              else, with internet: the install line on the Overview. Without: copy the{" "}
               <code className="mono">cairn</code> binary across — it is one file with nothing to
               install beside it.
             </span>
@@ -311,24 +455,55 @@ function AddMachine({
             </div>
           </li>
           <li className="flex flex-col gap-2">
-            <b className="text-ink">3. Run this on it.</b>
-            <div className="relative">
-              <pre className="code pr-9 text-[11.5px]">{command}</pre>
-              <div className="absolute top-2 right-2">
-                <CopyButton value={command} />
+            <b className="text-ink">3. Start it there.</b>
+            {bridge ? (
+              <>
+                <span className="text-[12.5px] text-ink-2">
+                  In Cairn.app on that machine: <b className="text-ink">Contribute ▸ Work on this
+                  Mac…</b>, with the node address and the objective above, its name, and the
+                  solver chosen on that machine. To try the solver here first:
+                </span>
+                <div>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => onOpen("work", objective || undefined)}
+                    disabled={busy}
+                  >
+                    Work on this Mac…
+                  </button>
+                </div>
+                <details className="text-[12.5px] text-ink-2">
+                  <summary className="cursor-pointer text-ink-3">
+                    Without Cairn.app on that machine (Linux, a rented GPU)
+                  </summary>
+                  <div className="relative mt-2">
+                    <pre className="code pr-9 text-[11.5px]">{command}</pre>
+                    <div className="absolute top-2 right-2">
+                      <CopyButton value={command} />
+                    </div>
+                  </div>
+                </details>
+              </>
+            ) : (
+              <div className="relative">
+                <pre className="code pr-9 text-[11.5px]">{command}</pre>
+                <div className="absolute top-2 right-2">
+                  <CopyButton value={command} />
+                </div>
               </div>
-            </div>
+            )}
             <span className="text-[12.5px] text-ink-2">
               Each round the solver gets its slice of the work as JSON on stdin and prints
-              candidate answers, one JSON object per line. <code className="mono">cairn work</code>{" "}
-              commits them, reveals them after the epoch turns, and reports in so the machine shows
-              as <i>working now</i> on the challenge page. The checker decides what is paid.
+              candidate answers, one JSON object per line. The worker commits them, reveals them
+              after the epoch turns, and reports in so the machine shows as <i>working now</i> on
+              the challenge page. The checker decides what is paid.
               {leader ? (
                 <>
                   {" "}
-                  This node leads a fleet, so the command names it as the submitter: the node
-                  signs each machine&rsquo;s records and is paid for them, while each machine keeps
-                  its own slice and its own line on the roster.
+                  This node leads a fleet, so a machine on its network names it as the
+                  submitter: the node signs each machine&rsquo;s records and is paid for them,
+                  while each machine keeps its own slice and its own line on the roster.
                 </>
               ) : (
                 <> Each machine is paid under its own name.</>
@@ -339,9 +514,17 @@ function AddMachine({
 
         <div className="text-[12.5px] text-ink-2">
           <b className="text-ink">Working offline.</b> A network with no internet works the same:
-          start the node with <code className="mono">CAIRN_SEEDS=off</code> (Cairn.app: Settings ▸
-          Network ▸ Offline). Nodes on the same network find each other by their LAN beacon, and
-          workers only ever need the node&rsquo;s address.
+          {bridge ? (
+            <> Settings ▸ Network ▸ Offline.</>
+          ) : (
+            <>
+              {" "}
+              start the node with <code className="mono">CAIRN_SEEDS=off</code> (Cairn.app:
+              Settings ▸ Network ▸ Offline).
+            </>
+          )}{" "}
+          Nodes on the same network find each other by their LAN beacon, and workers only ever
+          need the node&rsquo;s address.
         </div>
 
         <div className="text-[12.5px] text-ink-2">

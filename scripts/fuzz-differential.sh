@@ -34,7 +34,8 @@ SEED="${2:-${FUZZ_SEED:-}}"
 
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$1" >&2; exit 1; }
 
-WORK=$(mktemp -d /tmp/pw-fuzz-XXXXXX)
+# Honour a spacious temporary volume when the system /tmp is full.
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/pw-fuzz-XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
 printf '\n\033[1m== %s random values, both implementations\033[0m\n' "$CASES"
