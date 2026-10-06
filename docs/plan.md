@@ -670,8 +670,10 @@ when it is done, and which of the repository's invariants it touches.
      the public DHT. A full iterative walk on `router.bittorrent.com` with
      every cairn seed down is the same client and is still not what CI proves.
    - still open: ECC2K-130 throughput measure (item 11 step 1). The orbit
-     index lives under the shard store and keeps both witnesses; it is not
-     on the swarm and it does not pay.
+     index lives under the shard store, keeps both witnesses, and reports a
+     name once two distinct bodies are stored. It is not on the swarm and it
+     does not pay. `CAIRN_DHT_STATIC=1` holds the Mainline announce key still
+     across epochs; the default key still rotates.
 4. Hybrid ML-DSA-65 on a claim, omitted when absent (item 6). Admission does
    not yet require it. SQIsign level 1 is a third signature on the same
    claim, also omitted when absent, and it does not replace ed25519.
