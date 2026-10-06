@@ -69,6 +69,14 @@ what they see.
 the deposit stay on the operator's node. See
 [design/deposit-grants.md](design/deposit-grants.md).
 
+Every tool also carries MCP `annotations`, which is what Claude Code, Codex,
+and OpenCode read to decide whether a call needs approval first. The
+read-only tools above (including `score_candidate` and `audit`) are marked
+`readOnlyHint`, so the scoring loop can run unattended; only `submit_claim`,
+`post_objective`, `set_secret`, and `request_upload_grant` are marked as
+writing. `score_candidate` and `audit` additionally carry `openWorldHint`,
+because they execute the funder's pinned checker as a subprocess.
+
 ## `submit_claim` is two calls, and that is the protocol showing through
 
 Commit–reveal is epoch-batched: a reveal must land in a strictly later epoch
