@@ -14,6 +14,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { GoogleSignIn } from "@/components/GoogleSignIn";
 import { NODE_URL } from "@/lib/objectives";
 
 export const ROUTES = [
@@ -137,6 +138,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             ))}
           </nav>
           <div className="flex flex-col gap-2 border-t border-edge px-3 py-3">
+            <GoogleSignIn />
             <button
               type="button"
               onClick={() => setPaletteOpen(true)}
@@ -168,6 +170,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
                 cairn
               </Link>
               <div className="ml-auto flex items-center gap-2">
+                <GoogleSignIn />
                 <NodeStatus />
                 <button
                   type="button"

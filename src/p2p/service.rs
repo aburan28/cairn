@@ -9,7 +9,7 @@ use super::peers::{self, PeerHintLimits, PeersReport};
 use super::pop::{PopLimits, PopReport};
 use super::proxy::Proxy;
 use super::session::{self, SessionError};
-use super::sync::{Peer, SyncError};
+use super::sync::{About, Peer, SyncError};
 use super::transport::{self, Connection, TransportError};
 use crate::gossip::{Candidate, Population};
 use crate::node::Node;
@@ -160,6 +160,14 @@ pub struct Service {
     hints: Mutex<std::collections::BTreeMap<String, Vec<super::dht::Holder>>>,
     /// Keys served that did not hash to the id asked for.
     bad_keys: std::sync::atomic::AtomicUsize,
+    /// What this node says it is in every hello. Set once the daemon knows
+    /// its roles and verifier kinds; `None` sends the old wire shape.
+    about: Mutex<Option<About>>,
+    /// What each peer last said it is, by the id its handshake proved. The
+    /// daemon moves it onto the sessions roster after a session succeeds;
+    /// kept here because the session runs inside this service and the
+    /// roster is the daemon's.
+    learned: Mutex<BTreeMap<PeerId, About>>,
 }
 
 impl Service {
@@ -185,6 +193,45 @@ impl Service {
             directory: Mutex::new(Directory::new(local)),
             hints: Mutex::new(std::collections::BTreeMap::new()),
             bad_keys: std::sync::atomic::AtomicUsize::new(0),
+            about: Mutex::new(None),
+            learned: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Say this in every hello from now on: the node's declared roles, the
+    /// verifier kinds it can run, its version. A declaration, carried to
+    /// peers so their rosters can show what this node offers.
+    pub fn set_about(&self, about: About) {
+        *self
+            .about
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(about);
+    }
+
+    fn about(&self) -> Option<About> {
+        self.about
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// What `peer` said it is in the hello of its last session with this
+    /// node, if it said anything. Taken, not copied: the daemon reads it
+    /// once per session, onto the roster, and a map that only grew would be
+    /// one more table bounded by nothing but the cost of a key.
+    pub fn take_about(&self, peer: &PeerId) -> Option<About> {
+        self.learned
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(peer)
+    }
+
+    fn learn(&self, peer: PeerId, about: Option<About>) {
+        if let Some(about) = about {
+            self.learned
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(peer, about);
         }
     }
 
@@ -944,7 +991,8 @@ impl Service {
     {
         let mut connection =
             transport::connect_through(&self.proxy, &endpoint.peer, endpoint.addr, &self.identity)?;
-        let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
+        let (_, wanted, said) = exchange_records_and_code(&mut connection, node, self.about())?;
+        self.learn(endpoint.peer.id(), said);
         self.exchange_dht_round(&mut connection, node, &wanted, Some(endpoint.addr))?;
         self.exchange_peer_hints_round(&mut connection, node)?;
         let settled: &Node = node;
@@ -981,7 +1029,8 @@ impl Service {
     pub fn dial_node_once(&self, endpoint: &Endpoint, node: &mut Node) -> Result<(), ServiceError> {
         let mut connection =
             transport::connect_through(&self.proxy, &endpoint.peer, endpoint.addr, &self.identity)?;
-        let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
+        let (_, wanted, said) = exchange_records_and_code(&mut connection, node, self.about())?;
+        self.learn(endpoint.peer.id(), said);
         self.exchange_dht_round(&mut connection, node, &wanted, Some(endpoint.addr))?;
         self.exchange_peer_hints_round(&mut connection, node)?;
         Ok(())
@@ -1039,7 +1088,8 @@ impl Service {
         if !self.allows(&remote) {
             return Err(ServiceError::NotAllowed(remote));
         }
-        let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
+        let (_, wanted, said) = exchange_records_and_code(&mut connection, node, self.about())?;
+        self.learn(remote, said);
         self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
         self.exchange_peer_hints_round(&mut connection, node)?;
         Ok(remote)
@@ -1080,7 +1130,8 @@ impl Service {
         if !self.allows(&remote) {
             return Err(ServiceError::NotAllowed(remote));
         }
-        let (_, wanted) = exchange_records_and_code(&mut connection, node)?;
+        let (_, wanted, said) = exchange_records_and_code(&mut connection, node, self.about())?;
+        self.learn(remote, said);
         self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
         self.exchange_peer_hints_round(&mut connection, node)?;
         let settled: &Node = node;
@@ -1243,9 +1294,10 @@ impl Service {
 fn exchange_records_and_code(
     connection: &mut Connection,
     node: &mut Node,
-) -> Result<(CodeReport, BTreeSet<String>), ServiceError> {
+    about: Option<About>,
+) -> Result<(CodeReport, BTreeSet<String>, Option<About>), ServiceError> {
     let mut peer = records_from_node(node);
-    session::reconcile(connection, &mut peer, decode_record)?;
+    let said = session::reconcile_with(connection, &mut peer, about.as_ref(), decode_record)?;
     let needs = needed_code(node, &peer);
     let store = node.registry().blobs().clone();
     let code = session::reconcile_code(connection, &store, &needs, CodeLimits::default());
@@ -1254,7 +1306,7 @@ fn exchange_records_and_code(
     // work this node accepted; a claim whose checker is still missing simply
     // records `Unavailable`, which is the truth and leaves the objective open.
     apply_records(node, &peer);
-    code.map(|report| (report, needs)).map_err(Into::into)
+    code.map(|report| (report, needs, said)).map_err(Into::into)
 }
 
 /// The content addresses this node will need once `peer`'s objectives are

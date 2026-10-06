@@ -40,6 +40,10 @@ record instead.
 | `GET /chain` | the epoch chain: `links` and `head` are the chain's, `height` and `ledger_head` are the ledger's — the units a checkpoint signs, and not interchangeable with the first two |
 | `GET /chain.html` | the same, as a page with no build step |
 | `GET /health` | liveness, for whatever is watching the process |
+| `GET /auth` | whether Google sign-in is configured, and whether this browser has a session. Always answers. `required` is false and `anonymous_ok` is true. See [Optional Google sign-in](#optional-google-sign-in) |
+| `GET /auth/google` | start a Google sign-in, when it is configured. Otherwise 404, and the node is unchanged |
+| `GET /auth/google/callback` | Google's redirect back. Sets a session cookie and sends the browser to `next`, or `/ui/` |
+| `POST /auth/logout` | clear the session cookie. Signed out is anonymous, which is a working state |
 | `GET /verifiers` | what this node can verify right now: every kind, the toolchain behind it (`lean`, `python3`) with where each resolved on this process's `PATH`, its version, the root the operator granted its jail (`granted_root`), and for `python3` a `problem` when what was found cannot run in the jail (a version-manager shim), the jail mechanism and whether `CAIRN_REQUIRE_SANDBOX` is set, and the kinds split into `servable` and `unservable` with a reason for each of the latter. A report about the node, never about an artifact: an unservable kind still answers `unavailable`, not `reject`. Cairn.app's Settings reads it |
 | `GET /` (and `/index`) | what this node is and every route it answers, including the ones it has disabled |
 | `GET /peers` | the `peer` records in this log — **known** peers, not open connections |
@@ -62,6 +66,44 @@ record instead.
 | `PUT /deposit/upload/{grant_id}` | proxy redemption of a grant (file backend, or curl-to-S3 fallback) |
 
 Everything except `/log` is a convenience. `/log` is the product.
+
+## Optional Google sign-in
+
+A browser can sign in with Google. It does not have to, and a node does not
+have to offer it.
+
+Leave `CAIRN_GOOGLE_CLIENT_ID` unset — that is the default — and the node is
+anonymous. `GET /auth` says so. Every other route answers exactly as it does
+with the variable set and no cookie. Signing in does not write the log, does
+not make a submitter, and does not admit a fleet member. A cairn identity is
+still an ed25519 key. The Google subject is a label on a cookie.
+
+To offer it, create an OAuth client in Google Cloud (a web client), and set:
+
+```sh
+export CAIRN_GOOGLE_CLIENT_ID='123-abc.apps.googleusercontent.com'
+export CAIRN_PUBLIC_URL='https://cairn.example'   # or CAIRN_GOOGLE_REDIRECT_URI
+cairn secret set GOOGLE_CLIENT_SECRET             # omit for a public PKCE client
+```
+
+The redirect Google has registered must be
+`https://cairn.example/auth/google/callback` (or
+`http://127.0.0.1:<port>/auth/google/callback` on a machine you are sitting
+at). Plaintext HTTP on a public hostname is refused: the authorization code
+would be on the wire. Terminate TLS at the reverse proxy, which is where TLS
+belongs — this binary does not link a TLS stack, and the one HTTPS call, to
+Google's token and userinfo URLs, is `curl`.
+
+The cookie is HttpOnly, SameSite=Lax, and HMAC-SHA256 under a key created at
+`google_session_key` in the secrets directory. It lasts fourteen days. There
+is no account table. Deleting that file signs everyone out. `POST /auth/logout`
+clears the cookie for one browser.
+
+The embedded reader shows **Sign in with Google** only when the page was
+served by the node (`/ui/`) and sign-in is configured. A session is a
+same-origin cookie, so the public site cannot hold one for a node on another
+origin, and it does not pretend to. A node with no route to Google still
+serves; the callback is the request that fails.
 
 `GET /` is the one to hit first against an unfamiliar node: it names the version
 and every route, and marks `POST /submit` and `GET /ui/` as disabled when this
@@ -150,7 +192,14 @@ close -- not a held connection, so "connected" is a window: a peer is
 within thirty, `lost` after that, and `unreached` if this node has only ever
 failed to dial it. Each row carries the address of the last session, which
 way it ran, how many sessions succeeded in each direction, the last error,
-and this node's ledger length afterwards. Beside the rows: `address_book`
+this node's ledger length afterwards, and `about`: what the peer said it is
+in the hello of that session -- its declared roles (`CAIRN_ROLES`), the
+verifier kinds its machine can run, and its version. That is the peer's
+word, with exactly the standing of this node's own `node.roles` on
+`/network`: a hint about intent, never a permission and never checked. A
+peer running a version older than the field is `null` there, not "no
+roles", because it never said. The reader's Network page shows it in the
+sessions table under *Says it is*. Beside the rows: `address_book`
 (endpoints this node could dial now, and signed hints it has learned),
 `this_node` (its transport id, listen address and uptime, with `external` —
 what its router said about forwarding the p2p port, a claim — and

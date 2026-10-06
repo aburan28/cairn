@@ -1,0 +1,45 @@
+name: seed-pod
+
+# The cheap CPU seed. The test job rents nothing. The launch job does,
+# and it keeps billing until someone runs launch/runpod-seed/down.sh,
+# so it is manual and it is not on the push path.
+on:
+  pull_request:
+    paths:
+      - "launch/runpod-seed/**"
+      - ".github/workflows/seed-pod.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: the launcher refuses a GPU and a missing key
+        run: python3 launch/runpod-seed/test_spec.py
+
+  launch:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: rent the CPU pod
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
+          DUCKDNS_SUBDOMAIN: ${{ secrets.DUCKDNS_SUBDOMAIN }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+          DDNS_HOST: ${{ secrets.DDNS_HOST }}
+          BUNNY_ACCESS_KEY: ${{ secrets.BUNNY_ACCESS_KEY }}
+          BUNNY_ZONE_ID: ${{ secrets.BUNNY_ZONE_ID }}
+          BUNNY_RECORD_NAME: ${{ secrets.BUNNY_RECORD_NAME }}
+          DDNS_UPDATE_URL: ${{ secrets.DDNS_UPDATE_URL }}
+          CAIRN_SEED_CLOUD: ${{ vars.CAIRN_SEED_CLOUD }}
+          CAIRN_SEED_MAX_USD_PER_HOUR: ${{ vars.CAIRN_SEED_MAX_USD_PER_HOUR }}
+          CAIRN_SEED_INTERRUPTIBLE: ${{ vars.CAIRN_SEED_INTERRUPTIBLE }}
+        run: python3 launch/runpod-seed/create.py

@@ -721,6 +721,9 @@ fn bind_http(
             .accepting_into(queue)
             .with_max_queued(config.max_queued);
     }
+    // Optional, and a no-op when nothing is configured. A bad client id is a
+    // line on stderr, not a node that refuses to publish.
+    serving = serving.enable_google_from_env();
     // Before the loops start, for the reason the bind is here: a node whose
     // HTTP half cannot read the log is one that answers 500 to every request
     // while the p2p half beside it works perfectly.
@@ -1067,21 +1070,54 @@ pub fn run(config: Config) -> Result<(), String> {
     // What the operator declared this node for, said once at startup like
     // the verifiers are. The HTTP half refuses an unknown role before this
     // point; a node with no HTTP half only ever publishes roles to its log.
-    match crate::network::Roles::from_env() {
-        Ok(roles) if roles.is_empty() => log::info!(
-            "roles: none declared ({} is unset); GET /network says so",
-            crate::network::ROLES_ENV
-        ),
-        Ok(roles) => log::info!(
-            "roles: declared {}",
+    let declared = match crate::network::Roles::from_env() {
+        Ok(roles) if roles.is_empty() => {
+            log::info!(
+                "roles: none declared ({} is unset); GET /network says so",
+                crate::network::ROLES_ENV
+            );
             roles
-                .iter()
-                .map(|role| role.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Err(error) => log::warn!("roles: {error}"),
-    }
+        }
+        Ok(roles) => {
+            log::info!(
+                "roles: declared {}",
+                roles
+                    .iter()
+                    .map(|role| role.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            roles
+        }
+        Err(error) => {
+            log::warn!("roles: {error}");
+            crate::network::Roles::default()
+        }
+    };
+    // The same two facts, said to every peer in this node's hello, so their
+    // rosters can show what this node offers (`GET /sessions`, `about`). A
+    // declaration there as here: a peer that reads `verifier` has been told,
+    // not shown.
+    service.set_about(crate::p2p::sync::About {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        roles: declared
+            .iter()
+            .map(|role| role.as_str().to_string())
+            .collect(),
+        verifiers: node
+            .registry()
+            .readiness()
+            .get("servable")
+            .and_then(crate::canonical::Value::as_array)
+            .map(|kinds| {
+                kinds
+                    .iter()
+                    .filter_map(crate::canonical::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    });
 
     let registry = node.registry().clone();
     let state = Arc::new(Mutex::new(State {
@@ -1254,16 +1290,20 @@ pub fn run(config: Config) -> Result<(), String> {
                         peer_id_string(&remote),
                         node.ledger().len()
                     );
-                    let _ = accept_sessions
+                    let mut roster = accept_sessions
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .succeeded(
-                            remote,
-                            Some(remote_addr),
-                            Direction::Inbound,
-                            node.ledger().len(),
-                            crate::time::unix_seconds(),
-                        );
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let _ = roster.succeeded(
+                        remote,
+                        Some(remote_addr),
+                        Direction::Inbound,
+                        node.ledger().len(),
+                        crate::time::unix_seconds(),
+                    );
+                    if let Some(about) = accept_service.take_about(&remote) {
+                        roster.learned(remote, about);
+                    }
+                    drop(roster);
                     persist(
                         &guard,
                         &accept_checkpoint,
@@ -1512,16 +1552,20 @@ pub fn run(config: Config) -> Result<(), String> {
                         peer_id_string(&endpoint.peer.id()),
                         node.ledger().len()
                     );
-                    let _ = sessions
+                    let mut roster = sessions
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .succeeded(
-                            endpoint.peer.id(),
-                            Some(endpoint.addr),
-                            Direction::Outbound,
-                            node.ledger().len(),
-                            crate::time::unix_seconds(),
-                        );
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let _ = roster.succeeded(
+                        endpoint.peer.id(),
+                        Some(endpoint.addr),
+                        Direction::Outbound,
+                        node.ledger().len(),
+                        crate::time::unix_seconds(),
+                    );
+                    if let Some(about) = service.take_about(&endpoint.peer.id()) {
+                        roster.learned(endpoint.peer.id(), about);
+                    }
+                    drop(roster);
                     persist(
                         &guard,
                         &config.checkpoint,

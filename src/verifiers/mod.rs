@@ -870,11 +870,16 @@ fn lean_replay_verdict(
                     with("axioms", listed),
                 );
             }
-            let refused = axioms.iter().find(|name| {
-                !(allowed.iter().any(|a| a == *name)
-                    || pinned.iter().any(|a| a == *name)
-                    || (allow_native_decide && is_native_decide_axiom(name)))
-            });
+            // An axiom is fine when the objective allows it, the pinned
+            // statement already depends on it, or it is the one `decide`
+            // adds and the objective permits that. Spelled as what passes,
+            // which is how the rule reads and what clippy wants of it.
+            let permitted = |name: &str| {
+                allowed.iter().any(|a| a == name)
+                    || pinned.iter().any(|a| a == name)
+                    || (allow_native_decide && is_native_decide_axiom(name))
+            };
+            let refused = axioms.iter().find(|name| !permitted(name));
             match refused {
                 Some(axiom) => Verdict::new(
                     Status::Reject,

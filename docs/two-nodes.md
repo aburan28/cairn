@@ -26,21 +26,21 @@ section.
   loopback and its status line says *Listening on this Mac only* while it is.
   macOS asks for local-network permission the first time a node binds past
   loopback, and a refusal there looks like silence.
-- **The published seed may be down.** The seed list compiled into the binary
-  names one seed (`us-west`, `44.251.117.84:9000`). As of 2026-10-04 it
-  answers nothing: the site's mirror job (`.github/workflows/node-sync.yml`)
-  has been red on every five-minute run, and from a GitHub runner `curl
-  http://44.251.117.84:8080/health` times out. A node still starts without it
-  and says `seeds: us-west at 44.251.117.84:9000 did not hand over its key`
-  once a minute; `CAIRN_SEEDS=off` silences that for a test that does not
-  need it. Check it yourself from either machine:
+- **The published seed is the Runpod CPU pod.** `launch/seeds.json` names
+  `runpod` at `103.196.86.88:19812`. On 2026-10-05 a second node dialed
+  that address and the seed handed over the key the entry names. Check it
+  from either machine:
 
   ```sh
-  nc -vz 44.251.117.84 9000
+  curl -fsS http://103.196.86.88:19813/health
+  nc -vz 103.196.86.88 19812
   ```
 
-  A seed that is down *drops* rather than refuses, so this takes a few seconds
-  to say so. Bringing it back is the last section.
+  The first should print `ok`. The second should connect. Binaries built
+  before this change still dial an older address. `CAIRN_SEEDS=off` still
+  silences seed dials for a test that does not need them. A reset of the
+  pod changes the mapped port and the peer id; publishing again is the
+  last section.
 
 Everything below reads the node's own answer at `GET /sessions` (and the
 Network page, `/ui/network`, which renders the same). Two fields matter:
@@ -196,7 +196,10 @@ inbound in whatever stands in front of it, and a published key.
 [p2p.md](p2p.md), *Running a seed on a public host*, covers the three ways a
 cloud instance breaks the loopback assumptions. [`launch/seed.service`](../launch/seed.service)
 is a systemd unit that keeps one up across reboots and crashes, which is the
-difference between a seed and a shell window somebody closed. To publish it so
+difference between a seed and a shell window somebody closed. A Runpod CPU
+pod sized for the same job, with a hostname that follows the pod when its
+address changes, is [launch/runpod-seed/README.md](../launch/runpod-seed/README.md).
+To publish it so
 every build finds it, `cairn seeds publish` as above and open a pull request
 adding the key file and the entry ([launch/seeds/README.md](../launch/seeds/README.md)).
 

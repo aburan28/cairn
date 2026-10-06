@@ -5,12 +5,12 @@
   "key_files": "seeds/<transport>.key, relative to this file: the hex transport public key, 522240 characters. The file is named by the sha256 of the bytes it decodes to, so `cairn seeds` checks the name against the content and refuses a mismatch.",
   "seeds": [
     {
-      "name": "us-west",
-      "addr": "44.251.117.84:9000",
-      "transport": "28706a3accf6dd86a22e56ba30b9d2e8727ec20a741cdb50a9baf32d848a1996",
+      "name": "runpod",
+      "addr": "103.196.86.88:19812",
+      "transport": "ecbf76c7eb91b9c075e19b23630b05b8b26077c052f8ff76b69fe224c9d9dee9",
       "http": "https://aburan28.github.io/cairn/node",
       "operator": "the repository maintainer",
-      "note": "Key published by `cairn seeds publish` on the seed host and added by pull request; the file beside this list is named for the sha256 of its bytes and `cairn seeds resolve` re-derives that id before writing a bootstrap file. p2p dials addr directly and the handshake decides who answered. The http half is a mirror, not a live endpoint: the node serves plain HTTP and terminates no TLS by design, so workflows/node-sync.yml pulls its read endpoints every five minutes and re-serves them under /node/ on this site. The site is therefore at most one interval behind, and the reader re-derives the log either way -- it is hash-linked and carries a signed checkpoint. While the node is down the site keeps the last copy; before the first sync it serves nothing under /node/ and the reader falls back to the bundled launch log, labeled as such."
+      "note": "Runpod CPU pod 0qf12swbexftjr, 2 vCPU cpu3g, quoted at $0.08/hour with no volume. On 2026-10-05 a second node dialed 103.196.86.88:19812 and the seed handed over the key named here. HTTP is on port 19813 and GET /health returned ok. The external ports are Runpod's mapping and change if the pod is reset; a reset also wipes the container disk, so the peer id would change and this entry would have to be published again. The http field stays the GitHub Pages mirror so a browser does not treat this node's empty log as the published snapshot. The handshake still decides who answered."
     }
   ]
 }

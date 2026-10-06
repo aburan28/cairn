@@ -9,7 +9,8 @@ import { type LogRecord, fetchLog } from "@/lib/log";
 import { type ProgressResponse, fetchProgress } from "@/lib/progress";
 import { isFollowing, onFollowingChange, setFollowing } from "@/lib/follow";
 import { goalSlug, objectiveTitle } from "@/lib/title";
-import { workCommand } from "@/lib/contribute";
+import { openSheet, workCommand } from "@/lib/contribute";
+import { type Bridge, appBridge } from "@/lib/draft";
 import { EventRow, shortActor } from "@/components/events";
 import {
   Badge,
@@ -752,9 +753,23 @@ function WorkOnThis({
   base: string | null;
 }) {
   const [tab, setTab] = useState<"worker" | "cli" | "mcp">(piecework ? "worker" : "cli");
+  // Inside Cairn.app the worker and the agent are a button each: the app
+  // runs `cairn work` and writes the agent's stanza, so the page has no
+  // reason to hand either to a terminal the window does not have.
+  const [bridge, setBridge] = useState<Bridge | null>(null);
+  const [appError, setAppError] = useState<string | null>(null);
+  useEffect(() => setBridge(appBridge()), []);
   const node = base || (typeof window !== "undefined" ? window.location.origin : "");
   const cli = cliCalls(id, mustCite);
   const calls = mcpCalls(id, mustCite);
+
+  function ask(sheet: "work" | "agents") {
+    if (!bridge) return;
+    setAppError(null);
+    openSheet(bridge, sheet, sheet === "work" ? id : undefined).catch((cause: unknown) => {
+      setAppError(cause instanceof Error ? cause.message : String(cause));
+    });
+  }
 
   return (
     <Box
@@ -826,7 +841,26 @@ function WorkOnThis({
                 </>
               )}
             </p>
-            <CodeBlock value={workCommand({ node, objective: id, worker: "" })} />
+            {bridge ? (
+              <>
+                <div>
+                  <button type="button" className="btn btn-primary btn-sm" onClick={() => ask("work")}>
+                    Work on this Mac…
+                  </button>
+                </div>
+                <details className="text-[12.5px] text-ink-2">
+                  <summary className="cursor-pointer text-ink-3">
+                    On another machine without Cairn.app
+                  </summary>
+                  <div className="mt-2">
+                    <CodeBlock value={workCommand({ node, objective: id, worker: "" })} />
+                  </div>
+                </details>
+              </>
+            ) : (
+              <CodeBlock value={workCommand({ node, objective: id, worker: "" })} />
+            )}
+            {appError && <p className="text-[12px] text-warn">{appError}</p>}
             <p className="text-[12px] text-ink-3">
               Another machine on your network needs this node shared there first:{" "}
               <Link href="/contribute" className="text-accent hover:underline">
@@ -850,7 +884,21 @@ function WorkOnThis({
               <span className="mono">get_objective → score_candidate → submit_claim</span>.{" "}
               The developer documentation has the other clients&rsquo; spellings.
             </p>
-            <CodeBlock value={MCP_STANZA} />
+            {bridge ? (
+              <>
+                <div>
+                  <button type="button" className="btn btn-primary btn-sm" onClick={() => ask("agents")}>
+                    Connect an agent…
+                  </button>
+                  <span className="ml-2 text-[12px] text-ink-3">
+                    Cairn.app writes the stanza with this Mac&rsquo;s real paths.
+                  </span>
+                </div>
+                {appError && <p className="text-[12px] text-warn">{appError}</p>}
+              </>
+            ) : (
+              <CodeBlock value={MCP_STANZA} />
+            )}
             <CodeBlock value={calls} />
           </>
         )}
