@@ -117,7 +117,14 @@ use crate::verifiers::VerifierRegistry;
 
 /// Protocol versions this server implements. The first is the default when a
 /// client asks for something unrecognised.
-const SUPPORTED_PROTOCOLS: &[&str] = &["2025-06-18", "2024-11-05"];
+///
+/// Four entries rather than one because the version is negotiated per
+/// connection: Claude Code, Codex and OpenCode each pin the newest version
+/// they shipped against, and answering "our newest" to a version we do not
+/// speak would be making one up. Echoing the client's version when it is in
+/// this list keeps an older client on its own dialect instead of forcing it
+/// onto ours.
+const SUPPORTED_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 const SERVER_NAME: &str = "cairn";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1091,10 +1098,34 @@ impl Server {
 
 // -- tools -----------------------------------------------------------------
 
+// Every definition carries MCP `annotations` alongside its schema, because
+// that is what Claude Code, Codex and OpenCode read to decide whether a tool
+// call needs the human's approval first. Without them every call -- including
+// the thousands of `score_candidate` invocations the tight loop is built from
+// -- lands in the same "ask first" bucket as the ones that move money, and
+// the fitness-function workflow the server exists for becomes a click-through
+// exercise.
+//
+// The read/write split follows the tools table in `docs/agents.md`: the six
+// readers that drain due settlements still say `readOnlyHint: true`, because
+// the batch such a call may materialise was fixed by the epoch beacon when
+// its reveal epoch closed -- whoever looks next merely writes down what was
+// already decided and cannot influence it. `score_candidate` and `audit` are
+// read-only but `openWorldHint: true`: with `rerun` (and always, for scoring)
+// they execute the funder's pinned checker as a subprocess, sandboxed but
+// still code this process did not write.
+
 fn tool_definitions() -> Json {
     json!([
         {
             "name": "score_candidate",
+            "title": "Score a candidate",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+            },
             "description":
                 "Run an objective's PINNED verifier against a candidate artifact and return its \
                  verdict. Read-only: nothing is recorded, nothing is paid, and this cannot fail \
@@ -1118,6 +1149,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "list_objectives",
+            "title": "List objectives",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Every objective in the log: id, statement, reward, verifier kind, and current \
                  frontier. Start here.",
@@ -1125,6 +1163,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "list_goals",
+            "title": "List goals",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "The objectives grouped by the problem they attack: every goal (the GOAL-<key> \
                  handle objectives carry), the angles taken on it (GOAL-<key>/<angle>, e.g. \
@@ -1134,6 +1179,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "find_goal",
+            "title": "Find goal",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Find the goal a phrase names -- 'ECC2K-130', 'ecc2k130', 'solve the Certicom \
                  challenge with index calculus' -- BEFORE posting an objective, so one problem \
@@ -1154,6 +1206,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "get_objective",
+            "title": "Get objective",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Full record for one objective: the verifier spec, the ratchet, and the \
                  artifact shape when the funder declared one. Both the statement and the \
@@ -1168,6 +1227,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "frontier_status",
+            "title": "Frontier status",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Best score so far, which claim holds it, and how much of the pool is left. If \
                  you improve on the frontier you MUST cite the claim that holds it -- that is \
@@ -1181,6 +1247,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "get_claim",
+            "title": "Get claim",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "One accepted claim: its submitter, what it cites, whether it settled and for \
                  how much, and the artifact itself. This is how you read the state of the art \
@@ -1200,6 +1273,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "submit_claim",
+            "title": "Submit claim",
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+            },
             "description":
                 "Commit and reveal a claim. Score it with score_candidate first: submitting \
                  something that does not pass wastes an entry and earns nothing. Cite the \
@@ -1241,6 +1321,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "post_objective",
+            "title": "Post objective",
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+            },
             "description":
                 "Fund a question: append an objective to this log. The record is the same \
                  shape `cairn post` reads -- goal, statement, verifier, reward, funder, \
@@ -1266,6 +1353,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "pending_reveals",
+            "title": "Pending reveals",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Your commitments still waiting on a reveal, with the epoch each becomes \
                  revealable in. Call after a restart or when unsure what you owe: a commitment \
@@ -1281,6 +1375,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "work_assignment",
+            "title": "Work assignment",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Which slice of the search space you should work this epoch. Needs no agreement \
                  with anyone: it is a pure function of public inputs, so you compute your own \
@@ -1308,6 +1409,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "audit",
+            "title": "Audit log",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+            },
             "description":
                 "Re-derive the whole log from the artifacts themselves and report every problem \
                  found. Empty output means the log verifies. Pass rerun: true to also re-run \
@@ -1325,6 +1433,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "set_secret",
+            "title": "Set secret",
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+            },
             "description":
                 "Store a named operator secret on this machine (AWS keys, a campaign DATABASE_URL, \
                  …) under ~/.cairn/secrets/. The value is written and never returned — agents log \
@@ -1354,12 +1469,26 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "list_secrets",
+            "title": "List secrets",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Names of operator secrets stored on this machine. Values are never returned.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "request_upload_grant",
+            "title": "Request upload grant",
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+            },
             "description":
                 "Ask this node for a short-lived, single-use right to upload one object into a \
                  named deposit (an S3 prefix, a local directory, …). The response has a grant id, \
@@ -3166,12 +3295,22 @@ mod tests {
     }
 
     #[test]
-    fn every_advertised_tool_has_a_schema_and_a_handler() {
+    fn every_advertised_tool_has_a_schema_a_handler_and_annotations() {
         let mut s = server();
         let line = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string();
         let r: Json = serde_json::from_str(&s.handle_line(&line).unwrap()).unwrap();
         let tools = r["result"]["tools"].as_array().unwrap();
         assert!(!tools.is_empty());
+        // Only these four append anything anywhere: the ledger for the first
+        // two, the operator's secret store and the deposit book for the rest.
+        // Everything else only reads, so a client can tell the tight scoring
+        // loop from the calls that move money without parsing prose.
+        let writers = [
+            "submit_claim",
+            "post_objective",
+            "set_secret",
+            "request_upload_grant",
+        ];
         for tool in tools {
             let name = tool["name"].as_str().unwrap();
             assert!(
@@ -3181,6 +3320,34 @@ mod tests {
             assert!(
                 tool["description"].as_str().unwrap().len() > 20,
                 "{name} needs a real description"
+            );
+            assert!(
+                !tool["title"].as_str().unwrap_or("").is_empty(),
+                "{name} needs a title for the client's tool picker"
+            );
+            // Claude Code, Codex and OpenCode read these to decide whether a
+            // call needs the human's approval first. A missing block puts the
+            // tool in the ask-first bucket by default.
+            for hint in [
+                "readOnlyHint",
+                "destructiveHint",
+                "idempotentHint",
+                "openWorldHint",
+            ] {
+                assert!(
+                    tool["annotations"][hint].is_boolean(),
+                    "{name} needs annotations.{hint} so clients can approve the scoring loop unattended"
+                );
+            }
+            assert_eq!(
+                tool["annotations"]["destructiveHint"],
+                json!(false),
+                "{name}: nothing here deletes, so nothing may claim to"
+            );
+            assert_eq!(
+                tool["annotations"]["readOnlyHint"] == json!(true),
+                !writers.contains(&name),
+                "{name} is on the wrong side of the read/write split"
             );
             // Dispatch must know it. An advertised tool that errors as unknown
             // is worse than one that is not advertised.
