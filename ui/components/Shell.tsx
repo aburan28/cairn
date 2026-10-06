@@ -33,10 +33,14 @@ export const ROUTES = [
 ] as const;
 
 /**
- * The sidebar, in three groups: what this node holds, what you can do to it,
- * and the explanation. `match` lists the routes that belong under an entry
- * without being it -- one objective, and its move history, are both
- * "Objectives".
+ * The sidebar is four places. Goals, the chain, the log, coordination,
+ * contribute and posting a challenge stay in `ROUTES`, so ⌘K still opens
+ * them, and the pages that need them link to them. A sidebar that listed
+ * every one of those sat beside Cairn.app's Node menu, which listed them
+ * again, and neither map was the one a person could hold in their head.
+ *
+ * `match` lists the routes that belong under an entry without being it --
+ * one objective, and its move history, are both "Objectives".
  */
 const NAV: {
   group: string;
@@ -44,32 +48,18 @@ const NAV: {
   items: { href: string; label: string; icon: React.ReactNode; match?: string[] }[];
 }[] = [
   {
-    group: "Node",
+    group: "",
     items: [
       { href: "/", label: "Overview", icon: <IconHome /> },
-      { href: "/network", label: "Network", icon: <IconNetwork />, match: ["/peers"] },
       {
         href: "/objectives",
         label: "Objectives",
         icon: <IconTarget />,
-        match: ["/challenge", "/frontier", "/task"],
+        match: ["/challenge", "/frontier", "/task", "/submit", "/goals"],
       },
-      { href: "/goals", label: "Goals", icon: <IconTarget /> },
-      { href: "/chain", label: "Chain", icon: <IconChain /> },
-      { href: "/log", label: "Log", icon: <IconList /> },
-      { href: "/coordination", label: "Coordination", icon: <IconCoordination /> },
+      { href: "/network", label: "Network", icon: <IconNetwork />, match: ["/peers", "/coordination"] },
+      { href: "/how-it-works", label: "How it works", icon: <IconBook />, match: ["/contribute"] },
     ],
-  },
-  {
-    group: "Take part",
-    items: [
-      { href: "/contribute", label: "Contribute", icon: <IconNetwork /> },
-      { href: "/submit", label: "Post a challenge", icon: <IconPlus /> },
-    ],
-  },
-  {
-    group: "Learn",
-    items: [{ href: "/how-it-works", label: "How it works", icon: <IconBook /> }],
   },
 ];
 
@@ -121,8 +111,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </Link>
           <nav aria-label="Primary" className="flex-1 overflow-y-auto px-3 pb-4">
             {NAV.map((section) => (
-              <div key={section.group}>
-                <div className="sidebar-group">{section.group}</div>
+              <div key={section.group || "primary"}>
+                {section.group ? <div className="sidebar-group">{section.group}</div> : null}
                 {section.items.map((item) => (
                   <Link
                     key={item.href}
@@ -542,22 +532,6 @@ function IconTarget() {
   );
 }
 
-function IconChain() {
-  return (
-    <Icon>
-      <path d="M6.5 9.5 9.5 6.5M7 4.5l1-1a2.5 2.5 0 0 1 3.5 3.5l-1 1M9 11.5l-1 1A2.5 2.5 0 0 1 4.5 9l1-1" />
-    </Icon>
-  );
-}
-
-function IconList() {
-  return (
-    <Icon>
-      <path d="M5.5 4h8M5.5 8h8M5.5 12h8M2.5 4h.01M2.5 8h.01M2.5 12h.01" />
-    </Icon>
-  );
-}
-
 function IconNetwork() {
   return (
     <Icon>
@@ -565,26 +539,6 @@ function IconNetwork() {
       <circle cx="3.5" cy="12" r="1.8" />
       <circle cx="12.5" cy="12" r="1.8" />
       <path d="M7 5l-2.5 5.3M9 5l2.5 5.3M5.3 12h5.4" />
-    </Icon>
-  );
-}
-
-function IconCoordination() {
-  return (
-    <Icon>
-      <rect x="2" y="4" width="12" height="3.5" rx="0.8" />
-      <path d="M5.5 4v3.5M9 4v3.5" />
-      <rect x="2" y="9.5" width="7" height="3" rx="0.8" />
-      <rect x="10.5" y="9.5" width="3.5" height="3" rx="0.8" />
-    </Icon>
-  );
-}
-
-function IconPlus() {
-  return (
-    <Icon>
-      <circle cx="8" cy="8" r="5.5" />
-      <path d="M8 5.5v5M5.5 8h5" />
     </Icon>
   );
 }

@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 import WebKit
 
-/// Owns the one web view, so the menu's Reload and the toolbar reach the same
-/// page the window shows.
+/// Owns the one web view, so the menu's Reload reaches the page the window
+/// shows.
 @MainActor
 final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
     let view: WKWebView
