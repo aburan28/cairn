@@ -859,9 +859,31 @@ pub fn run(config: Config) -> Result<(), String> {
     // was LAN-only. Read at startup so a named list that cannot be read is a
     // refusal here rather than a node that looks like a network that is down.
     let seed_source = seeds::Source::from_env();
-    let seed_list = seed_source
+    let mut seed_list = seed_source
         .load()
         .map_err(|e| format!("seeds ({}): {e}", seed_source.describe()))?;
+    // The list compiled into the binary is already stale the day a seed moves.
+    // Cairn.app never runs `make seeds`, so without this refresh a desktop
+    // node dials the dead address forever and the only repair is a file the
+    // person has to fetch by hand. The operator's own list (`CAIRN_SEEDS` a
+    // path, or `off`) is left alone: they already chose it.
+    if seed_source == seeds::Source::BuiltIn {
+        match seeds::fetch_published() {
+            Some(published) => {
+                let before = seed_list.seeds.len();
+                seed_list = seeds::merge(seed_list, published);
+                let added = seed_list.seeds.len() - before;
+                if added > 0 {
+                    log::info!(
+                        "seeds: published list added {added} seed(s) that this binary was not built with"
+                    );
+                }
+            }
+            None => log::warn!(
+                "seeds: published list not read; dialling the list compiled into this binary"
+            ),
+        }
+    }
     for skipped in &seed_list.skipped {
         log::warn!("seeds: skipping {}: {}", skipped.name, skipped.why);
     }
