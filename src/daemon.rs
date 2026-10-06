@@ -721,6 +721,9 @@ fn bind_http(
             .accepting_into(queue)
             .with_max_queued(config.max_queued);
     }
+    // Optional, and a no-op when nothing is configured. A bad client id is a
+    // line on stderr, not a node that refuses to publish.
+    serving = serving.enable_google_from_env();
     // Before the loops start, for the reason the bind is here: a node whose
     // HTTP half cannot read the log is one that answers 500 to every request
     // while the p2p half beside it works perfectly.
