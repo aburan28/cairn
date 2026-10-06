@@ -192,7 +192,14 @@ close -- not a held connection, so "connected" is a window: a peer is
 within thirty, `lost` after that, and `unreached` if this node has only ever
 failed to dial it. Each row carries the address of the last session, which
 way it ran, how many sessions succeeded in each direction, the last error,
-and this node's ledger length afterwards. Beside the rows: `address_book`
+this node's ledger length afterwards, and `about`: what the peer said it is
+in the hello of that session -- its declared roles (`CAIRN_ROLES`), the
+verifier kinds its machine can run, and its version. That is the peer's
+word, with exactly the standing of this node's own `node.roles` on
+`/network`: a hint about intent, never a permission and never checked. A
+peer running a version older than the field is `null` there, not "no
+roles", because it never said. The reader's Network page shows it in the
+sessions table under *Says it is*. Beside the rows: `address_book`
 (endpoints this node could dial now, and signed hints it has learned),
 `this_node` (its transport id, listen address and uptime, with `external` —
 what its router said about forwarding the p2p port, a claim — and

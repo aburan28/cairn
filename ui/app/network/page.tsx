@@ -6,6 +6,7 @@ import {
   type FleetWorker,
   type HostRow,
   type NetworkResponse,
+  type PeerAbout,
   type Session,
   type SessionsResponse,
   NODE_URL,
@@ -941,6 +942,9 @@ function SessionsTable({
             <th className="px-3 py-2 text-right font-medium">In / out</th>
             <th className="px-3 py-2 text-right font-medium">Failures</th>
             <th className="px-3 py-2 text-right font-medium">Entries after</th>
+            <th className="px-3 py-2 font-medium" title="What the peer said it is in its last hello: declared, not checked">
+              Says it is
+            </th>
             <th className="px-4 py-2 font-medium">Last error</th>
           </tr>
         </thead>
@@ -986,10 +990,60 @@ function SessionLine({ peer }: { peer: Session }) {
       </td>
       <td className="mono px-3 py-2.5 text-right text-ink-2">{peer.failures}</td>
       <td className="mono px-3 py-2.5 text-right text-ink-2">{peer.entries_after ?? "—"}</td>
+      <td className="px-3 py-2.5">
+        <PeerOffers about={peer.about} />
+      </td>
       <td className="px-4 py-2.5 text-[11.5px] text-ink-3" title={peer.last_failed_at ?? undefined}>
         {peer.last_error ?? "—"}
       </td>
     </tr>
+  );
+}
+
+/**
+ * What a peer declared in its hello: roles as badges, the verifier kinds it
+ * can run, and its version. All three are the peer's word, so the badges
+ * carry the same "declared" title this node's own roles do above, and a
+ * peer that said nothing -- one older than the field -- shows a dash
+ * rather than "none", which would be a claim it never made.
+ */
+function PeerOffers({ about }: { about: PeerAbout | null | undefined }) {
+  if (!about) {
+    return (
+      <span className="text-ink-3" title="This peer runs a version that says nothing about itself">
+        —
+      </span>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-1 text-[11.5px]">
+      <div className="flex flex-wrap gap-1">
+        {about.roles.length === 0 ? (
+          <span className="text-ink-3" title="It declared no role">no role declared</span>
+        ) : (
+          about.roles.map((role) => (
+            <Badge key={role} tone="accent" title="Declared by that node in its hello, not checked">
+              {role}
+            </Badge>
+          ))
+        )}
+      </div>
+      <div className="text-ink-3">
+        {about.verifiers.length ? (
+          <>
+            checks <span className="text-ink-2">{about.verifiers.join(", ")}</span>
+          </>
+        ) : (
+          "runs no verifier kind"
+        )}
+        {about.version && (
+          <>
+            {" · "}
+            <span className="mono">{about.version}</span>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 

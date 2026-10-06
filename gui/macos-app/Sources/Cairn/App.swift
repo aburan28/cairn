@@ -37,6 +37,8 @@ struct CairnApp: App {
                     .disabled(delegate.node.isAttached)
                 Button("Connect an Agent…") { delegate.node.presentAgents = true }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
+                Button("Work on This Mac…") { delegate.node.work() }
+                    .keyboardShortcut("w", modifiers: [.command, .shift])
                 Button("Secrets…") { delegate.node.presentSecrets = true }
                 Button("Peers…") { delegate.node.presentPeers = true }
                 Button("Test Connectivity…") { delegate.node.presentConnectivity = true }
@@ -69,6 +71,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         browser.onDraftChallenge = { [node] brief in node.draftChallenge(fromPage: brief) }
+        browser.onSetRole = { [node] role, on in node.setRole(fromPage: role, on: on) }
+        browser.onOpen = { [node] sheet, objective in
+            // Settings is a scene of the app, not a sheet of the window.
+            if sheet == .settings {
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                return nil
+            }
+            return node.open(fromPage: sheet, objective: objective)
+        }
         // A node the person asked to keep running is a launchd agent; make
         // sure it is loaded, then attach to it instead of spawning one.
         node.ensureBackgroundService()
@@ -82,6 +93,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // The worker first: it is talking to the node, and a node that goes
+        // mid-round leaves it a refusal to print rather than a last word.
+        node.worker.stop()
         node.stop()
     }
 
@@ -142,6 +156,10 @@ struct ContentView: View {
                         Label("Agent", systemImage: "terminal")
                     }
                     .help("Point Claude Code, Codex or OpenCode at this node over MCP")
+                    Button { node.work() } label: {
+                        Label("Work", systemImage: "cpu")
+                    }
+                    .help("Put this Mac to work on an objective with your own solver")
                     Button { browser.reload() } label: { Label("Reload", systemImage: "arrow.clockwise") }
                         .help("Reload the page")
                     Button { NSWorkspace.shared.open(url) } label: { Label("Open in Browser", systemImage: "safari") }
@@ -172,6 +190,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $node.presentAgents) {
             AgentsSheet(node: node, isPresented: $node.presentAgents)
+        }
+        .sheet(isPresented: $node.presentWork) {
+            WorkSheet(node: node, worker: node.worker, isPresented: $node.presentWork)
         }
     }
 }
