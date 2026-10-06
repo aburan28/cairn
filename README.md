@@ -1079,6 +1079,7 @@ five a user reaches for first:
 
 The design, in the order the ideas depend on each other:
 
+- [whitepaper.md](docs/whitepaper.md) — the system as one paper: what it settles, what it refuses to pay for, and what is still open
 - [diagrams.md](docs/diagrams.md) — architecture and detailed design, drawn from the code
 - [architecture.md](docs/architecture.md) — the full design and which work shapes fit
 - [verification.md](docs/verification.md) — the verification ladder; authoring verifiers
