@@ -14,6 +14,11 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     /// What to do when the reader's Post a challenge page hands over a
     /// description: open New Challenge… with it, or return why not.
     var onDraftChallenge: (@MainActor (String) -> String?)?
+    /// The Contribute page turning a role on or off, once the person has
+    /// confirmed it natively: apply it and restart the node, or say why not.
+    var onSetRole: (@MainActor (PageRole, Bool) -> String?)?
+    /// A page opening one of the app's sheets, on an objective or not.
+    var onOpen: (@MainActor (PageSheet, String?) -> String?)?
     let pageDictation = PageDictation()
     fileprivate var pageDictationActive = false
     private let bridge: PageBridge
@@ -36,9 +41,16 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     }
 
     func show(_ url: URL) {
+        let shown = view.url
         nodeHost = url.host
         nodePort = url.port
-        if view.url?.host != url.host || view.url?.port != url.port || view.url?.path != url.path {
+        // The same node, back from a restart: reload the page the person was
+        // on rather than sending them to the overview. Turning a role on
+        // from the Contribute page restarts the node, and coming back to a
+        // different page than the one with the button read as a failure.
+        if let shown, shown.host == url.host, shown.port == url.port, shown.path.hasPrefix(url.path) {
+            view.reload()
+        } else if shown?.host != url.host || shown?.port != url.port || shown?.path != url.path {
             view.load(URLRequest(url: url))
         }
     }
@@ -112,6 +124,30 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
             && view.url?.lastPathComponent == "submit"
     }
 
+    /// A role change asked for by a page: two of the three open a port to
+    /// the network and the third stakes money, and a page is scriptable, so
+    /// the click that counts is this one.
+    fileprivate func confirmRole(_ role: PageRole, on: Bool) -> Bool {
+        let prompt = NSAlert()
+        switch (role, on) {
+        case (.validator, true):
+            prompt.messageText = "Check other people's answers?"
+            prompt.informativeText = "The node will re-run each claim's checker on this Mac and sign what it found. Every attestation stakes 50,000 units, returned after six epochs and lost if it was wrong. Not paid yet. The node restarts now."
+        case (.relay, true):
+            prompt.messageText = "Let other nodes connect to this one?"
+            prompt.informativeText = "The node's P2P port binds every interface on this Mac, so nodes on your network and beyond can dial it. Not paid. The node restarts now."
+        case (.workerHost, true):
+            prompt.messageText = "Share this node on your network?"
+            prompt.informativeText = "Machines on your network can open this node's pages, read the log, post answers and work its objectives. Nobody can change what has settled. The node restarts now."
+        case (_, false):
+            prompt.messageText = "Turn off \(role.title)?"
+            prompt.informativeText = "The node restarts without it."
+        }
+        prompt.addButton(withTitle: on ? "Turn On and Restart" : "Turn Off and Restart")
+        prompt.addButton(withTitle: "Cancel")
+        return prompt.runModal() == .alertFirstButtonReturn
+    }
+
     fileprivate func confirmPageDictation() -> Bool {
         // A page is scriptable, so a bridge request alone cannot prove that
         // the person clicked the microphone button. Require a native action
@@ -142,10 +178,13 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     }
 }
 
-/// What the reader's pages may ask of the app: today one thing, to open New
-/// Challenge… with a description typed on Post a challenge
-/// (`ui/lib/draft.ts`). The page cannot draft one itself -- the node has no
-/// TLS and must never see the model key -- and the app already can.
+/// What the reader's pages may ask of the app: to open New Challenge… with
+/// a description typed on Post a challenge (`ui/lib/draft.ts`), to dictate
+/// one, and -- from the Contribute page (`ui/lib/contribute.ts`) -- to turn
+/// a role on or off or open one of the sheets. None of it is a page's to
+/// do: the node has no TLS and must never see the model key, a role is how
+/// the node is started, and a worker is a process. The app already does
+/// all of it from its menus; this is the page's button for the same thing.
 ///
 /// Its own object rather than the browser, because the content controller
 /// keeps its handlers for as long as the view lives, and the browser owns
@@ -172,6 +211,15 @@ final class PageBridge: NSObject, WKScriptMessageHandlerWithReply {
         case .success(.draftChallenge(let brief)):
             guard let open = browser.onDraftChallenge else { return (nil, "New Challenge is not available.") }
             if let refusal = open(brief) { return (nil, refusal) }
+            return (true, nil)
+        case .success(.setRole(let role, let on)):
+            guard let set = browser.onSetRole else { return (nil, "Roles cannot be changed from here.") }
+            guard browser.confirmRole(role, on: on) else { return (nil, "Cancelled.") }
+            if let refusal = set(role, on) { return (nil, refusal) }
+            return (true, nil)
+        case .success(.open(let sheet, let objective)):
+            guard let open = browser.onOpen else { return (nil, "That is not available here.") }
+            if let refusal = open(sheet, objective) { return (nil, refusal) }
             return (true, nil)
         case .success(.startDictation):
             guard browser.isLocalChallengePage else {

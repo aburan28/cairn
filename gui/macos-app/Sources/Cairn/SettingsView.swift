@@ -165,9 +165,10 @@ struct SettingsView: View {
                     Each role is something this node does, and a declaration other \
                     readers see on the Network page. None of them gives this node a say \
                     over what is paid: only an objective's pinned checker decides that. \
-                    Solving challenges is done by you or your agent — Node ▸ Connect an \
-                    Agent… — and is paid when an answer is accepted. The Contribute page \
-                    in the window explains every role and how each one is paid.
+                    Solving challenges is done by you, your agent (Node ▸ Connect an \
+                    Agent…) or your solver (Node ▸ Work on This Mac…), and is paid when \
+                    an answer is accepted. The Contribute page in the window explains \
+                    every role, how each one is paid, and has a button for each.
                     """)
             }
 
@@ -367,9 +368,10 @@ struct SettingsView: View {
                 """)
             Toggle("Worker host — let machines on my network work for this node", isOn: $shareHTTP)
             Caption("""
-                Same as "Share this node on my network" below. Each machine runs \
-                `cairn work` with its own solver and is paid for what the checker \
-                accepts, like any solver.
+                Same as "Share this node on my network" below. Each machine opens \
+                Contribute in its own Cairn.app and chooses Work on This Mac… with \
+                this node's address (or runs `cairn work`), and is paid for what the \
+                checker accepts, like any solver.
                 """)
             Toggle("Relay — let other nodes connect to this one", isOn: relay)
             Caption("""
@@ -383,7 +385,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Toggle("Share this node on my network", isOn: $shareHTTP)
             Text(shareHTTP
-                 ? "Other machines on your network can open this node's pages and join its work with `cairn work --node http://<this Mac>:8080 …` — the Contribute page shows the exact command. Each machine is paid under its own name; Lead a fleet pays this Mac instead. Anyone on the network can read the log and post answers; nobody can change what has settled."
+                 ? "Other machines on your network can open this node's pages and work its objectives: in their own Cairn.app, Contribute ▸ Work on This Mac… with this node's address, or `cairn work` — the Contribute page here has both. Each machine is paid under its own name; Lead a fleet pays this Mac instead. Anyone on the network can read the log and post answers; nobody can change what has settled."
                  : "Only this Mac can open the node's pages or work on it. Turn this on to add machines on your network as workers.")
                 .font(.caption).foregroundStyle(.secondary)
             Toggle("Offline: no internet peers", isOn: $offline)

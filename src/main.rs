@@ -531,6 +531,10 @@ enum Command {
         objective: String,
         identity: Option<String>,
     },
+    SignObjective {
+        objective: String,
+        identity: String,
+    },
     /// Declare units into the log's supply. Genesis prefix only — see
     /// [`cairn::records::Issuance`].
     Issue {
@@ -1457,6 +1461,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
 
     let command = match name.as_str() {
         "post" => parse_post(&mut cursor)?,
+        "sign-objective" => parse_sign_objective(&mut cursor)?,
         "propose" => parse_propose(&mut cursor)?,
         "issue" => parse_issue(&mut cursor)?,
         "balances" => {
@@ -1825,6 +1830,30 @@ fn parse_post(cursor: &mut Cursor) -> Result<Command, CliError> {
     Ok(Command::Post {
         objective: require(objective, "post", "an objective JSON file")?,
         identity,
+    })
+}
+
+fn parse_sign_objective(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut objective = None;
+    let mut identity = None;
+    while let Some(token) = cursor.take() {
+        if token == "--identity" {
+            identity = Some(cursor.value("sign-objective: --identity")?);
+        } else if is_flag(&token) {
+            return Err(CliError::Usage(format!(
+                "sign-objective: unknown option {token:?}"
+            )));
+        } else if objective.is_some() {
+            return Err(CliError::Usage(format!(
+                "sign-objective: unexpected argument {token:?}"
+            )));
+        } else {
+            objective = Some(token);
+        }
+    }
+    Ok(Command::SignObjective {
+        objective: require(objective, "sign-objective", "an objective JSON file")?,
+        identity: require(identity, "sign-objective", "--identity <file>")?,
     })
 }
 
@@ -3798,6 +3827,11 @@ fn print_help(out: &mut dyn Write) {
     say(out, "commands:");
     say(out, "  post <objective.json> [--identity <file>]");
     say(out, "      fund a checkable question");
+    say(out, "  sign-objective <objective.json> --identity <file>");
+    say(
+        out,
+        "      sign a draft for a running node without opening its log",
+    );
     say(
         out,
         "  commit <objective-id> --submitter S --artifact FILE [--nonce N] [--sealed [--proxy URL]]",
@@ -4682,6 +4716,30 @@ fn cmd_post(
     identity: Option<&str>,
 ) -> Result<i32, CliError> {
     post_objective_file(out, options, path, identity)?;
+    Ok(0)
+}
+
+/// Sign a draft for submission to a running node without opening its locked log.
+/// The signed JSON is the exact record that `POST /submit?kind=objective` accepts.
+fn cmd_sign_objective(
+    out: &mut dyn Write,
+    path: &str,
+    identity_path: &str,
+) -> Result<i32, CliError> {
+    let data = read_json(path)?;
+    validate_objective(&data).map_err(CliError::Schema)?;
+    if data.get("funding_signature").is_some() {
+        return Err(CliError::Usage(String::from(
+            "sign-objective: input must be an unsigned objective draft",
+        )));
+    }
+    let objective = Objective::from_value(&data).map_err(CliError::Record)?;
+    let identity = load_identity(Some(identity_path))?.expect("required identity path");
+    let signed = objective.funded_by(&identity);
+    signed
+        .verify_funding_signature()
+        .map_err(|error| CliError::Usage(format!("sign-objective: {error}")))?;
+    say(out, signed.to_value().canonical_string());
     Ok(0)
 }
 
@@ -9995,6 +10053,10 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             objective,
             identity,
         } => cmd_post(out, options, objective, identity.as_deref()),
+        Command::SignObjective {
+            objective,
+            identity,
+        } => cmd_sign_objective(out, objective, identity),
         Command::Issue { holder, units } => cmd_issue(out, options, holder, *units),
         Command::Balances => cmd_balances(out, options),
         Command::Commit {
@@ -10766,6 +10828,41 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         cmd_post(&mut out, options, &path.display().to_string(), None).expect("post succeeds");
         String::from_utf8(out).expect("utf-8")
+    }
+
+    #[test]
+    fn sign_objective_produces_a_fundable_record_without_opening_a_log() {
+        let (dir, options, draft) = bundle_with_objective();
+        let draft_path = dir.join("draft.json");
+        let identity_path = dir.join("identity.json");
+        std::fs::write(&draft_path, draft.canonical_string()).expect("write draft");
+        cmd_identity(&mut Vec::new(), identity_path.to_str().expect("utf-8"))
+            .expect("create identity");
+
+        let mut output = Vec::new();
+        cmd_sign_objective(
+            &mut output,
+            draft_path.to_str().expect("utf-8"),
+            identity_path.to_str().expect("utf-8"),
+        )
+        .expect("sign draft");
+        let signed = Value::from_json(std::str::from_utf8(&output).expect("utf-8"))
+            .expect("one JSON record");
+        let objective = Objective::from_value(&signed).expect("objective");
+        objective
+            .verify_funding_signature()
+            .expect("valid funding signature");
+        assert_ne!(objective.funder, "treasury");
+        assert!(!std::path::Path::new(&options.log).exists());
+
+        std::fs::write(&draft_path, signed.canonical_string()).expect("write signed record");
+        let error = cmd_sign_objective(
+            &mut Vec::new(),
+            draft_path.to_str().expect("utf-8"),
+            identity_path.to_str().expect("utf-8"),
+        )
+        .expect_err("an already signed record must not be re-signed");
+        assert!(error.report().contains("unsigned objective draft"));
     }
 
     #[test]

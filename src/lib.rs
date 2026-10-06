@@ -37,6 +37,7 @@ pub mod drand;
 pub mod fleet;
 pub mod frontier;
 pub mod goals;
+pub mod google_auth;
 pub mod gossip;
 pub mod hex;
 pub mod hosts;

@@ -262,12 +262,13 @@ final class DraftingTests: XCTestCase {
         XCTAssertEqual(request, .draftChallenge(brief: "find a 16-input sorting network"))
     }
 
-    func testThePageCanOnlyRequestDictationOrDrafting() {
+    func testThePageCanOnlyRequestWhatTheAppDoesFromItsMenus() {
         XCTAssertEqual(try? PageRequest.parse(["kind": "start-dictation"]).get(), .startDictation)
         XCTAssertEqual(try? PageRequest.parse(["kind": "stop-dictation"]).get(), .stopDictation)
         if case .failure = PageRequest.parse(["kind": "listen-forever"]) {} else {
             XCTFail("accepted an unknown page request")
         }
+        // Roles and sheets are WorkTests'.
     }
 
     func testThePageIsHeldToTheSheetsOwnLimits() {

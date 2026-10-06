@@ -29,7 +29,7 @@ sha2 = "0.11"
 # The delay beacon's arithmetic, and deliberately not the primary's own bignum:
 # two implementations sharing an arithmetic library agree about exactly the
 # inputs it gets wrong. See src/vdf.rs.
-num-bigint = "0.4"
+num-bigint = "0.5"
 ed25519-dalek = "3"
 # The group a version-3 sealed envelope's dealer commits in: Pedersen
 # commitments over Ristretto255. The arithmetic is this crate's own use of the
