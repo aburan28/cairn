@@ -203,7 +203,9 @@ function TaskCard({ objective, live }: { objective: Objective; live: number }) {
             {live} machine{live === 1 ? "" : "s"} working
           </span>
           {pw.units ? <span>{formatMagnitude(pw.units)} pieces</span> : null}
-          <span>{formatMagnitude(pw.unit_price)} units a piece</span>
+          <span>
+            {formatMagnitude(pw.unit_price)} unit{pw.unit_price === 1 ? "" : "s"} a piece
+          </span>
         </div>
         <Progress value={spent} label={`${formatMagnitude(pw.paid_total)} of ${formatMagnitude(funded)} paid out`} />
       </Link>
@@ -556,7 +558,7 @@ function Dashboard({
     <>
       <PageHeader
         crumb={{ href: "/coordination", label: "Coordination" }}
-        title={progress.goal || short(id)}
+        title={progress.goal ? progress.goal.replace(/^GOAL-/, "") : short(id)}
         meta={
           <>
             <StatusPill settled={progress.settled} />
@@ -583,13 +585,23 @@ function Dashboard({
         <Stat
           label="Pieces paid"
           value={units ? `${formatMagnitude(paidUnits)} / ${formatMagnitude(units)}` : formatMagnitude(paidUnits)}
-          from={pw ? `${formatMagnitude(pw.unit_price)} units each · ${formatMagnitude(pw.pool_remaining)} left` : "from the log"}
+          from={
+            pw
+              ? `${formatMagnitude(pw.unit_price)} unit${pw.unit_price === 1 ? "" : "s"} each · ${formatMagnitude(pw.pool_remaining)} left`
+              : "from the log"
+          }
           tone="accent"
         />
         <Stat
           label="Machines working"
           value={String(reported.live)}
-          from={reported.live > 0 ? `${formatRate(reported.steps_per_second ?? null)} reported` : "none reporting now"}
+          from={
+            reported.live === 0
+              ? "none reporting now"
+              : reported.steps_per_second > 0
+                ? `${formatRate(reported.steps_per_second)} reported`
+                : "speed not reported"
+          }
         />
         <Stat
           label="Slices covered"

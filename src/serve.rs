@@ -3511,15 +3511,18 @@ fn heartbeat(
             let on = node
                 .objectives()
                 .get(&objective_id)
-                .map(|objective| objective.goal.clone())
+                .map(|objective| {
+                    let goal = objective.goal.trim();
+                    goal.strip_prefix("GOAL-").unwrap_or(goal).to_string()
+                })
                 .unwrap_or_else(|| crate::journal::short(&objective_id));
-            let on_device = device
+            let with = device
                 .as_deref()
-                .map(|device| format!(" on {device}"))
+                .map(|device| format!(" ({device})"))
                 .unwrap_or_default();
             let text = match returning {
-                None => format!("Machine {worker} started working on {on}{on_device}"),
-                _ => format!("Machine {worker} is back on {on}{on_device}"),
+                None => format!("Machine {worker}{with} started working on {on}"),
+                _ => format!("Machine {worker}{with} is back on {on}"),
             };
             serving.note(
                 crate::journal::Kind::Worker,

@@ -587,7 +587,7 @@ function Dashboard({
               </span>
             }
           >
-            <p className="text-[13.5px] leading-relaxed text-ink">{statement}</p>
+            <p className="text-[13.5px] leading-relaxed text-ink [overflow-wrap:anywhere]">{statement}</p>
           </Box>
         )}
         <div className="flex min-w-0 flex-col gap-4">
