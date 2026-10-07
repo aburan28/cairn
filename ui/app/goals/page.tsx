@@ -55,6 +55,7 @@ function Goals() {
   const [searching, setSearching] = useState(false);
   const [loading, setLoading] = useState(false);
   const focus = params.get("key");
+  const angleFocus = params.get("angle");
 
   const load = useCallback(async (url: string) => {
     setError(null);
@@ -116,9 +117,10 @@ function Goals() {
 
   const shown = useMemo(() => {
     const goals = data?.goals ?? [];
-    if (!focus) return goals;
-    return goals.filter((g) => g.key === focus);
-  }, [data, focus]);
+    const keyed = focus ? goals.filter((g) => g.key === focus) : goals;
+    if (angleFocus === null) return keyed;
+    return keyed.map((g) => ({ ...g, angles: g.angles.filter((a) => a.path === angleFocus) }));
+  }, [data, focus, angleFocus]);
 
   if (error && !data) {
     return (
@@ -230,13 +232,25 @@ function Goals() {
 
       {/* -- the goals ------------------------------------------------------- */}
       <div className="mt-5 flex flex-col gap-4">
-        {focus && (
+        {(focus || angleFocus !== null) && (
           <div className="text-[13px] text-ink-2">
-            Showing one goal.{" "}
-            <Link href="/goals" className="text-accent">
-              Show every goal
-            </Link>
-            .
+            {angleFocus !== null ? (
+              <>
+                Showing one approach.{" "}
+                <Link href={focus ? `/goals?key=${encodeURIComponent(focus)}` : "/goals"} className="text-accent">
+                  Show every approach
+                </Link>
+                .
+              </>
+            ) : (
+              <>
+                Showing one goal.{" "}
+                <Link href="/goals" className="text-accent">
+                  Show every goal
+                </Link>
+                .
+              </>
+            )}
           </div>
         )}
         {shown.length === 0 && (
@@ -276,7 +290,12 @@ function Scarce({ rows }: { rows: Underserved[] }) {
             <Link href={`/goals?key=${encodeURIComponent(row.goal)}`} className="text-ink">
               {row.goal_name}
             </Link>
-            <span className="mono text-[12px] text-ink-2">{angleLabel(row.angle)}</span>
+            <Link
+              href={`/goals?key=${encodeURIComponent(row.goal)}&angle=${encodeURIComponent(row.angle)}`}
+              className="mono text-[12px] text-accent hover:underline"
+            >
+              {angleLabel(row.angle, row.goal)}
+            </Link>
             <span className="text-ink-3">{describeUnderserved(row)}</span>
             {row.objectives[0] && (
               <Link
@@ -329,10 +348,16 @@ function GoalCard({ goal }: { goal: Goal }) {
         {goal.summary && <span className="basis-full text-ink-2">{goal.summary}</span>}
       </div>
       <div className="flex flex-col gap-3">
-        {goal.angles.map((angle) => (
+        {goal.angles.map((angle, position) => (
           <div key={angle.path || "(none)"} className="rounded-md border border-line p-3">
             <div className="mb-2 flex flex-wrap items-baseline gap-2">
-              <span className="mono text-[13px]">{angleLabel(angle.path)}</span>
+              <Link
+                href={`/goals?key=${encodeURIComponent(goal.key)}&angle=${encodeURIComponent(angle.path)}`}
+                className="mono text-[13px] text-accent hover:underline"
+                title={angle.path === "" ? "Objectives that named no approach — click to see them on their own" : "Click to see this approach on its own"}
+              >
+                {angleLabel(angle.path, goal.key, position + 1)}
+              </Link>
               {angle.parent !== null && (
                 <span className="text-[12px] text-ink-3">
                   refines <span className="mono">{angle.parent}</span>

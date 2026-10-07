@@ -15,14 +15,24 @@ book), `/network` — the peers this node has actually reached, every worker
 heartbeating to it summed by device and class, its declared roles and hardware,
 and the roles the log evidences, kept apart as three kinds of fact —
 `/coordination?id=…` — one divided search's epoch clock, which slices the live
-workers hold, and the advisory task leases over them — `/log`, `/task?id=…` — a
+workers hold, and the advisory task leases over them; without `?id=` the
+chooser plus a "Start a coordinated task" box that turns a plain description
+into the `piecework` draft for review — `/log`, `/task?id=…` — a
 divided search while it runs: what the log has settled per worker beside
 what the workers report over `POST /progress`, kept apart and labelled, with
 the share of the expected Pollard rho cost and an ETA at the reported rate —
 `/contribute` — the ways to take part, what each is paid today, and the exact
 `cairn work` line for adding a machine on this node's network, from the
-`node.reach` it publishes on `GET /network` — and `/submit` — a form that posts
-an objective to the node that served the page.
+`node.reach` it publishes on `GET /network` — `/agents` — whether this node
+leads a fleet, who works for it, and the MCP stanza to connect one —
+`/knowledge` and `/knowledge?id=…` — each settled claim's standing and
+confidence under the reader's policy, from `GET /knowledge` — and `/submit` —
+a form that posts an objective to the node that served the page.
+
+Pages that only read one node show that as a quiet line — "Reading from this
+node · Change" (`NodeSource` in `components/ui.tsx`) — with the retarget box
+folded behind the button. The full URL box (`NodePicker`) stays on the pages
+whose point is comparing nodes.
 
 `/how-it-works` is static prose and reads no node; the rest are the reader. Both
 kinds ship in both mounts, which is the same "one app, not two" decision — an

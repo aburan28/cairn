@@ -14,6 +14,7 @@ import {
   classLabel,
   describeHost,
   describeReachability,
+  effectiveRoles,
   fetchNetwork,
   fetchSessions,
   fleetMembers,
@@ -21,6 +22,7 @@ import {
   fleetTotals,
   formatMemory,
   formatUptime,
+  isLeader,
   reachTone,
   roleWarning,
   share,
@@ -233,23 +235,30 @@ function Dashboard({
   const book = peers.address_book ?? sessions?.address_book ?? null;
   const self = peers.this_node ?? sessions?.this_node ?? null;
   const reach = useMemo(() => describeReachability(self), [self]);
+  const effective = useMemo(() => effectiveRoles(network), [network]);
+  const leading = isLeader(network);
 
   return (
     <>
       <PageHeader
         title="Network"
-        subtitle="Whom this node has reached, what is heartbeating to it, and what it says it is for. Three kinds of fact, kept apart and labelled."
+        subtitle="Who this node talks to, who works for it, and what it is for. What the node says, what others report, and what the log proves — kept apart."
         meta={
           <>
-            {node.roles.declared.length > 0 ? (
-              node.roles.declared.map((role) => (
-                <Badge key={role} tone="accent" title={`declared with ${node.roles.source}`}>
+            {effective.length > 0 ? (
+              effective.map(({ role, source, detail }) => (
+                <Badge
+                  key={`${role}/${source}`}
+                  tone={source === "suggested" ? "neutral" : "accent"}
+                  title={source === "declared" ? `declared with ${node.roles.source}: ${detail}` : detail}
+                >
                   {role}
+                  {source !== "declared" && <span className="opacity-70"> · {source}</span>}
                 </Badge>
               ))
             ) : (
-              <Badge tone="neutral" title={`nothing set in ${node.roles.source}`}>
-                no declared role
+              <Badge tone="neutral" title={`nothing set in ${node.roles.source}, and nothing suggested`}>
+                no role yet
               </Badge>
             )}
             {self?.peer_id && <Hash value={self.peer_id} chars={8} label="peer" />}
@@ -262,10 +271,16 @@ function Dashboard({
       <p className="mb-4 text-[12px] text-ink-3">
         Read from <span className="mono">{origin}</span>
         {readAt && <> at {readAt.toLocaleTimeString()}</>}, again every {REFRESH_SECONDS} s while
-        this tab is visible. <span className="text-accent">Declared</span> is what this node says;{" "}
-        <span className="text-warn">reported</span> is what peers and workers did and said, held in
-        memory and checked by nobody; <span className="text-accent">evidenced</span> is recomputed
-        from the log.
+        this tab is visible. <span className="text-accent">This node says</span> is intent;{" "}
+        <span className="text-warn">reported</span> is what peers and workers said, held in
+        memory and checked by nobody; <span className="text-accent">in the log</span> is what anyone
+        can verify.
+        {leading && (
+          <>
+            {" "}This node <Link href="/agents" className="text-accent hover:underline">leads a fleet</Link> —
+            members submit under its id.
+          </>
+        )}
         {stale && <span className="text-bad"> The last re-read failed: {stale}</span>}
       </p>
 
@@ -274,20 +289,20 @@ function Dashboard({
       {/* -- the numbers --------------------------------------------------- */}
       <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
         <Stat
-          label="Peers reached"
+          label="Connected now"
           value={peers.available ? String(peers.reached) : "—"}
           from={
             peers.available
-              ? `${peers.recent} recent · ${peers.lost} lost · ${peers.unreached} never reached`
-              : "this process runs no p2p service"
+              ? `${peers.recent} recent · ${peers.lost} lost · ${peers.unreached} never connected`
+              : "no peer-to-peer service here"
           }
         />
         <Stat
-          label="Address book"
+          label="Known addresses"
           value={book ? String(book.endpoints) : "—"}
           from={
             book
-              ? `dialable now · ${book.hints} hints · ${peers.announced} announced in the log`
+              ? `can dial now · ${book.hints} hints · ${peers.announced} in the log`
               : `${peers.announced} announced in the log`
           }
           tone="neutral"
@@ -300,42 +315,53 @@ function Dashboard({
           }`}
         />
         <Stat
-          label="Compute, reported"
+          label="Work rate, reported"
           value={formatRate(totals.live > 0 ? totals.steps_per_second : null)}
-          from="summed over live workers; measured by the node where it could"
+          from="summed over live workers; what they say"
         />
         <Stat
-          label="Lanes, reported"
+          label="Parallelism, reported"
           value={totals.live > 0 ? formatMagnitude(totals.lanes) : "—"}
-          from="threads or SIMD lanes the live workers say they run"
+          from="threads or lanes the live workers say they run"
         />
       </div>
 
       {/* -- this node --------------------------------------------------- */}
       <div className="mb-5 grid gap-4 lg:grid-cols-2">
-        <Box title="This node" aside={<span className="text-[11px] font-normal text-accent">declared, and probed at startup</span>}>
+        <Box title="This node" aside={<span className="text-[11px] font-normal text-accent">what it is for</span>}>
           <dl className="kv">
             <dt>roles</dt>
             <dd>
-              {node.roles.declared.length === 0 ? (
+              {effective.length === 0 ? (
                 <span className="text-ink-3">
-                  none declared — set <span className="mono">{node.roles.source}</span>
+                  none — it takes no submissions, checks nothing, and runs no p2p service
                 </span>
               ) : (
                 <ul className="flex flex-col gap-1.5">
-                  {node.roles.declared.map((role) => {
-                    const warning = roleWarning(role, node.warnings);
-                    const known = node.roles.known.find((k) => k.role === role);
+                  {effective.map(({ role, source, detail }) => {
+                    const warning =
+                      source === "declared" ? roleWarning(role as "coordinator" | "executor" | "verifier" | "relay", node.warnings) : null;
                     return (
-                      <li key={role} className="flex flex-wrap items-baseline gap-2">
-                        <Badge tone={warning ? "warn" : "accent"}>{role}</Badge>
-                        <span className="text-[12px] text-ink-2">{known?.duty}</span>
+                      <li key={`${role}/${source}`} className="flex flex-wrap items-baseline gap-2">
+                        <Badge tone={warning ? "warn" : source === "suggested" ? "neutral" : "accent"}>
+                          {role}
+                          {source !== "declared" && <span className="opacity-70"> · {source}</span>}
+                        </Badge>
+                        <span className="text-[12px] text-ink-2">{detail}</span>
                         {warning && <span className="text-[12px] text-warn">{warning}</span>}
                       </li>
                     );
                   })}
                 </ul>
               )}
+              <div className="mt-1 text-[11.5px] text-ink-3">
+                Declared with <span className="mono">{node.roles.source}</span>
+                {leading && (
+                  <>
+                    {" · "}<Link href="/agents" className="text-accent hover:underline">fleet details</Link>
+                  </>
+                )}
+              </div>
             </dd>
             <dt>accepts submissions</dt>
             <dd className="mono">{node.accepts_submissions ? "yes (--queue)" : "no: read-only"}</dd>
@@ -467,14 +493,13 @@ function Dashboard({
         aside={
           sessions?.available ? (
             <span className="text-[11px] text-ink-3">
-              reached within {sessions.reached_within_seconds ?? 120} s · recent within{" "}
-              {sessions.recent_within_seconds ?? 1800} s · a session is one exchange, not a held
-              connection
+              connected within {sessions.reached_within_seconds ?? 120} s · seen within{" "}
+              {sessions.recent_within_seconds ?? 1800} s · one exchange each, not a held line
             </span>
           ) : undefined
         }
       >
-        Sessions
+        Connections
       </SectionHeading>
       <SessionsTable sessions={sessions} announced={peers.announced} />
 
@@ -565,7 +590,7 @@ function Dashboard({
           </label>
         }
       >
-        Hardware on the network
+        Machines working
       </SectionHeading>
       <div className="mb-5 grid gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
         <Box title="By class" aside={<span className="text-[11px] font-normal text-warn">reported</span>}>
@@ -802,7 +827,7 @@ function NetworkTopology({
       <Box title="Network topology" aside={<span className="text-[11px] font-normal text-ink-3">from this node's view</span>}>
         <div className="grid items-stretch gap-3 md:grid-cols-[minmax(0,1fr)_2rem_minmax(0,1.1fr)_2rem_minmax(0,1fr)]">
           <div className="rounded-lg border border-edge bg-surface-2 p-3">
-            <div className="text-[11px] font-semibold tracking-wide text-ink-3 uppercase">Peer sessions</div>
+            <div className="text-[11px] font-semibold tracking-wide text-ink-3 uppercase">Connections</div>
             <div className="mt-1 text-[18px] font-semibold text-ink">
               {sessions?.available || network.peers.available
                 ? `${sessions?.available ? reached.length : network.peers.reached} reached`
@@ -845,7 +870,7 @@ function NetworkTopology({
             {hosts.length + workers.length > 0 && <div className="h-px w-full bg-accent-line" />}
           </div>
           <div className="rounded-lg border border-edge bg-surface-2 p-3">
-            <div className="text-[11px] font-semibold tracking-wide text-ink-3 uppercase">Reported compute</div>
+            <div className="text-[11px] font-semibold tracking-wide text-ink-3 uppercase">Machines reporting</div>
             <div className="mt-1 text-[18px] font-semibold text-ink">{hosts.length} hosts · {workers.length} workers</div>
             <ul className="mt-2 flex flex-col gap-1 text-[12px] text-ink-2">
               {hosts.slice(0, 2).map((host) => <li key={host.host} className="truncate" title={host.host}>Host {host.host}{host.roles.length ? ` · ${host.roles.join(", ")}` : ""}</li>)}

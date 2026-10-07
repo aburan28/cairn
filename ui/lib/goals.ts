@@ -169,9 +169,32 @@ export function describeUnderserved(row: Underserved): string {
   return `${row.open_reward.toLocaleString("en-US")} units across ${objectives}, ${workers}`;
 }
 
-/** What an angle path reads as on a page. */
-export function angleLabel(path: string): string {
-  return path === "" ? "no particular approach" : path;
+/**
+ * Six hex characters that name one goal's unnamed approach, stable across
+ * reloads. A djb2 hash, not a random suffix: random would rename the angle
+ * on every render, and an angle whose name moves cannot be linked to or
+ * talked about. Distinct per goal, so two goals' unnamed approaches never
+ * share a label.
+ */
+export function shortHash(text: string): string {
+  let hash = 5381;
+  for (let i = 0; i < text.length; i += 1) {
+    hash = ((hash << 5) + hash + text.charCodeAt(i)) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0").slice(0, 6);
+}
+
+/**
+ * What an angle path reads as on a page.
+ *
+ * A named angle reads as its path. An unnamed one — objectives whose goal
+ * names no approach — reads as `approach <n> · <hash>`, where `n` is its
+ * position among the goal's angles and the hash is the goal's: stable,
+ * distinct, and clickable to the angle's own objectives below.
+ */
+export function angleLabel(path: string, goalKey = "", index = 1): string {
+  if (path !== "") return path;
+  return `approach ${index} · ${shortHash(goalKey || "goal")}`;
 }
 
 /**

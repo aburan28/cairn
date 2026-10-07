@@ -8,6 +8,7 @@ import {
   describeUnderserved,
   normalizeGoal,
   parseHandle,
+  shortHash,
 } from "./goals";
 
 const goal = (over: Partial<Goal>): Goal => ({
@@ -46,8 +47,17 @@ describe("goal handles", () => {
     expect(parseHandle(" ECC2K-130 / rho / ").angle).toEqual(["rho"]);
     expect(composeHandle("certicom-ecc2k130", ["Rho", "GPU-Kernel"])).toBe("GOAL-certicom-ecc2k130/rho/gpu-kernel");
     expect(composeHandle("GOAL-x", [])).toBe("GOAL-x");
-    expect(angleLabel("")).toBe("no particular approach");
     expect(angleLabel("rho/distributed")).toBe("rho/distributed");
+  });
+
+  it("names an unnamed approach stably and distinctly per goal", () => {
+    const first = angleLabel("", "certicomecc2k130", 1);
+    expect(first).toMatch(/^approach 1 · [0-9a-f]{6}$/);
+    expect(angleLabel("", "certicomecc2k130", 1)).toBe(first);
+    expect(angleLabel("", "othergoal", 1)).not.toBe(first);
+    expect(angleLabel("", "certicomecc2k130", 2)).toContain("approach 2");
+    expect(shortHash("certicomecc2k130")).toMatch(/^[0-9a-f]{6}$/);
+    expect(shortHash("certicomecc2k130")).toBe(shortHash("certicomecc2k130"));
   });
 });
 

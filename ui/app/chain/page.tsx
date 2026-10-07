@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import {
   type Chain,
@@ -10,13 +11,14 @@ import {
   short,
   totalClaims,
 } from "@/lib/chain";
+import { type KnowledgeIndex, fetchKnowledgeIndex } from "@/lib/knowledge";
 import { resolveNode } from "@/lib/site";
 import {
   type CheckpointResponse,
   coversHead,
   readCheckpoint,
 } from "@/lib/checkpoint";
-import { Box, CopyButton, EmptyState, Hash, NodePicker, Note, PageHeader, Stat } from "@/components/ui";
+import { Badge, Box, CopyButton, EmptyState, Hash, NodeSource, Note, PageHeader, Stat } from "@/components/ui";
 
 /**
  * The knowledge chain of one node.
@@ -31,6 +33,7 @@ export default function Page() {
   const [chain, setChain] = useState<Chain | null>(null);
   const [checkpoint, setCheckpoint] = useState<CheckpointResponse | null>(null);
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
+  const [knowledge, setKnowledge] = useState<KnowledgeIndex | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -38,13 +41,14 @@ export default function Page() {
     setLoading(true);
     setError(null);
     setCheckpointError(null);
-    // Two requests, and each fails on its own. They shared one `Promise.all`
+    // Three requests, and each fails on its own. They shared one `Promise.all`
     // for a while, so a `/checkpoint` answer in the wrong shape blanked the
     // chain as well -- the one thing this page is for, withheld over a panel
     // it could have rendered without. `readCheckpoint` never throws: a node
     // with no checkpoint is an ordinary state and says so below, and a node
     // that answered wrongly gets its own red panel rather than the chain's.
-    const [next, answer] = await Promise.all([
+    // Knowledge is the same: an older node without the route still has a chain.
+    const [next, answer, known] = await Promise.all([
       fetchChain(url).then(
         (chain) => ({ chain, error: null }),
         (cause: unknown) => ({
@@ -53,11 +57,13 @@ export default function Page() {
         }),
       ),
       readCheckpoint(url),
+      fetchKnowledgeIndex(url).catch(() => null),
     ]);
     setChain(next.chain);
     setError(next.error);
     setCheckpoint(answer.kind === "signed" ? answer.value : null);
     setCheckpointError(answer.kind === "unreadable" ? answer.message : null);
+    setKnowledge(known);
     setLoading(false);
   }, []);
 
@@ -92,10 +98,10 @@ export default function Page() {
         title="Knowledge chain"
         subtitle="Each link hashes the one before it and the claims settled in its epoch. Two nodes that settled the same claims compute the same head; where they differ is where they forked."
         actions={
-          <NodePicker
+          <NodeSource
             value={base}
             onChange={setBase}
-            onRead={() => void load(base)}
+            onRead={() => void load(base === window.location.origin ? "" : base)}
             loading={loading}
           />
         }
@@ -160,6 +166,49 @@ export default function Page() {
                 The link for epoch {broken} does not name the link before it. The node
                 served something inconsistent — do not compare this head against anything.
               </Note>
+            )}
+
+            {knowledge && knowledge.total > 0 && (
+              <Box
+                title={
+                  <>
+                    How verified is it{" "}
+                    <span className="mono ml-1 font-normal text-ink-3">{knowledge.total} claims</span>
+                  </>
+                }
+                aside={
+                  <Link href="/knowledge" className="text-[12px] font-normal text-accent hover:underline">
+                    Every claim →
+                  </Link>
+                }
+              >
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {Object.entries(knowledge.by_standing)
+                    .sort(([, a], [, b]) => b - a)
+                    .map(([standing, count]) => (
+                      <span key={standing} className="inline-flex items-center gap-1.5">
+                        <Badge
+                          tone={
+                            standing === "accepted" || standing === "corroborated"
+                              ? "accent"
+                              : standing === "contested" || standing === "superseded"
+                                ? "warn"
+                                : standing === "refuted" || standing === "withdrawn"
+                                  ? "bad"
+                                  : "neutral"
+                          }
+                        >
+                          {standing} · {count}
+                        </Badge>
+                      </span>
+                    ))}
+                </div>
+                <p className="mt-2 text-[12px] text-ink-3">
+                  Standing is derived from the log, not written to it: the verifier&rsquo;s
+                  verdict plus what later verified claims said. Confidence is under your
+                  policy, not the network&rsquo;s.
+                </p>
+              </Box>
             )}
 
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">

@@ -33,6 +33,7 @@ import {
   workerRate,
 } from "@/lib/progress";
 import { type Objective, fetchObjectives } from "@/lib/objectives";
+import { draftCoordinatedTask, pieceworkJson, scaffoldCommand } from "@/lib/coordination-draft";
 import { resolveNode } from "@/lib/site";
 import {
   Badge,
@@ -155,6 +156,9 @@ function Chooser() {
           />
         }
       />
+      <div className="mb-5">
+        <LaunchBox />
+      </div>
       {error && (
         <Note title="Could not read this node" tone="bad">
           {error}
@@ -199,6 +203,125 @@ function Chooser() {
         </Box>
       )}
     </>
+  );
+}
+
+// -- starting one -------------------------------------------------------------------
+
+/**
+ * From a sentence to a divided search's first draft.
+ *
+ * A coordinated task starts as an objective with a `piecework` block: how
+ * many units the search holds and what each novel one pays. This box turns a
+ * plain description into that block plus the scaffold command, for review —
+ * it parses, it does not post, and everything it could not read stays a
+ * loud placeholder.
+ */
+function LaunchBox() {
+  const [prompt, setPrompt] = useState("");
+  const [drafted, setDrafted] = useState(false);
+  const draft = useMemo(() => draftCoordinatedTask(prompt), [prompt]);
+
+  return (
+    <Box
+      title="Start a coordinated task"
+      aside={<span className="text-[11px] font-normal text-ink-3">describe it, review the draft</span>}
+    >
+      <ol className="mb-3 flex flex-col gap-1 text-[12.5px] text-ink-2">
+        <li>
+          <b className="text-ink">1. Describe the search.</b> Name the goal, how many units it
+          holds, and what each one pays — <i>“Divide GOAL-ecc2k130 into 2M orbits at 10 per
+          unit”</i>.
+        </li>
+        <li>
+          <b className="text-ink">2. Review the draft.</b> The box below turns that into the{" "}
+          <span className="mono">piecework</span> block and the scaffold command. Nothing posts
+          from here.
+        </li>
+        <li>
+          <b className="text-ink">3. Post and invite workers.</b> Scaffold, pin the checker,{" "}
+          <Link href="/submit" className="text-accent hover:underline">
+            post the challenge
+          </Link>
+          , then{" "}
+          <Link href="/contribute" className="text-accent hover:underline">
+            add machines
+          </Link>{" "}
+          — each takes its own slice every epoch.
+        </li>
+      </ol>
+      <label className="flex flex-col gap-1.5 text-[12px] text-ink-3">
+        What should the search do?
+        <textarea
+          className="field min-h-20 w-full"
+          value={prompt}
+          onChange={(event) => {
+            setPrompt(event.target.value);
+            setDrafted(false);
+          }}
+          placeholder="Divide GOAL-my-search into 1M units at 5 per unit, scored by …"
+          aria-label="Describe the coordinated task"
+        />
+      </label>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="btn btn-primary btn-sm"
+          disabled={prompt.trim().length < 8}
+          onClick={() => setDrafted(true)}
+        >
+          Draft it
+        </button>
+        {drafted && (
+          <span className="text-[12px] text-ink-3">
+            A draft, not a submission — review every field before posting.
+          </span>
+        )}
+      </div>
+      {drafted && (
+        <div className="mt-3 flex flex-col gap-2">
+          <dl className="kv">
+            <dt>goal</dt>
+            <dd className="mono">
+              {draft.goalHandle}{" "}
+              <span className="text-[11px] text-ink-3">
+                ({draft.goalFrom === "explicit" ? "as written" : "from your words"})
+              </span>
+            </dd>
+            <dt>verifier</dt>
+            <dd className="mono">{draft.verifierKind}</dd>
+            <dt>units</dt>
+            <dd className="mono">{draft.units === null ? "— say how many" : draft.units.toLocaleString("en-US")}</dd>
+            <dt>per unit</dt>
+            <dd className="mono">{draft.unitPrice === null ? "— say what each pays" : draft.unitPrice.toLocaleString("en-US")}</dd>
+            {draft.pool !== null && (
+              <>
+                <dt>pool</dt>
+                <dd className="mono">{draft.pool.toLocaleString("en-US")} set aside at posting</dd>
+              </>
+            )}
+          </dl>
+          <div>
+            <p className="mb-1 text-[12px] text-ink-3">The block, as it goes into the objective:</p>
+            <div className="relative">
+              <pre className="code pr-9 text-[11.5px]">{`{\n  ${pieceworkJson(draft).replace(/\n/g, "\n  ")}\n}`}</pre>
+              <div className="absolute top-1.5 right-1.5">
+                <CopyButton value={`{\n  ${pieceworkJson(draft).replace(/\n/g, "\n  ")}\n}`} />
+              </div>
+            </div>
+          </div>
+          <div>
+            <p className="mb-1 text-[12px] text-ink-3">Scaffold its directory:</p>
+            <div className="relative">
+              <pre className="code pr-9 text-[11.5px]">{scaffoldCommand(draft)}</pre>
+              <div className="absolute top-1.5 right-1.5">
+                <CopyButton value={scaffoldCommand(draft)} />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </Box>
   );
 }
 

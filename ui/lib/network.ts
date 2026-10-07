@@ -601,6 +601,70 @@ export function roleWarning(role: RoleName, warnings: string[]): string | null {
 }
 
 /**
+ * What this node *is*, in one list a page can always show.
+ *
+ * Declared roles are intent (`CAIRN_ROLES`); leading a fleet is a fact the
+ * node reports about itself; and when neither is set the node's own
+ * capabilities still say what it *could* be doing. The suggestions are
+ * labelled as suggestions, because "accepts submissions" is not "declared
+ * coordinator" — but a node with no label at all reads as broken, and a
+ * reader should never have to guess what their own node is for.
+ */
+export type EffectiveRole = {
+  role: string;
+  source: "declared" | "fleet" | "suggested";
+  detail: string;
+};
+
+export function effectiveRoles(network: NetworkResponse): EffectiveRole[] {
+  const out: EffectiveRole[] = [];
+  for (const role of network.node.roles.declared) {
+    const known = network.node.roles.known.find((k) => k.role === role);
+    out.push({ role, source: "declared", detail: known?.duty ?? "declared intent" });
+  }
+  const fleet = network.node.fleet;
+  if (fleet) {
+    const members = fleet.members
+      ? ` · ${fleet.members.enrolled} enrolled, ${fleet.members.live} recently heard`
+      : "";
+    out.push({
+      role: "leader",
+      source: "fleet",
+      detail: `signs submissions for ${fleet.sources.join(", ")}${members}`,
+    });
+  }
+  if (out.length === 0) {
+    if (network.node.accepts_submissions) {
+      out.push({
+        role: "coordinator",
+        source: "suggested",
+        detail: "accepts submissions, so it could coordinate — declare it with CAIRN_ROLES",
+      });
+    }
+    if (network.node.verifiers.servable.length > 0) {
+      out.push({
+        role: "verifier",
+        source: "suggested",
+        detail: `can check ${network.node.verifiers.servable.join(", ")} — declare it with CAIRN_ROLES`,
+      });
+    }
+    if (network.node.runs_p2p) {
+      out.push({
+        role: "relay",
+        source: "suggested",
+        detail: "runs the p2p service, so it already relays — declare it with CAIRN_ROLES",
+      });
+    }
+  }
+  return out;
+}
+
+/** Whether this node leads a fleet: the "leader" operators ask about. */
+export function isLeader(network: NetworkResponse): boolean {
+  return network.node.fleet != null;
+}
+
+/**
  * One line for a registered host: its CPUs, memory and GPUs as it described
  * them, with absent numbers shown as absent rather than as zero. A host
  * that reported no `hardware` block at all is "unreported".

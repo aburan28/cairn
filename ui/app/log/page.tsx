@@ -1,12 +1,15 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { type LogRecord, NODE_URL, fetchLog, kindCounts } from "@/lib/log";
 import { type ObjectiveIndex, indexObjectives, toEvent } from "@/lib/events";
+import { type Session, fetchSessions, reachTone } from "@/lib/network";
 import { objectiveTitle } from "@/lib/title";
-import { Card, NodePicker, PageHeader, EmptyState, Note } from "@/components/ui";
+import { Badge, Box, Card, EmptyState, Hash, NodeSource, Note, PageHeader } from "@/components/ui";
 import { EventRow } from "@/components/events";
 import { loadObjectives, resolveNode } from "@/lib/site";
+import { formatAge } from "@/lib/progress";
 
 /**
  * Every record this node holds, as a feed of what happened.
@@ -23,6 +26,8 @@ export default function Page() {
   const [base, setBase] = useState(NODE_URL);
   const [records, setRecords] = useState<LogRecord[] | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [sessionsAvailable, setSessionsAvailable] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<string | null>(null);
@@ -35,12 +40,15 @@ export default function Page() {
     setLoading(true);
     setError(null);
     try {
-      const [next, feed] = await Promise.all([
+      const [next, feed, roster] = await Promise.all([
         fetchLog(url),
         loadObjectives(url).catch(() => null),
+        fetchSessions(url).catch(() => null),
       ]);
       setRecords(next.records);
       setProblems(next.problems);
+      setSessions(roster?.available ? roster.peers : []);
+      setSessionsAvailable(roster ? roster.available : null);
       setFilter(null);
       // Titles only from a live answer: the snapshot's objectives are a
       // different log's, and naming this node's records after them would be
@@ -99,12 +107,12 @@ export default function Page() {
     <>
       <PageHeader
         title="Log"
-        subtitle="Everything that has happened on this node, newest first. Click an event for its details and the record as written."
+        subtitle="Every record this node holds, newest first. Click an event for its details and the record as written."
         actions={
-          <NodePicker
+          <NodeSource
             value={base}
             onChange={setBase}
-            onRead={() => void load(base)}
+            onRead={() => void load(base === window.location.origin ? "" : base)}
             loading={loading}
           />
         }
@@ -137,6 +145,8 @@ export default function Page() {
             </ul>
           </Note>
         )}
+
+        <NetworkActivity peers={sessions} available={sessionsAvailable} />
 
         {records && records.length === 0 && problems.length === 0 && (
           <EmptyState title="This node's log is empty." />
@@ -201,5 +211,70 @@ export default function Page() {
         )}
       </div>
     </>
+  );
+}
+
+/**
+ * Connections this run, beside the log — never inside it.
+ *
+ * The feed above is the file `cairn audit` reads, and mixing in anything the
+ * node did not write would break that. But "connected to a peer" is still
+ * something an operator wants to see next to the records, so the sessions
+ * the node holds in memory sit here, labelled as memory: they vanish on
+ * restart and prove nothing to anyone else.
+ */
+function NetworkActivity({ peers, available }: { peers: Session[]; available: boolean | null }) {
+  if (available === false) return null;
+  if (available === null) return null;
+  const ordered = [...peers].sort((a, b) => {
+    const rank = (s: Session["status"]) =>
+      s === "reached" ? 0 : s === "recent" ? 1 : s === "lost" ? 2 : 3;
+    return rank(a.status) - rank(b.status);
+  });
+  return (
+    <Box
+      title="Network activity"
+      aside={<span className="text-[11px] font-normal text-warn">this run only, not in the log</span>}
+    >
+      {ordered.length === 0 ? (
+        <p className="text-[12.5px] text-ink-3">
+          No peer session yet this run. Connections appear here as they happen; what was
+          settled is in the feed below.{" "}
+          <Link href="/network" className="text-accent hover:underline">
+            Full network view →
+          </Link>
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-2">
+          {ordered.slice(0, 8).map((peer) => (
+            <li key={peer.peer_id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[12.5px]">
+              <Badge tone={reachTone(peer.status)}>{peer.status}</Badge>
+              <Hash value={peer.peer_id} chars={8} />
+              <span className="text-ink-3">
+                {peer.age_seconds !== null ? (
+                  <>
+                    last session {formatAge(peer.age_seconds)} ago {peer.last_direction}
+                    {peer.entries_after !== null && <> · log at {peer.entries_after} entries after</>}
+                  </>
+                ) : peer.last_error ? (
+                  <>never connected · {peer.last_error}</>
+                ) : (
+                  <>never connected</>
+                )}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {ordered.length > 8 && (
+        <p className="mt-2 text-[12px] text-ink-3">
+          and {ordered.length - 8} more —{" "}
+          <Link href="/network" className="text-accent hover:underline">
+            all connections
+          </Link>
+          .
+        </p>
+      )}
+    </Box>
   );
 }

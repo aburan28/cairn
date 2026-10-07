@@ -170,6 +170,40 @@ export default function Page() {
         </Step>
       </ol>
 
+      <h2>who does what: nodes, leaders, agents</h2>
+      <p className="lede">
+        A <b>node</b> holds a copy of the log, admits what arrives, and serves
+        this reader. It declares what it is for — coordinator, executor,
+        verifier, relay — and a node that declares nothing still shows what it{" "}
+        <i>can</i> do, so your own node never reads as a blank. The{" "}
+        <Link href="/network">network page</Link> keeps the three kinds of fact
+        apart: what the node says, what peers and workers report, and what the
+        log proves.
+      </p>
+      <p className="lede">
+        A <b>leader</b> is a node that signs for a fleet: a room of machines
+        submits under one id, the leader signs and is paid, and each machine
+        keeps its own slice and its own line on the roster. Agents connect over{" "}
+        <b>MCP</b> — score free with <code>score_candidate</code>, commit, wait
+        for the epoch to turn, reveal — and the{" "}
+        <Link href="/agents">agents page</Link> shows who works for this node
+        and the stanza to join them.
+      </p>
+
+      <h2>how believed is it</h2>
+      <p className="lede">
+        A verified artifact is not the end of a claim&rsquo;s life: it gets
+        replicated, narrowed, superseded, sometimes withdrawn by its own author.
+        Later verified claims say so with typed relations, and the{" "}
+        <Link href="/knowledge">knowledge page</Link> derives each
+        claim&rsquo;s standing from them — accepted, corroborated, contested,
+        superseded — plus a confidence number under <i>your</i> policy, not the
+        network&rsquo;s. Standing moves no money and settles nothing; it is the
+        log&rsquo;s memory of what became of its own results. The{" "}
+        <Link href="/chain">chain</Link> is the same log hashed link by link,
+        so two nodes that settled the same claims compute the same head.
+      </p>
+
       <h2>publishing beats hoarding, and that is arithmetic</h2>
       <p className="lede">
         A winner-take-all bounty pays you to sit on a partial result until you
@@ -244,7 +278,10 @@ export default function Page() {
         </li>
       </ul>
       <p className="lede">
-        Next: explore the <Link href="/network">network</Link> or the{" "}
+        Next: <Link href="/agents">connect an agent</Link>, explore the{" "}
+        <Link href="/network">network</Link>, divide a search on{" "}
+        <Link href="/coordination">coordination</Link>, check what is believed on{" "}
+        <Link href="/knowledge">knowledge</Link>, or browse the{" "}
         <Link href="/objectives">challenges</Link> a node is currently paying for.
       </p>
     </div>

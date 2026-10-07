@@ -20,12 +20,14 @@ import { NODE_URL } from "@/lib/objectives";
 export const ROUTES = [
   { href: "/", label: "Overview", hint: "What cairn is, and this node's numbers" },
   { href: "/network", label: "Network", hint: "This node, its peer connections, and node roles" },
+  { href: "/agents", label: "Agents", hint: "Whether this node leads, who works for it, and the MCP stanza to connect" },
   { href: "/objectives", label: "Objectives", hint: "What this node will pay for" },
   { href: "/goals", label: "Goals", hint: "What the network is trying to beat, and from which angles" },
   { href: "/task", label: "Task progress", hint: "A divided search: what is settled, who is working it, how far along" },
   { href: "/submit", label: "Post a challenge", hint: "Fund a question, signed by a wallet" },
   { href: "/contribute", label: "Contribute", hint: "Ways to take part, what each pays, and adding machines on your network" },
   { href: "/chain", label: "Chain", hint: "Epoch links, and whether you have forked" },
+  { href: "/knowledge", label: "Knowledge", hint: "How believed each settled claim is, under your policy" },
   { href: "/log", label: "Log", hint: "Every record, as the node stores it" },
   { href: "/coordination", label: "Coordination", hint: "A divided search's epoch, who holds which slice, and the task leases" },
   { href: "/peers", label: "Peers", hint: "The log's address book: who announced an address" },
@@ -33,11 +35,12 @@ export const ROUTES = [
 ] as const;
 
 /**
- * The sidebar is four places. Goals, the chain, the log, coordination,
- * contribute and posting a challenge stay in `ROUTES`, so ⌘K still opens
- * them, and the pages that need them link to them. A sidebar that listed
- * every one of those sat beside Cairn.app's Node menu, which listed them
- * again, and neither map was the one a person could hold in their head.
+ * The sidebar is six places. Goals, the chain, knowledge, the log,
+ * coordination, contribute and posting a challenge stay in `ROUTES`, so ⌘K
+ * still opens them, and the pages that need them link to them. A sidebar
+ * that listed every one of those sat beside Cairn.app's Node menu, which
+ * listed them again, and neither map was the one a person could hold in
+ * their head.
  *
  * `match` lists the routes that belong under an entry without being it --
  * one objective, and its move history, are both "Objectives".
@@ -57,8 +60,15 @@ const NAV: {
         icon: <IconTarget />,
         match: ["/challenge", "/frontier", "/task", "/submit", "/goals"],
       },
+      { href: "/agents", label: "Agents", icon: <IconAgents />, match: [] },
       { href: "/network", label: "Network", icon: <IconNetwork />, match: ["/peers", "/coordination"] },
-      { href: "/how-it-works", label: "How it works", icon: <IconBook />, match: ["/contribute"] },
+      {
+        href: "/chain",
+        label: "Knowledge",
+        icon: <IconBook />,
+        match: ["/knowledge", "/log"],
+      },
+      { href: "/how-it-works", label: "How it works", icon: <IconInfo />, match: ["/contribute"] },
     ],
   },
 ];
@@ -547,6 +557,26 @@ function IconBook() {
   return (
     <Icon>
       <path d="M2.5 3.5h4A1.5 1.5 0 0 1 8 5v8a1 1 0 0 0-1-1H2.5ZM13.5 3.5h-4A1.5 1.5 0 0 0 8 5v8a1 1 0 0 1 1-1h4.5Z" />
+    </Icon>
+  );
+}
+
+function IconAgents() {
+  return (
+    <Icon>
+      <circle cx="5.5" cy="5.5" r="2.2" />
+      <circle cx="11" cy="6.5" r="1.7" />
+      <path d="M2 13.5c.6-2.3 2-3.5 3.5-3.5s2.9 1.2 3.5 3.5M9.5 10.3c.5-.3 1-.4 1.5-.4 1.2 0 2.3 1 2.8 3" />
+    </Icon>
+  );
+}
+
+function IconInfo() {
+  return (
+    <Icon>
+      <circle cx="8" cy="8" r="5.5" />
+      <path d="M8 7.2v3.3" />
+      <circle cx="8" cy="5" r="0.9" fill="currentColor" stroke="none" />
     </Icon>
   );
 }

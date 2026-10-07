@@ -225,6 +225,78 @@ export function NodePicker({
   );
 }
 
+/**
+ * Which node this page reads, in one quiet line.
+ *
+ * Most readers never retarget: the node that served the page is the node to
+ * read. `NodePicker` puts a URL box and a Read button in the header of every
+ * page, which is the right control for comparing two nodes and visual noise
+ * for everyone else. This shows the provenance as text — "this node", or the
+ * origin — with the retarget box folded behind a Change button. Same
+ * capability, none of the chrome. Pages whose whole point is comparison
+ * (objectives, network) keep the full picker.
+ */
+export function NodeSource({
+  value,
+  onChange,
+  onRead,
+  loading,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  onRead: () => void;
+  loading: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const display =
+    value === "" || (typeof window !== "undefined" && value === window.location.origin)
+      ? "this node"
+      : value;
+  if (!open) {
+    return (
+      <p className="text-[12px] text-ink-3">
+        Reading from <span className="mono text-ink-2">{display}</span>{" "}
+        <button
+          type="button"
+          className="cursor-pointer text-accent hover:underline"
+          onClick={() => setOpen(true)}
+        >
+          Change
+        </button>
+      </p>
+    );
+  }
+  return (
+    <form
+      className="flex items-center gap-1.5"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onRead();
+        setOpen(false);
+      }}
+    >
+      <label htmlFor="node" className="text-[12px] text-ink-3">
+        Node
+      </label>
+      <input
+        id="node"
+        className="field field-mono min-w-0 flex-1 py-1.5 sm:w-64 sm:flex-none"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        spellCheck={false}
+        // biome-ignore lint/a11y/noAutofocus: opened by an explicit click, so focus belongs here.
+        autoFocus
+      />
+      <button className="btn btn-sm py-1.5" type="submit" disabled={loading}>
+        {loading ? "Reading…" : "Read"}
+      </button>
+      <button type="button" className="btn btn-sm btn-ghost py-1.5" onClick={() => setOpen(false)}>
+        Cancel
+      </button>
+    </form>
+  );
+}
+
 /** A titled box of facts. See `.box` in the stylesheet. */
 export function Box({
   title,

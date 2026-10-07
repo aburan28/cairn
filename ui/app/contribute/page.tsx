@@ -123,6 +123,7 @@ export default function Page() {
               on={role.declares ? declared.has(role.declares) : false}
               bridge={bridge}
               busy={restarting !== null}
+              node={base ?? ""}
               onToggle={toggle}
               onOpen={open}
             />
@@ -219,6 +220,7 @@ function RoleCard({
   on,
   bridge,
   busy,
+  node,
   onToggle,
   onOpen,
 }: {
@@ -226,6 +228,7 @@ function RoleCard({
   on: boolean;
   bridge: Bridge | null;
   busy: boolean;
+  node: string;
   onToggle: (role: AppRole, on: boolean) => void;
   onOpen: (sheet: AppSheet) => void;
 }) {
@@ -282,13 +285,19 @@ function RoleCard({
                 {role.start.app}
               </div>
             )}
+            <BrowserAction role={role} node={node} />
             {role.start.cli && (
-              <div className="relative">
-                <pre className="code pr-9 text-[11.5px]">{role.start.cli}</pre>
-                <div className="absolute top-1.5 right-1.5">
-                  <CopyButton value={role.start.cli} />
+              <details>
+                <summary className="cursor-pointer text-[12px] text-ink-3">
+                  The command, for a terminal
+                </summary>
+                <div className="relative mt-1.5">
+                  <pre className="code pr-9 text-[11.5px]">{role.start.cli}</pre>
+                  <div className="absolute top-1.5 right-1.5">
+                    <CopyButton value={role.start.cli} />
+                  </div>
                 </div>
-              </div>
+              </details>
             )}
           </>
         )}
@@ -299,6 +308,265 @@ function RoleCard({
         )}
       </div>
     </article>
+  );
+}
+
+/**
+ * What a browser tab can do for a role without an app to ask: a small
+ * planner that turns "offer compute" into the concrete offer — how many
+ * GPUs, how many hours — and the exact command that starts it. Nothing here
+ * touches the network; it drafts, and the terminal (or Cairn.app) runs.
+ */
+function BrowserAction({ role, node }: { role: RoleInfo; node: string }) {
+  const [open, setOpen] = useState(false);
+  if (role.id === "funder") return null;
+  const cta =
+    role.id === "compute"
+      ? "Plan an offer"
+      : role.id === "experimenter"
+        ? "Plan a solve"
+        : role.id === "validator"
+          ? "Plan a check"
+          : "Plan a relay";
+  if (!open) {
+    return (
+      <div>
+        <button type="button" className="btn btn-primary btn-sm" onClick={() => setOpen(true)}>
+          {cta}
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-md border border-edge bg-surface-2 p-2.5">
+      {role.id === "compute" && <ComputePlanner node={node} />}
+      {role.id === "experimenter" && <SolvePlanner />}
+      {role.id === "validator" && <ValidatePlanner />}
+      {role.id === "relay" && <RelayPlanner />}
+      <button
+        type="button"
+        className="mt-1.5 text-[12px] text-ink-3 underline underline-offset-2 hover:text-ink"
+        onClick={() => setOpen(false)}
+      >
+        Close
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Offer compute: how much, for how long, under what name — then the `cairn
+ * work` line and a pin. The pin is this browser's reminder that the machine
+ * is promised, kept in `localStorage` and labelled as such: the network
+ * learns about work from heartbeats and settlements, never from a browser
+ * toggle.
+ */
+function ComputePlanner({ node }: { node: string }) {
+  const [gpus, setGpus] = useState("1");
+  const [hours, setHours] = useState("8");
+  const [worker, setWorker] = useState("");
+  const [pinned, setPinned] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      setPinned(localStorage.getItem("cairn-pinned-compute"));
+    } catch {
+      setPinned(null);
+    }
+  }, []);
+
+  const command = useMemo(
+    () =>
+      workCommand({
+        node: node || "<node-url>",
+        objective: "<objective-id>",
+        worker: worker || "<your-name>",
+      }),
+    [node, worker],
+  );
+
+  const pin = () => {
+    const value = `${gpus || "?"} GPU${gpus === "1" ? "" : "s"} · ${hours || "?"} h/day · ${worker || "unnamed"}`;
+    try {
+      localStorage.setItem("cairn-pinned-compute", value);
+    } catch {
+      /* site data blocked; the offer below is still the useful part */
+    }
+    setPinned(value);
+  };
+  const unpin = () => {
+    try {
+      localStorage.removeItem("cairn-pinned-compute");
+    } catch {
+      /* already gone */
+    }
+    setPinned(null);
+  };
+
+  return (
+    <div className="flex flex-col gap-2 text-[12.5px]">
+      {pinned && (
+        <p className="text-[12px] text-accent">
+          Pinned in this browser: {pinned}.{" "}
+          <button type="button" className="underline underline-offset-2" onClick={unpin}>
+            Unpin
+          </button>
+        </p>
+      )}
+      <div className="grid grid-cols-3 gap-2">
+        <label className="flex flex-col gap-1 text-[11.5px] text-ink-3">
+          GPUs
+          <input className="field py-1.5" value={gpus} onChange={(e) => setGpus(e.target.value)} inputMode="numeric" />
+        </label>
+        <label className="flex flex-col gap-1 text-[11.5px] text-ink-3">
+          Hours/day
+          <input className="field py-1.5" value={hours} onChange={(e) => setHours(e.target.value)} inputMode="numeric" />
+        </label>
+        <label className="flex flex-col gap-1 text-[11.5px] text-ink-3">
+          Name
+          <input
+            className="field py-1.5"
+            value={worker}
+            onChange={(e) => setWorker(e.target.value)}
+            placeholder="garage-gpu"
+            spellCheck={false}
+          />
+        </label>
+      </div>
+      <p className="text-ink-2">
+        Offering: <b className="text-ink">{gpus || "?"} GPU{gpus === "1" ? "" : "s"}</b>,{" "}
+        <b className="text-ink">{hours || "?"} hours a day</b>
+        {worker && (
+          <>
+            {" "}as <span className="mono">{worker}</span>
+          </>
+        )}
+        . Paid per accepted answer — idle time earns nothing, because nothing in the log can
+        show it was spent.
+      </p>
+      <div className="relative">
+        <pre className="code pr-9 text-[11px]">{command}</pre>
+        <div className="absolute top-1.5 right-1.5">
+          <CopyButton value={command} />
+        </div>
+      </div>
+      <div>
+        <button type="button" className="btn btn-sm" onClick={pin}>
+          {pinned ? "Update pin" : "Pin this offer here"}
+        </button>
+      </div>
+      <p className="text-[11.5px] text-ink-3">
+        The pin is a reminder in this browser only. Proof of work is the heartbeat on{" "}
+        <Link href="/network" className="text-accent hover:underline">
+          the network page
+        </Link>{" "}
+        and the settlement on the challenge.
+      </p>
+    </div>
+  );
+}
+
+function SolvePlanner() {
+  const [objective, setObjective] = useState("");
+  const [artifact, setArtifact] = useState("answer.json");
+  const tryLine = `cairn try ${objective || "<objective>"} --submitter <you> --artifact ${artifact || "answer.json"}`;
+  return (
+    <div className="flex flex-col gap-2 text-[12.5px]">
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="flex flex-col gap-1 text-[11.5px] text-ink-3">
+          Objective id
+          <input
+            className="field field-mono py-1.5"
+            value={objective}
+            onChange={(e) => setObjective(e.target.value)}
+            placeholder="sha256:…"
+            spellCheck={false}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[11.5px] text-ink-3">
+          Artifact file
+          <input
+            className="field field-mono py-1.5"
+            value={artifact}
+            onChange={(e) => setArtifact(e.target.value)}
+            spellCheck={false}
+          />
+        </label>
+      </div>
+      <p className="text-ink-2">
+        Score first — free, same checker that decides payment — then commit, wait for the epoch
+        to turn, and reveal.
+      </p>
+      <div className="relative">
+        <pre className="code pr-9 text-[11px]">{tryLine}</pre>
+        <div className="absolute top-1.5 right-1.5">
+          <CopyButton value={tryLine} />
+        </div>
+      </div>
+      <Link href="/objectives" className="text-accent hover:underline">
+        Pick an open objective →
+      </Link>
+    </div>
+  );
+}
+
+function ValidatePlanner() {
+  const [identity, setIdentity] = useState("validator.identity.json");
+  const [understood, setUnderstood] = useState(false);
+  const line = `cairn run --attest-identity ${identity || "validator.identity.json"}`;
+  return (
+    <div className="flex flex-col gap-2 text-[12.5px]">
+      <label className="flex flex-col gap-1 text-[11.5px] text-ink-3">
+        Identity file
+        <input
+          className="field field-mono py-1.5"
+          value={identity}
+          onChange={(e) => setIdentity(e.target.value)}
+          spellCheck={false}
+        />
+      </label>
+      <label className="flex cursor-pointer items-start gap-2 text-ink-2">
+        <input
+          type="checkbox"
+          className="mt-0.5 accent-[var(--accent)]"
+          checked={understood}
+          onChange={(e) => setUnderstood(e.target.checked)}
+        />
+        I understand each check stakes 50,000 units, lost if the check was wrong.
+      </label>
+      <div className="relative">
+        <pre className="code pr-9 text-[11px]">{line}</pre>
+        <div className="absolute top-1.5 right-1.5">
+          <CopyButton value={line} />
+        </div>
+      </div>
+      {!understood && (
+        <p className="text-[11.5px] text-warn">Correct checks are not paid yet — only the bond moves.</p>
+      )}
+    </div>
+  );
+}
+
+function RelayPlanner() {
+  const [port, setPort] = useState("9000");
+  const line = `cairn run --listen 0.0.0.0:${port || "9000"}`;
+  return (
+    <div className="flex flex-col gap-2 text-[12.5px]">
+      <label className="flex max-w-32 flex-col gap-1 text-[11.5px] text-ink-3">
+        Port
+        <input className="field py-1.5" value={port} onChange={(e) => setPort(e.target.value)} inputMode="numeric" />
+      </label>
+      <p className="text-ink-2">
+        Accept connections and serve the log. Unpaid — nothing in the log can show a relay
+        served anyone — but the network stays connected because of it.
+      </p>
+      <div className="relative">
+        <pre className="code pr-9 text-[11px]">{line}</pre>
+        <div className="absolute top-1.5 right-1.5">
+          <CopyButton value={line} />
+        </div>
+      </div>
+    </div>
   );
 }
 

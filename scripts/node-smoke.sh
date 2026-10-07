@@ -322,6 +322,8 @@ case "$UI_CODE" in
 /ui/log/|Every record this node holds
 /ui/network/|Whom this node has reached
 /ui/coordination/|How a divided search is coordinated
+/ui/agents/|Whether this node leads
+/ui/knowledge/|How believed each settled claim is
 PAGES
     ;;
   404)
