@@ -57,13 +57,44 @@ cairn secret set AWS_SECRET_ACCESS_KEY --file ~/aws.key.secret
 # optional when not using Secrets Manager:
 cairn secret set DATABASE_URL --file ~/rho-dp.url
 
-export CAIRN_CRYPTO_ROOT=/path/to/aburan28/crypto
+export CAIRN_CRYPTO_ROOT=/path/to/aburan28/crypto   # or omit: walk fetches it
 ./scripts/ecc2k-dp.sh secrets-check   # which credentials are stored
 ./scripts/ecc2k-dp.sh status          # live Pages snapshot (JSON)
 ./scripts/ecc2k-dp.sh upload --dp-file dps.bin --slot 0
 ./scripts/ecc2k-dp.sh ingest once     # or: pending | verify
 ./scripts/ecc2k-dp.sh status-url
 ```
+
+## Running the search on a CPU
+
+No GPU, no AWS identity, no Postgres — everything below runs on a laptop.
+The walker is the bitsliced CPU backend (`make cpu`, g++ and OpenMP only),
+which does ~60M iterations/s on four cores, about a weight-34 point a
+second:
+
+```sh
+./scripts/ecc2k-dp.sh walk --seconds 120 --dp-file /tmp/dps.bin
+./scripts/ecc2k-dp.sh verify-local --dp-file /tmp/dps.bin --slot 0
+./scripts/ecc2k-dp.sh strip --dp-file /tmp/dps.bin --out /tmp/dps-v1.bin
+./scripts/ecc2k-dp.sh witness --corpus /tmp/dps.bin --out-dir /tmp/claims --max 8
+```
+
+`walk` fetches the crypto checkout (sparse, `ecc2k130/` only) and builds the
+walker on first use, then walks the real curve-131 parameters. Its output is
+a **v2** corpus: 72-byte records carrying the witness (per-branch counts)
+behind an `ECC2KDP2` header. That is the format cairn's objective pays for
+and the format the campaign store refuses — the ingester takes 32-byte
+records only — so one walk feeds both paths:
+
+- `strip` derives the uploadable v1 bytes (`seed, canon[3]`, 32 bytes each);
+  `verify-local` checks framing, recomputes the commit marker, and confirms
+  the key shape `dp_ingest` recognises, all without touching AWS;
+- `witness` emits cairn claim artifacts from the carried counts (zero steps
+  replayed) and verifies each batch with the pinned checker, so the artifact
+  the payer accepts is checked in this checkout before it is submitted.
+
+`upload` accepts either format and strips v2 itself, loudly, before the PUT;
+the local file keeps its witnesses either way.
 
 `cairn secret path` prints the secrets directory. `cairn secret run` is what
 the script uses internally: named secrets are exported into the child's
