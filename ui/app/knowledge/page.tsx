@@ -88,7 +88,7 @@ export default function Page() {
     setReadAt(new Date());
   }, [base, policy]);
 
-  useEvery(load, 30, base !== null);
+  useEvery(load, 30, base !== null, policy);
 
   const counts = knowledge?.by_standing ?? {};
   const verified = (counts.accepted ?? 0) + (counts.corroborated ?? 0);

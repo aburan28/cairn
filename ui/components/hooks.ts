@@ -35,9 +35,12 @@ export function useNode(): string | null {
  * the moment it becomes visible again. A node on the other end of an SSH
  * tunnel should not be asked anything by a tab nobody is looking at.
  * `read` is held in a ref, so a new closure each render does not restart the
- * clock; `enabled` false stops it.
+ * clock; `enabled` false stops it. `key` is what the read depends on that the
+ * person can change -- a policy, a slice count: a new key reads at once
+ * rather than at the next tick, which would leave the old answer on screen
+ * under the new choice for up to a whole interval.
  */
-export function useEvery(read: () => void | Promise<void>, seconds: number, enabled = true) {
+export function useEvery(read: () => void | Promise<void>, seconds: number, enabled = true, key?: unknown) {
   const latest = useRef(read);
   latest.current = read;
   useEffect(() => {
@@ -63,5 +66,5 @@ export function useEvery(read: () => void | Promise<void>, seconds: number, enab
       if (timer) clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [seconds, enabled]);
+  }, [seconds, enabled, key]);
 }

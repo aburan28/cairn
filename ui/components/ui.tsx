@@ -237,14 +237,19 @@ export function Sheet({
   children: React.ReactNode;
 }) {
   const panel = useRef<HTMLDivElement>(null);
+  // Callers pass `onClose` inline, so it is a new function every render. Held
+  // in a ref: an effect keyed on it re-ran on every parent render and pulled
+  // focus back to the panel from whatever field the person was typing in.
+  const close = useRef(onClose);
+  close.current = onClose;
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") close.current();
     };
     window.addEventListener("keydown", onKey);
     panel.current?.focus();
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, []);
   return (
     <div
       className="fixed inset-0 z-50 flex justify-end bg-canvas/60 backdrop-blur-sm"

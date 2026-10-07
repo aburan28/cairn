@@ -952,7 +952,11 @@ impl Server {
             return;
         };
         let now = crate::time::unix_seconds();
-        let wrote = outcome.is_ok() && matches!(tool, "submit_claim" | "post_objective");
+        // A post, a commitment or a reveal. `already_committed` answers Ok
+        // and appends nothing, so it is a read here.
+        let wrote = outcome.is_ok()
+            && (tool == "post_objective"
+                || (tool == "submit_claim" && matches!(reason, Some("committed" | "revealed"))));
         {
             let mut presence = attachment
                 .presence
@@ -979,9 +983,13 @@ impl Server {
                 format!("{who} posted objective {}", crate::journal::short(id))
             }
             _ => format!(
-                "{who} submitted to {}: {}",
+                "{who} {} an answer to {}",
+                if reason == Some("revealed") {
+                    "revealed"
+                } else {
+                    "committed"
+                },
                 objective.map_or_else(|| "an objective".to_string(), crate::journal::short),
-                reason.unwrap_or("queued")
             ),
         };
         crate::journal::note(

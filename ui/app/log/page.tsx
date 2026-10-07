@@ -90,7 +90,9 @@ export default function Page() {
     }
   }, [base]);
 
-  useEvery(loadRecords, 30, base !== null);
+  // The log is the big read, and only grows: once a minute. The events are
+  // a cursor over a small ring, so they can be asked for often.
+  useEvery(loadRecords, 60, base !== null);
   useEvery(loadEvents, 10, base !== null);
 
   const items = useMemo(() => {

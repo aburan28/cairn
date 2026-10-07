@@ -460,7 +460,7 @@ function Search({ id }: { id: string }) {
     }
   }, [base, id, partitions]);
 
-  useEvery(load, REFRESH_SECONDS, base !== null);
+  useEvery(load, REFRESH_SECONDS, base !== null, partitions);
 
   const crumb = { href: "/coordination", label: "Coordination" };
   if (notFound) {
