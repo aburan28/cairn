@@ -955,6 +955,7 @@ struct RunRequest {
     max_queue: Option<usize>,
     mcp_identity: Option<String>,
     mcp_max_spend: Option<u64>,
+    mcp_http: Option<String>,
     committee_identity: Option<String>,
     attest_identity: Option<String>,
     no_mcp: bool,
@@ -1719,6 +1720,7 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
         max_queue: None,
         mcp_identity: None,
         mcp_max_spend: None,
+        mcp_http: None,
         committee_identity: None,
         attest_identity: None,
         no_mcp: false,
@@ -1764,6 +1766,7 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
                 }
             }
             "--mcp-identity" => request.mcp_identity = Some(cursor.value("run: --mcp-identity")?),
+            "--mcp-http" => request.mcp_http = Some(cursor.value("run: --mcp-http")?),
             "--mcp-max-spend" => {
                 request.mcp_max_spend = Some(parse_u64(
                     &cursor.value("run: --mcp-max-spend")?,
@@ -4236,6 +4239,10 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
+        "      --mcp-http ADDR also serves MCP over Streamable HTTP there (POST /mcp)",
+    );
+    say(
+        out,
         "      --mcp-max-spend N lets agents fund up to N units of objectives (default 0)",
     );
     say(
@@ -4246,10 +4253,14 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      use --no-mcp or --no-queue to disable either input; stop with Ctrl-C",
     );
-    say(out, "  mcp [--identity FILE]");
+    say(out, "  mcp [--identity FILE] [--http ADDR]");
     say(
         out,
-        "      the MCP server alone, on a log of its own; --log/--root before or after",
+        "      the MCP server alone, on a log of its own; --log/--root before or after;",
+    );
+    say(
+        out,
+        "      --http serves Streamable HTTP there instead of stdio (POST /mcp)",
     );
     say(
         out,
@@ -4632,6 +4643,7 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
     config.mcp = !request.no_mcp;
     config.mcp_identity = request.mcp_identity.as_ref().map(PathBuf::from);
     config.mcp_max_spend = request.mcp_max_spend;
+    config.mcp_http = request.mcp_http.clone();
     config.committee_identity = request.committee_identity.as_ref().map(PathBuf::from);
     config.attest_identity = request.attest_identity.as_ref().map(PathBuf::from);
     config.store = store.limit().is_some().then(|| store.clone());
@@ -4655,7 +4667,13 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
     // `run` is itself a valid stdio MCP command, so stdout belongs exclusively
     // to JSON-RPC. Operational status follows the rest of the daemon to stderr.
     eprintln!("cairn node starting");
-    eprintln!("  mcp:  {}", if config.mcp { "stdio" } else { "disabled" });
+    let mcp_line = match (config.mcp, config.mcp_http.as_deref()) {
+        (true, Some(addr)) => format!("stdio + http://{addr}/mcp"),
+        (true, None) => String::from("stdio"),
+        (false, Some(addr)) => format!("http://{addr}/mcp"),
+        (false, None) => String::from("disabled"),
+    };
+    eprintln!("  mcp:  {mcp_line}");
     eprintln!("  ui:   http://{serve}/ui/");
     eprintln!("  http: {serve}");
     eprintln!("  p2p:  {listen}");

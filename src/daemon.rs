@@ -154,6 +154,11 @@ pub struct Config {
     /// an MCP client can launch one process without creating a second ledger
     /// writer.
     pub mcp: bool,
+    /// Serve the same MCP over Streamable HTTP on this address, for clients
+    /// that cannot spawn a subprocess. Independent of [`Config::mcp`]: stdio
+    /// and HTTP may serve together, each with its own sessions over the one
+    /// shared node. Plain HTTP -- see `mcp::start_shared_http`.
+    pub mcp_http: Option<String>,
     /// Ed25519 identity used to sign MCP submissions. This is deliberately
     /// separate from [`Config::identity`], which is the transport KEM key.
     pub mcp_identity: Option<PathBuf>,
@@ -210,6 +215,7 @@ impl Config {
             key_file: None,
             proxy: None,
             mcp: false,
+            mcp_http: None,
             mcp_identity: None,
             mcp_max_spend: None,
             committee_identity: None,
@@ -1155,6 +1161,12 @@ pub fn run(config: Config) -> Result<(), String> {
             .map_err(|e| format!("checkpoint: {e}"))?;
     }
 
+    // One ceiling for the whole process, whatever transports serve it: stdio
+    // and HTTP share the operator's per-run budget rather than each getting
+    // one. See `mcp::Server::spend`.
+    let spend = Arc::new(Mutex::new(crate::mcp::SpendCeiling::from_flag_or_env(
+        config.mcp_max_spend,
+    )?));
     let mcp_finished = if config.mcp {
         Some(
             crate::mcp::start_shared_stdio(
@@ -1162,13 +1174,28 @@ pub fn run(config: Config) -> Result<(), String> {
                 config.mcp_identity.as_deref(),
                 &config.log,
                 &config.key_path(),
-                crate::mcp::SpendCeiling::from_flag_or_env(config.mcp_max_spend)?,
+                Arc::clone(&spend),
             )
             .map_err(|error| format!("mcp: {error}"))?,
         )
     } else {
         None
     };
+
+    // Bound before the first tick, so a bad --mcp-http address fails startup
+    // rather than a node that is already peering. No completion handle: HTTP
+    // clients come and go, and only stdio's single client supervises.
+    if let Some(addr) = config.mcp_http.as_deref() {
+        crate::mcp::start_shared_http(
+            Arc::clone(&state),
+            config.mcp_identity.as_deref(),
+            &config.log,
+            &config.key_path(),
+            Arc::clone(&spend),
+            addr,
+        )
+        .map_err(|error| format!("mcp http: {error}"))?;
+    }
 
     // The HTTP half. Spawned after the checkpoint exists, so the first request
     // for `/checkpoint` finds one.

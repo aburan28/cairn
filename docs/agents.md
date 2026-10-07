@@ -267,6 +267,29 @@ check the tool's current docs rather than assuming the server is at fault — th
 server itself is standard stdio MCP and is exercised directly in
 `cargo test --lib mcp`.
 
+### Over HTTP instead of stdio
+
+Stdio only reaches a client that can spawn a subprocess. For anything else — a
+remote Claude Code, an agent on another machine — serve the same protocol over
+Streamable HTTP:
+
+```sh
+cairn --log /abs/path/to/cairn.jsonl --root /abs/path/to/repo mcp --http 127.0.0.1:8001
+# or on the live log, beside stdio: cairn run --mcp-http 127.0.0.1:8001
+```
+
+One POST /mcp per JSON-RPC message; `initialize` mints a session id the client
+sends back as `Mcp-Session-Id`. Citation capabilities are per-session, so two
+clients sharing one server cannot spend each other's — restart the server and
+every session's capabilities are gone, exactly as restarting a stdio server
+drops its client's. `scripts/mcp-config.sh --url http://127.0.0.1:8001/mcp`
+writes the stanza (Claude Code: `claude mcp add --transport http cairn URL`);
+`scripts/mcp-http-smoke.sh` drives the whole flow against a real process.
+
+Plain HTTP, always: this binary terminates no TLS (see `cipher_policy`), so a
+bind outside loopback should sit behind an SSH tunnel or a TLS-terminating
+proxy. The server warns when it does not.
+
 ### Check the wiring before blaming the agent
 
 The server is a subprocess speaking JSON-RPC on stdio, so a misconfigured client
