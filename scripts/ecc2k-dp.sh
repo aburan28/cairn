@@ -12,8 +12,14 @@
 #
 #   cairn secret set AWS_ACCESS_KEY_ID --file …
 #   cairn secret set AWS_SECRET_ACCESS_KEY --file …
+#   cairn secret set ECC_BUCKET --value ecc2k130-<account>
 #   cairn secret set DATABASE_URL --file …          # optional; else Secrets Manager
 #   cairn secret set RHO_DB_HOST --value rho-dp.…   # when DATABASE_URL is unset
+#
+# Uploads go through `cairn deposit`, never boto3: the node mints a
+# content-keyed object name the ingester recognises, signs the PUT, and writes
+# the commit marker beside the body. The deposit is created on first upload
+# (ECC_BUCKET names the bucket) and reused after.
 #
 # The crypto checkout that holds aws/dp_ingest.py and aws/ingest.sh:
 #
@@ -163,58 +169,89 @@ PY
     with_secrets "$CRYPTO_ROOT/ecc2k130/aws/ingest.sh" "$INGEST_MODE"
     ;;
   upload)
-    need_crypto
     [[ -n "$DP_FILE" ]] || { echo "upload needs --dp-file" >&2; exit 2; }
     [[ -f "$DP_FILE" ]] || { echo "no such file: $DP_FILE" >&2; exit 2; }
     if [[ -z "$SLOT" ]]; then
       SLOT="${ECC_SLOT:-0}"
     fi
-    # Upload one immutable object under dp/slot-N/, matching the legacy
-    # worker key shape the ingester already recognises. The body's sha256
-    # goes in a sibling .bin.json commit marker so a truncated put cannot
-    # become a stored point.
-    upload_py=$(cat <<'PY'
-import hashlib, json, os, sys, time, urllib.parse
-try:
-    import boto3
-except ImportError:
-    sys.stderr.write("boto3 is required to upload: pip install boto3\n")
-    sys.exit(2)
-
-path, slot = sys.argv[1], sys.argv[2]
-body = open(path, "rb").read()
-if len(body) % 32:
-    sys.stderr.write("dp file length %d is not a multiple of 32\n" % len(body))
-    sys.exit(2)
-records = len(body) // 32
-if not records:
-    sys.stderr.write("dp file is empty\n")
-    sys.exit(2)
-
-account = boto3.client("sts").get_caller_identity()["Account"]
-bucket = os.environ.get("ECC_BUCKET") or os.environ.get("RHO_BUCKET") or ("ecc2k130-%s" % account)
-region = os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
-epoch = int(time.time())
-key = "dp/slot-%05d/%d-%016x.bin" % (int(slot), epoch, 0)
-digest = hashlib.sha256(body).hexdigest()
-marker = {
-    "sha256": digest,
-    "records": records,
-    "producedAt": epoch,
-    "format": "ecc2k130-gpu-packed32",
-}
-s3 = boto3.client("s3", region_name=region)
-s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType="application/octet-stream")
-s3.put_object(
-    Bucket=bucket,
-    Key=key + ".json",
-    Body=json.dumps(marker, separators=(",", ":")).encode(),
-    ContentType="application/json",
-)
-print("uploaded s3://%s/%s (%d records)" % (bucket, key, records))
-print("status will move once dp_ingest runs; see https://aburan28.github.io/crypto/status/")
+    # Through `cairn deposit`, never boto3: the node mints a content-keyed
+    # object name the ingester recognises, signs the PUT itself, and writes
+    # the commit marker beside the body. AWS credentials stay in
+    # `cairn secret`; no Python AWS stack and no keys in the environment.
+    DEPOSIT="${ECC_DEPOSIT:-ecc2k130}"
+    if ! "$CAIRN" secret get AWS_ACCESS_KEY_ID >/dev/null 2>&1 \
+        || ! "$CAIRN" secret get AWS_SECRET_ACCESS_KEY >/dev/null 2>&1; then
+      echo "no AWS credentials stored; try:" >&2
+      echo "  cairn secret set AWS_ACCESS_KEY_ID --file …" >&2
+      echo "  cairn secret set AWS_SECRET_ACCESS_KEY --file …" >&2
+      exit 2
+    fi
+    # A v2 corpus carries its witness (72-byte records); the campaign store
+    # takes 32-byte records only, so it is stripped to a temp file first and
+    # the local original keeps its counts for a cairn claim.
+    STRIPPED=""
+    frame=$(DP_FILE="$DP_FILE" python3 - <<'PY'
+import hashlib, os, struct, sys, tempfile
+body = open(os.environ["DP_FILE"], "rb").read()
+if body[:8] == b"ECC2KDP2":
+    if len(body) < 16 or struct.unpack_from("<II", body, 8) != (2, 72) \
+            or (len(body) - 16) % 72 or len(body) <= 16:
+        sys.stderr.write("not a corpus: bad v2 framing\n")
+        sys.exit(1)
+    out = bytearray()
+    for off in range(16, len(body), 72):
+        rec = body[off:off + 72]
+        out += rec[0:8] + rec[16:40]  # seed, canon[3]
+    tmp = tempfile.NamedTemporaryFile(prefix="ecc2k-dp-v1-", suffix=".bin", delete=False)
+    tmp.write(bytes(out))
+    tmp.close()
+    sys.stderr.write(
+        "stripping v2 -> v1 for upload (%d records); the local file keeps its witnesses\n"
+        % (len(out) // 32))
+    body, stripped = bytes(out), tmp.name
+else:
+    stripped = ""
+if len(body) % 32 or not body:
+    sys.stderr.write("not uploadable: length %d is not a positive multiple of 32\n" % len(body))
+    sys.exit(1)
+print("%s %d %d %s" % (hashlib.sha256(body).hexdigest(), len(body), len(body) // 32, stripped))
 PY
-)
-    with_secrets python3 -c "$upload_py" "$DP_FILE" "$SLOT"
+) || exit 1
+    SHA256=$(echo "$frame" | awk '{print $1}')
+    SIZE=$(echo "$frame" | awk '{print $2}')
+    RECORDS=$(echo "$frame" | awk '{print $3}')
+    STRIPPED=$(echo "$frame" | awk '{print $4}')
+    UPLOAD="$DP_FILE"
+    if [[ -n "$STRIPPED" ]]; then
+      UPLOAD="$STRIPPED"
+      trap 'rm -f "$STRIPPED"' EXIT
+    fi
+    if "$CAIRN" deposit show "$DEPOSIT" >/dev/null 2>&1; then
+      if ! "$CAIRN" deposit show "$DEPOSIT" | grep -q "key_shape: ecc2k-dp"; then
+        echo "deposit $DEPOSIT exists but does not mint campaign keys; re-add it:" >&2
+        echo "  cairn deposit add --name $DEPOSIT --provider s3 --bucket B --prefix dp/ \\" >&2
+        echo "    --region R --key-shape ecc2k-dp" >&2
+        exit 2
+      fi
+    else
+      BUCKET="$("$CAIRN" secret get ECC_BUCKET 2>/dev/null || true)"
+      [[ -n "$BUCKET" ]] || BUCKET="${ECC_BUCKET:-}"
+      if [[ -z "$BUCKET" ]]; then
+        echo "no campaign bucket configured; try:" >&2
+        echo "  cairn secret set ECC_BUCKET --value ecc2k130-<account>" >&2
+        exit 2
+      fi
+      REGION="$("$CAIRN" secret get AWS_DEFAULT_REGION 2>/dev/null || true)"
+      [[ -n "$REGION" ]] || REGION="${AWS_DEFAULT_REGION:-us-west-2}"
+      "$CAIRN" deposit add --name "$DEPOSIT" --provider s3 --bucket "$BUCKET" \
+        --prefix dp/ --region "$REGION" --key-shape ecc2k-dp >&2
+    fi
+    GRANT_JSON=$("$CAIRN" deposit grant --deposit "$DEPOSIT" --submitter "slot-$SLOT" \
+      --size "$SIZE" --digest "$SHA256" --slot "$SLOT")
+    GRANT_ID=$(echo "$GRANT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["grant_id"])')
+    RECEIPT=$("$CAIRN" deposit put --grant "$GRANT_ID" --file "$UPLOAD")
+    KEY=$(echo "$RECEIPT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')
+    echo "uploaded $KEY ($RECORDS records, sha256 $SHA256)"
+    echo "status will move once dp_ingest runs; see https://aburan28.github.io/crypto/status/"
     ;;
 esac

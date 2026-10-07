@@ -84,10 +84,16 @@ A grant that is "anyone with the URL may PUT anything for an hour" is a
 credential with a short TTL. The bindings that make it a *right* rather than
 a key:
 
-1. **Prefix.** The object key is
-   `{prefix}/{deposit}/{submitter_short}/{grant_id}{ext}`.
-   A contributor cannot write outside the deposit's prefix, overwrite another
-   submitter's objects, or pick a key the ingester will not recognise.
+1. **Prefix.** The object key is minted by the node, in one of two shapes:
+   the default `{prefix}/{deposit}/{submitter_short}/{grant_id}`, or, on a
+   deposit configured with `--key-shape ecc2k-dp`,
+   `{prefix}slot-N/<stream>-0-<sha>.bin` — the content-keyed shape the
+   ECC2K-130 ingester files new worker output under, with a minted stream id
+   and the body's own sha-256. Either way a contributor cannot write outside
+   the deposit's prefix, overwrite another submitter's objects, or pick a key
+   the ingester will not recognise. Campaign grants require the slot and the
+   digest the key names; redemption writes the `.bin.json` commit marker
+   beside the body (presigned grants return a signed marker URL instead).
 2. **Size.** `max_bytes` is fixed at grant time; a PUT past it is refused
    by the node (proxy). An S3 grant is presigned only when the request names
    the exact `size` and `digest`: the URL then signs `Content-Length` and
@@ -182,17 +188,18 @@ from an operator's node without orphaning any live bounty.
 
 | surface | what it does |
 |---|---|
-| `cairn deposit add --name N --provider file\|s3 …` | write the public config; secret *names* only |
+| `cairn deposit add --name N --provider file\|s3 … [--key-shape default\|ecc2k-dp]` | write the public config; secret *names* only |
 | `cairn deposit list` / `cairn deposit show N` | public parts; never values |
-| `cairn deposit grant --deposit N --submitter S [--bytes N] [--digest H]` | issue a grant (CLI operator / tests) |
+| `cairn deposit grant --deposit N --submitter S [--bytes N] [--size N] [--digest H] [--slot N]` | issue a grant (CLI operator / tests); `--slot` is required by `ecc2k-dp` deposits |
 | `cairn deposit put --grant G --file F` | redeem a grant through the local node |
 | `POST /deposit/grant` | contributor or agent asks for a grant |
 | `PUT /deposit/upload/{id}` | proxy redemption |
 | MCP `request_upload_grant` | same as POST; response has the put URL and never a cloud key |
 
-`scripts/ecc2k-dp.sh` keeps working as the *operator* path (it already holds
-the keys via `cairn secret run`). Contributors to a deposit-backed objective
-use grants instead.
+`scripts/ecc2k-dp.sh upload` is the *operator* path onto a campaign deposit:
+grant plus put through the local node, with the commit marker written by the
+redemption. Contributors without credentials use grants instead — presigned
+for the body and the marker both.
 
 ## 8. Threats this closes, and what it does not
 

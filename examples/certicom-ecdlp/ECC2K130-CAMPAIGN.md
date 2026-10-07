@@ -54,6 +54,7 @@ live in `cairn secret`, not in the shell:
 ```sh
 cairn secret set AWS_ACCESS_KEY_ID --file ~/aws.key.id
 cairn secret set AWS_SECRET_ACCESS_KEY --file ~/aws.key.secret
+cairn secret set ECC_BUCKET --value ecc2k130-<account>
 # optional when not using Secrets Manager:
 cairn secret set DATABASE_URL --file ~/rho-dp.url
 
@@ -64,6 +65,16 @@ export CAIRN_CRYPTO_ROOT=/path/to/aburan28/crypto
 ./scripts/ecc2k-dp.sh ingest once     # or: pending | verify
 ./scripts/ecc2k-dp.sh status-url
 ```
+
+Uploads go through `cairn deposit`, not boto3: the node mints a content-keyed
+object name (`dp/slot-N/<stream>-0-<sha>.bin`, the shape `dp_ingest` files
+new worker output under), signs the PUT itself over `curl`, and writes the
+`.bin.json` commit marker beside the body. The deposit is created on first
+upload and reused after; a v2 corpus is stripped to its 32-byte records for
+the PUT while the local file keeps its witnesses. No Python AWS stack, no
+keys in the environment — and a remote worker with no credentials at all can
+upload the same way through `request_upload_grant` (or `POST /deposit/grant`),
+which answers a presigned body URL plus a signed marker URL.
 
 `cairn secret path` prints the secrets directory. `cairn secret run` is what
 the script uses internally: named secrets are exported into the child's
