@@ -20,6 +20,7 @@
  * node published, for a view the page filters on the client.
  */
 
+import type { McpPresence } from "./agents";
 import type { Liveness } from "./progress";
 
 import { expectFields } from "./shape";
@@ -268,6 +269,8 @@ export type NodeFacts = {
   fleet?: FleetFacts | null;
   /** Whom the daemon peers with: `open`, or an allowlist of `allowed` peers. */
   peers_policy?: PeersPolicy | null;
+  /** Who is attached over MCP. Absent on a node older than the field. */
+  mcp?: McpPresence;
 };
 
 export type FleetFacts = {
@@ -622,4 +625,95 @@ export function describeHost(row: Pick<HostRow, "hardware">): string {
     );
   }
   return parts.length === 0 ? "unreported" : parts.join(" · ");
+}
+
+// -- the node's role, in one word ---------------------------------------------------
+
+/**
+ * What this node *is*, from what it does -- never blank.
+ *
+ * `CAIRN_ROLES` is a declaration an operator may leave empty, and a page that
+ * answered "no declared role" for a node that hands out work, checks it and
+ * records it was describing the configuration file rather than the node. So
+ * the primary role is read off facts the node publishes about itself:
+ *
+ * - **Leader**: work arrives here. It takes submissions (or leads a fleet,
+ *   which signs what its machines send), so agents and machines connect to it
+ *   and it is the node that checks and records what they find. A fleet adds
+ *   that it signs for its members and is paid for them.
+ * - **Peer**: it keeps a copy of the network's log and syncs it with other
+ *   nodes, and takes no submissions.
+ * - **Mirror**: it publishes a log for reading and does neither.
+ *
+ * None of this is a permission. The only authority on the network is a pinned
+ * verifier's verdict; a leader decides nothing about what settles.
+ */
+export type PrimaryRole = {
+  key: "leader" | "peer" | "mirror";
+  title: string;
+  summary: string;
+  /** Extra duties, from the declared roles, as short phrases. */
+  also: string[];
+};
+
+const ALSO: Record<RoleName, string> = {
+  coordinator: "funds and posts challenges",
+  executor: "runs workers",
+  verifier: "checks answers under bond",
+  relay: "relays the log for other nodes",
+};
+
+export function primaryRole(node: Pick<NodeFacts, "accepts_submissions" | "runs_p2p" | "fleet" | "roles">): PrimaryRole {
+  const also = node.roles.declared
+    .filter((role) => role !== "coordinator" || !node.accepts_submissions)
+    .map((role) => ALSO[role])
+    .filter(Boolean);
+  if (node.fleet) {
+    const members = node.fleet.members;
+    const count = members ? ` for ${members.enrolled} enrolled machine${members.enrolled === 1 ? "" : "s"}` : "";
+    return {
+      key: "leader",
+      title: "Leader",
+      summary: `Agents and machines connect here. It hands out work, checks what comes back, and signs${count} — the fleet is paid through it.`,
+      also,
+    };
+  }
+  if (node.accepts_submissions) {
+    return {
+      key: "leader",
+      title: "Leader",
+      summary: "Agents and machines connect here. It hands out work, checks what comes back with each challenge's pinned checker, and records it. Each machine is paid under its own name.",
+      also,
+    };
+  }
+  if (node.runs_p2p) {
+    return {
+      key: "peer",
+      title: "Peer",
+      summary: "Keeps a copy of the network's log and syncs it with other nodes. It takes no submissions of its own.",
+      also,
+    };
+  }
+  return {
+    key: "mirror",
+    title: "Mirror",
+    summary: "Publishes a copy of a log for anyone to read and check. It takes no submissions and syncs with nobody.",
+    also,
+  };
+}
+
+/** `connected 40 s ago`, `last seen 12 min ago`, `never reached` -- a peer's status in words. */
+export function peerStatus(peer: Pick<Session, "status" | "age_seconds">): string {
+  if (peer.age_seconds === null) return "never reached";
+  const ago = formatUptime(peer.age_seconds);
+  switch (peer.status) {
+    case "reached":
+      return `connected · ${ago} ago`;
+    case "recent":
+      return `last seen ${ago} ago`;
+    case "lost":
+      return `lost · ${ago} ago`;
+    case "unreached":
+      return "never reached";
+  }
 }

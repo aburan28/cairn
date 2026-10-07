@@ -344,7 +344,19 @@ leader's `signs_as` instead, unsigned, so the leader signs and is paid
 ([fleet.md](fleet.md)); otherwise `--worker` is. The slice and the heartbeat
 are always `--worker`'s.
 `--partitions N` (default 8), `--rounds N`, `--device TEXT` for the roster,
-`--margin SECONDS` (default 8) to stay clear of an epoch's end. Any OS: it
+`--margin SECONDS` (default 8) to stay clear of an epoch's end.
+
+What a machine offers, which the reader's *Offer compute* panel writes:
+`--threads N` gives the solver `CAIRN_THREADS`, `OMP_NUM_THREADS` and
+`RAYON_NUM_THREADS` and reports `N` lanes on the roster; `--gpus 0,2` (or
+`none`) shows the solver only those GPUs, as `CAIRN_GPUS`,
+`CUDA_VISIBLE_DEVICES` and `HIP_VISIBLE_DEVICES`; `--hours-per-day H` (1-24)
+stops starting rounds once `H` hours of solver time are used in the UTC day
+and resumes at midnight UTC. The budget is checked between rounds -- a round
+in progress is never killed -- and due reveals are still sent while paused,
+because an unrevealed commitment is never paid. The solver is the operator's
+program and may ignore all three; the roster reports the offer, not a
+measurement, and pay still follows only what the checker accepts. Any OS: it
 needs nothing from the node but its HTTP address. Exit codes: `0` done, `1`
 the solver kept failing, `2` usage, `3` the node could not be reached.
 `scripts/work-demo.sh` runs it against a real node;

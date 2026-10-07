@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   type External,
   type FleetWorker,
+  type RoleName,
   type ThisNode,
   classLabel,
   describeHost,
@@ -11,6 +12,8 @@ import {
   fleetTotals,
   formatMemory,
   formatUptime,
+  peerStatus,
+  primaryRole,
   reachTone,
   roleWarning,
   share,
@@ -247,5 +250,44 @@ describe("fleet signing", () => {
     const fleet = { sources: ["10.0.0.0/8"], signs_as: leader };
     expect(fleetSigning(fleet)).toBe("unsigned records from these networks that name this node are signed here, as");
     expect(fleetMembers(fleet)).toBeNull();
+  });
+});
+
+describe("primaryRole", () => {
+  const roles = (declared: RoleName[] = []) => ({ declared, source: "CAIRN_ROLES", known: [] });
+
+  it("calls a node work arrives at a leader, declared or not", () => {
+    const role = primaryRole({ accepts_submissions: true, runs_p2p: true, fleet: null, roles: roles() });
+    expect(role.key).toBe("leader");
+    expect(role.title).toBe("Leader");
+    expect(role.summary).toMatch(/paid under its own name/);
+  });
+
+  it("says a fleet leader signs for its members", () => {
+    const role = primaryRole({
+      accepts_submissions: true,
+      runs_p2p: true,
+      fleet: { sources: ["enrolled"], signs_as: "a".repeat(64), members: { enrolled: 3, live: 2 } },
+      roles: roles(["verifier"]),
+    });
+    expect(role.key).toBe("leader");
+    expect(role.summary).toMatch(/3 enrolled machines/);
+    expect(role.also).toEqual(["checks answers under bond"]);
+  });
+
+  it("is a peer or a mirror when no work arrives, and never blank", () => {
+    expect(primaryRole({ accepts_submissions: false, runs_p2p: true, fleet: null, roles: roles() }).key).toBe("peer");
+    expect(primaryRole({ accepts_submissions: false, runs_p2p: false, roles: roles(["relay"]) })).toMatchObject({
+      key: "mirror",
+      also: ["relays the log for other nodes"],
+    });
+  });
+});
+
+describe("peerStatus", () => {
+  it("reads a session's window in words", () => {
+    expect(peerStatus({ status: "reached", age_seconds: 40 })).toBe("connected · 40s ago");
+    expect(peerStatus({ status: "recent", age_seconds: 600 })).toBe("last seen 10m ago");
+    expect(peerStatus({ status: "unreached", age_seconds: null })).toBe("never reached");
   });
 });

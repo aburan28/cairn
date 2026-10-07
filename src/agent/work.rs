@@ -142,6 +142,16 @@ USAGE
     --device TEXT        what this machine is, for the roster
     --margin SECONDS     post nothing this close to an epoch's end (default 8)
 
+OFFERING COMPUTE
+    --threads N          give the solver N threads: $CAIRN_THREADS, $OMP_NUM_THREADS
+                         and $RAYON_NUM_THREADS, and N lanes on the roster
+    --gpus LIST          the GPUs the solver may use, e.g. 0 or 0,2, or `none`:
+                         $CAIRN_GPUS, $CUDA_VISIBLE_DEVICES, $HIP_VISIBLE_DEVICES
+    --hours-per-day H    run the solver at most H hours (1-24) per UTC day, then
+                         pause until midnight UTC. Checked between rounds; due
+                         reveals are still sent while paused, so nothing
+                         already committed goes unpaid
+
 THE SOLVER
     Started once per round. Gets the assignment as one line of JSON on stdin and in
     $CAIRN_ASSIGNMENT, plus $CAIRN_NODE $CAIRN_OBJECTIVE $CAIRN_WORKER $CAIRN_EPOCH
@@ -174,6 +184,13 @@ pub struct Options {
     pub heartbeat: Duration,
     pub device: Option<String>,
     pub margin: u64,
+    /// Threads the solver is given, through the environment variables the
+    /// common runtimes read. Reported as `lanes` on the roster.
+    pub threads: Option<u64>,
+    /// GPU indices the solver may see, `Some(empty)` for none at all.
+    pub gpus: Option<Vec<u32>>,
+    /// Most solver time per UTC day. See [`Budget`].
+    pub hours_per_day: Option<u64>,
     pub solver: Vec<String>,
 }
 
@@ -225,6 +242,9 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
     let mut heartbeat = 30u64;
     let mut device = None;
     let mut margin = DEFAULT_MARGIN_SECONDS;
+    let mut threads = None;
+    let mut gpus = None;
+    let mut hours_per_day = None;
 
     let mut i = 0;
     while i < flags.len() {
@@ -253,6 +273,9 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
             "--heartbeat" => heartbeat = number(value()?)?,
             "--device" => device = Some(value()?.clone()),
             "--margin" => margin = number(value()?)?,
+            "--threads" => threads = Some(number(value()?)?),
+            "--gpus" => gpus = Some(parse_gpus(value()?)?),
+            "--hours-per-day" => hours_per_day = Some(number(value()?)?),
             other => return Err(format!("unknown option {other:?}")),
         }
         i += 2;
@@ -310,6 +333,14 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
     if heartbeat == 0 {
         return Err("--heartbeat must be at least 1 second".into());
     }
+    if threads == Some(0) {
+        return Err("--threads must be at least 1".into());
+    }
+    if let Some(hours) = hours_per_day {
+        if !(1..=24).contains(&hours) {
+            return Err("--hours-per-day is a whole number of hours from 1 to 24".into());
+        }
+    }
     if solver.is_empty() {
         return Err("no solver: put the command after `--`".into());
     }
@@ -338,8 +369,84 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
         heartbeat: Duration::from_secs(heartbeat),
         device,
         margin,
+        threads,
+        gpus,
+        // Twenty-four hours a day is no budget at all.
+        hours_per_day: hours_per_day.filter(|hours| *hours < 24),
         solver,
     }))
+}
+
+/// `0`, `0,2`, or `none`. Indices as the GPU runtimes number them; the
+/// solver sees only these, renumbered from zero, which is what pinning a
+/// device to this work means.
+fn parse_gpus(text: &str) -> Result<Vec<u32>, String> {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case("none") {
+        return Ok(Vec::new());
+    }
+    let mut gpus = Vec::new();
+    for part in text.split(',') {
+        let index = part.trim().parse::<u32>().map_err(|_| {
+            format!("--gpus: {part:?} is not a GPU index; give e.g. 0 or 0,2, or none")
+        })?;
+        if gpus.contains(&index) {
+            return Err(format!("--gpus names GPU {index} twice"));
+        }
+        gpus.push(index);
+    }
+    Ok(gpus)
+}
+
+/// How much solver time this machine has offered per UTC day, and how much of
+/// today's it has used.
+///
+/// UTC days, not local ones: the worker carries no timezone database, and a
+/// budget that reset at a different hour on a machine that moved would be a
+/// budget nobody could predict. Checked between rounds -- a round in progress
+/// is never killed, because a solver stopped half-way has printed half of
+/// something -- so a long round can overrun by at most its own length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    per_day: u64,
+    day: u64,
+    spent: u64,
+}
+
+impl Budget {
+    pub fn hours(hours: u64) -> Budget {
+        Budget {
+            per_day: hours * 3600,
+            day: 0,
+            spent: 0,
+        }
+    }
+
+    fn roll(&mut self, now: u64) {
+        let today = now / 86_400;
+        if today != self.day {
+            self.day = today;
+            self.spent = 0;
+        }
+    }
+
+    /// Count `seconds` of solver time used at `now`.
+    pub fn spend(&mut self, now: u64, seconds: u64) {
+        self.roll(now);
+        self.spent = self.spent.saturating_add(seconds);
+    }
+
+    /// Whether today's offer is used up, as of `now`.
+    pub fn exhausted(&mut self, now: u64) -> bool {
+        self.roll(now);
+        self.spent >= self.per_day
+    }
+
+    /// Seconds from `now` to the next UTC midnight, when a new day's offer
+    /// begins.
+    pub fn resumes_in(now: u64) -> u64 {
+        86_400 - now % 86_400
+    }
 }
 
 /// The identity file `cairn identity --out` writes: `{"secret": hex, "public": hex}`.
@@ -393,6 +500,10 @@ struct Worker {
     committed: u64,
     revealed: u64,
     rounds: u64,
+    /// Today's share of `--hours-per-day`, when one was offered.
+    budget: Option<Budget>,
+    /// Whether the pause for a spent budget has been said already today.
+    paused_said: bool,
 }
 
 impl Worker {
@@ -407,13 +518,15 @@ impl Worker {
             (None, None, None) => options.worker.clone(),
         };
         Ok(Worker {
-            options,
             submitter,
             epoch_seconds: 0,
             pending: Vec::new(),
             committed: 0,
             revealed: 0,
             rounds: 0,
+            budget: options.hours_per_day.map(Budget::hours),
+            paused_said: false,
+            options,
         })
     }
 
@@ -454,6 +567,30 @@ impl Worker {
                 self.sleep_to_next_epoch();
                 continue;
             }
+            if let Some(budget) = &mut self.budget {
+                let now = now_seconds();
+                if budget.exhausted(now) {
+                    if !self.paused_said {
+                        say(&format!(
+                            "today's {} h are used; pausing until 00:00 UTC (in {}), still \
+                             revealing what is committed",
+                            self.options.hours_per_day.unwrap_or(0),
+                            span(Budget::resumes_in(now))
+                        ));
+                        self.paused_said = true;
+                    }
+                    // Wake for every epoch turn while paused: a commitment's
+                    // reveal is due one epoch later, and an unrevealed
+                    // commitment is never paid.
+                    let wait = Budget::resumes_in(now).min(self.seconds_left() + 1);
+                    thread::sleep(Duration::from_secs(wait));
+                    continue;
+                }
+                if self.paused_said {
+                    say("a new UTC day: resuming");
+                    self.paused_said = false;
+                }
+            }
             if !self.safe_to_post() {
                 self.sleep_to_next_epoch();
                 continue;
@@ -463,7 +600,11 @@ impl Worker {
                 None => self.assignment()?,
             };
             let started = Instant::now();
-            match self.solve(&assignment) {
+            let outcome = self.solve(&assignment);
+            if let Some(budget) = &mut self.budget {
+                budget.spend(now_seconds(), started.elapsed().as_secs().max(1));
+            }
+            match outcome {
                 Ok(artifacts) => {
                     failures = 0;
                     self.rounds += 1;
@@ -549,14 +690,19 @@ impl Worker {
             .get("epoch_ends_in_seconds")
             .and_then(Value::as_u64)
             .unwrap_or(self.seconds_left());
-        let mut child = Command::new(&self.options.solver[0])
+        let mut command = Command::new(&self.options.solver[0]);
+        command
             .args(&self.options.solver[1..])
             .env("CAIRN_NODE", self.options.node.as_str())
             .env("CAIRN_OBJECTIVE", &self.options.objective)
             .env("CAIRN_WORKER", &self.options.worker)
             .env("CAIRN_EPOCH", epoch.to_string())
             .env("CAIRN_EPOCH_ENDS_IN", ends_in.to_string())
-            .env("CAIRN_ASSIGNMENT", &line)
+            .env("CAIRN_ASSIGNMENT", &line);
+        for (name, value) in offer_environment(self.options.threads, self.options.gpus.as_deref()) {
+            command.env(name, value);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -680,6 +826,9 @@ impl Worker {
         }
         if let Some(device) = &self.options.device {
             body.insert("device".to_string(), Value::string(device.clone()));
+        }
+        if let Some(threads) = self.options.threads {
+            body.insert("lanes".to_string(), Value::Int(i128::from(threads)));
         }
         Value::Object(body)
     }
@@ -829,6 +978,42 @@ impl Worker {
     }
 }
 
+/// What a solver is told about the compute it was offered: the thread count
+/// and visible devices, under the names the common runtimes already read, so
+/// a solver honours the offer without knowing cairn exists. Nothing here can
+/// stop a solver ignoring them -- it is the operator's program -- and the
+/// roster reports the offer, not a measurement of it.
+fn offer_environment(threads: Option<u64>, gpus: Option<&[u32]>) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    if let Some(threads) = threads {
+        let threads = threads.to_string();
+        for name in ["CAIRN_THREADS", "OMP_NUM_THREADS", "RAYON_NUM_THREADS"] {
+            out.push((name, threads.clone()));
+        }
+    }
+    if let Some(gpus) = gpus {
+        let list = gpus
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        for name in ["CAIRN_GPUS", "CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"] {
+            out.push((name, list.clone()));
+        }
+    }
+    out
+}
+
+/// `3 h 12 min`, for a pause.
+fn span(seconds: u64) -> String {
+    let (hours, minutes) = (seconds / 3600, (seconds % 3600) / 60);
+    if hours > 0 {
+        format!("{hours} h {minutes} min")
+    } else {
+        format!("{minutes} min")
+    }
+}
+
 fn now_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -888,6 +1073,76 @@ mod tests {
         assert_eq!(options.solver, vec!["./solve", "--fast"]);
         assert_eq!(options.node.port, 8080);
         assert_eq!(options.partitions, 8);
+    }
+
+    #[test]
+    fn an_offer_of_threads_gpus_and_hours_is_parsed_and_checked() {
+        let base = "--node http://h:1 --objective sha256:ab --worker w";
+        let options = parse(&args(&format!(
+            "{base} --threads 6 --gpus 0,2 --hours-per-day 5 -- ./solve"
+        )))
+        .unwrap()
+        .unwrap();
+        assert_eq!(options.threads, Some(6));
+        assert_eq!(options.gpus, Some(vec![0, 2]));
+        assert_eq!(options.hours_per_day, Some(5));
+        // None at all, and the whole day, are both offers worth spelling.
+        let options = parse(&args(&format!(
+            "{base} --gpus none --hours-per-day 24 -- x"
+        )))
+        .unwrap()
+        .unwrap();
+        assert_eq!(options.gpus, Some(vec![]));
+        assert_eq!(options.hours_per_day, None, "24 h a day is no budget");
+        for bad in [
+            "--threads 0",
+            "--gpus 0,0",
+            "--gpus gpu0",
+            "--hours-per-day 0",
+            "--hours-per-day 25",
+        ] {
+            assert!(
+                parse(&args(&format!("{base} {bad} -- x"))).is_err(),
+                "{bad} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn the_solver_is_told_its_threads_and_devices_in_the_runtimes_words() {
+        let env = offer_environment(Some(4), Some(&[1, 3]));
+        let get = |name: &str| {
+            env.iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("OMP_NUM_THREADS"), Some("4"));
+        assert_eq!(get("CAIRN_THREADS"), Some("4"));
+        assert_eq!(get("CUDA_VISIBLE_DEVICES"), Some("1,3"));
+        assert_eq!(get("HIP_VISIBLE_DEVICES"), Some("1,3"));
+        // `none` hides every GPU rather than leaving them all visible.
+        let env = offer_environment(None, Some(&[]));
+        assert_eq!(
+            env.iter()
+                .find(|(n, _)| *n == "CUDA_VISIBLE_DEVICES")
+                .map(|(_, v)| v.as_str()),
+            Some("")
+        );
+        assert!(offer_environment(None, None).is_empty());
+    }
+
+    #[test]
+    fn a_daily_budget_is_spent_by_rounds_and_renewed_at_utc_midnight() {
+        let day = 86_400 * 20_000;
+        let mut budget = Budget::hours(2);
+        assert!(!budget.exhausted(day + 10));
+        budget.spend(day + 3_600, 3_600);
+        assert!(!budget.exhausted(day + 3_601));
+        budget.spend(day + 7_200, 3_600);
+        assert!(budget.exhausted(day + 7_201));
+        assert_eq!(Budget::resumes_in(day + 7_201), 86_400 - 7_201);
+        // The next UTC day starts with the whole offer again.
+        assert!(!budget.exhausted(day + 86_400));
     }
 
     #[test]
