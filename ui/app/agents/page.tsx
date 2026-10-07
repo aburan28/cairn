@@ -10,6 +10,8 @@ import {
   isLeader,
 } from "@/lib/network";
 import { CLIENTS, claudeAdd, fleetInvite, fleetJoin, fleetLead, mcpStanza, type AgentClient } from "@/lib/agents";
+import { openSheet } from "@/lib/contribute";
+import { type Bridge, appBridge } from "@/lib/draft";
 import { NODE_URL, resolveNode } from "@/lib/site";
 import { formatAge } from "@/lib/progress";
 import {
@@ -33,7 +35,10 @@ import {
  * fleet, who is working for it right now, and what an agent pastes to join.
  * The fleet facts come from `GET /network`; the stanzas are the documented
  * shapes with placeholder paths, because this page cannot know the
- * reader's filesystem.
+ * reader's filesystem. Inside Cairn.app the Connect button opens the app's
+ * Agents sheet instead, which renders the same stanzas with this Mac's real
+ * paths — a window whose point is that there is no terminal must not answer
+ * "how do I connect" with a path to retype.
  */
 export default function Page() {
   const [base, setBase] = useState(NODE_URL);
@@ -41,6 +46,8 @@ export default function Page() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [client, setClient] = useState<AgentClient>("claude");
+  const [bridge, setBridge] = useState<Bridge | null>(null);
+  const [appError, setAppError] = useState<string | null>(null);
 
   const load = useCallback(async (url: string) => {
     setLoading(true);
@@ -56,11 +63,22 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
+    setBridge(appBridge());
     void resolveNode().then((url) => {
       setBase(url || window.location.origin);
       void load(url);
     });
   }, [load]);
+
+  async function connect() {
+    if (!bridge) return;
+    setAppError(null);
+    try {
+      await openSheet(bridge, "agents");
+    } catch (cause) {
+      setAppError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
 
   const picker = (
     <NodeSource
@@ -100,7 +118,18 @@ export default function Page() {
     );
   }
 
-  return <Dashboard network={network} picker={picker} origin={base} client={client} setClient={setClient} />;
+  return (
+    <Dashboard
+      network={network}
+      picker={picker}
+      origin={base}
+      client={client}
+      setClient={setClient}
+      bridge={bridge}
+      appError={appError}
+      onConnect={connect}
+    />
+  );
 }
 
 function Dashboard({
@@ -109,12 +138,18 @@ function Dashboard({
   origin,
   client,
   setClient,
+  bridge,
+  appError,
+  onConnect,
 }: {
   network: NetworkResponse;
   picker: React.ReactNode;
   origin: string;
   client: AgentClient;
   setClient: (next: AgentClient) => void;
+  bridge: Bridge | null;
+  appError: string | null;
+  onConnect: () => void;
 }) {
   const leader = isLeader(network);
   const fleet = network.node.fleet;
@@ -238,42 +273,33 @@ function Dashboard({
 
         <Box
           title="Connect an agent over MCP"
-          aside={<span className="text-[11px] font-normal text-ink-3">stdio, placeholders in /abs/path</span>}
+          aside={
+            <span className="text-[11px] font-normal text-ink-3">
+              {bridge ? "with this Mac's real paths" : "stdio, placeholders in /abs/path"}
+            </span>
+          }
         >
-          <div className="mb-2 flex flex-wrap gap-1.5">
-            {CLIENTS.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                className={`btn btn-sm ${client === option.id ? "btn-primary" : ""}`}
-                onClick={() => setClient(option.id)}
-                title={option.file}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-          <div className="relative">
-            <pre className="code pr-9 text-[11.5px]">{mcpStanza(client)}</pre>
-            <div className="absolute top-1.5 right-1.5">
-              <CopyButton value={mcpStanza(client)} />
-            </div>
-          </div>
-          <p className="hint mt-2">
-            In {CLIENTS.find((c) => c.id === client)?.file}. The agent then scores free with{" "}
-            <span className="mono">score_candidate</span> and submits with{" "}
-            <span className="mono">submit_claim</span> — commit first, reveal after the epoch turns.
-          </p>
-          {client === "claude" && (
+          {bridge ? (
             <>
-              <p className="mb-1 mt-3 text-[12px] text-ink-3">Or write it without hand-editing JSON:</p>
-              <div className="relative">
-                <pre className="code pr-9 text-[11.5px]">{claudeAdd()}</pre>
-                <div className="absolute top-1.5 right-1.5">
-                  <CopyButton value={claudeAdd()} />
-                </div>
+              <p className="text-[13px] text-ink-2">
+                The Agents sheet writes the stanza for Claude Code, Codex, or OpenCode with
+                this Mac&rsquo;s real paths — no retyping, nothing to get wrong.
+              </p>
+              <div className="mt-2">
+                <button type="button" className="btn btn-primary btn-sm" onClick={onConnect}>
+                  Connect an agent…
+                </button>
               </div>
+              {appError && <p className="mt-2 text-[12.5px] text-warn">{appError}</p>}
+              <details className="mt-3">
+                <summary className="cursor-pointer text-[12px] text-ink-3">
+                  The shape it writes, for reference
+                </summary>
+                <Stanza client={client} setClient={setClient} />
+              </details>
             </>
+          ) : (
+            <Stanza client={client} setClient={setClient} />
           )}
         </Box>
       </div>
@@ -370,5 +396,48 @@ function Dashboard({
         , from the log.
       </p>
     </>
+  );
+}
+
+/** The stanza per client, with placeholder paths. In a browser tab this is the page; in the app it is the reference under the sheet button. */
+function Stanza({ client, setClient }: { client: AgentClient; setClient: (next: AgentClient) => void }) {
+  return (
+    <div className="mt-2">
+      <div className="mb-2 flex flex-wrap gap-1.5">
+        {CLIENTS.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            className={`btn btn-sm ${client === option.id ? "btn-primary" : ""}`}
+            onClick={() => setClient(option.id)}
+            title={option.file}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+      <div className="relative">
+        <pre className="code pr-9 text-[11.5px]">{mcpStanza(client)}</pre>
+        <div className="absolute top-1.5 right-1.5">
+          <CopyButton value={mcpStanza(client)} />
+        </div>
+      </div>
+      <p className="hint mt-2">
+        In {CLIENTS.find((c) => c.id === client)?.file}. The agent then scores free with{" "}
+        <span className="mono">score_candidate</span> and submits with{" "}
+        <span className="mono">submit_claim</span> — commit first, reveal after the epoch turns.
+      </p>
+      {client === "claude" && (
+        <>
+          <p className="mb-1 mt-3 text-[12px] text-ink-3">Or write it without hand-editing JSON:</p>
+          <div className="relative">
+            <pre className="code pr-9 text-[11.5px]">{claudeAdd()}</pre>
+            <div className="absolute top-1.5 right-1.5">
+              <CopyButton value={claudeAdd()} />
+            </div>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
