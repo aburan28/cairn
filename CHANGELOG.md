@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.18.0](https://github.com/aburan28/cairn/compare/v1.17.0...v1.18.0) (2026-10-07)
+
+
+### Features
+
+* **app:** every Contribute role is a button in Cairn.app, and peers say what they offer ([#249](https://github.com/aburan28/cairn/issues/249)) ([b93dd9a](https://github.com/aburan28/cairn/commit/b93dd9aa7d2840e46b7b7136afb8fc7c1fec3b6a))
+* **cli:** sign live objectives and expose public claims ([d78ef48](https://github.com/aburan28/cairn/commit/d78ef48f63c724d217a4a0ecb2ec4283631484d3))
+* **fleet:** members enrolled from anywhere, reasons on every submission, underserved angles, and a payouts design ([ff568de](https://github.com/aburan28/cairn/commit/ff568de06495709e731583d0aefb1d73b2faa78a))
+* **serve:** optional Google sign-in, anonymous by default ([#245](https://github.com/aburan28/cairn/issues/245)) ([862ed71](https://github.com/aburan28/cairn/commit/862ed71ac183fcfdf084370e6afeed3259abff26))
+
+
+### Fixes
+
+* **launch:** publish the Runpod CPU seed ([9d94811](https://github.com/aburan28/cairn/commit/9d948116b8d0eb4f8bb141183fe38818dcfa1ab2))
+* **seeds:** dial the published list without a bootstrap file ([#247](https://github.com/aburan28/cairn/issues/247)) ([ca16d82](https://github.com/aburan28/cairn/commit/ca16d82aa36df7888da187f07848948d84de6b02))
+
+
+### Documentation
+
+* **launch:** rent a cairn seed on a cheap Runpod CPU ([2646874](https://github.com/aburan28/cairn/commit/2646874e2968f07d84fa30990d8f5ac655999f01))
+
 ## [1.17.0](https://github.com/aburan28/cairn/compare/v1.16.0...v1.17.0) (2026-10-05)
 
 
