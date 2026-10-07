@@ -184,44 +184,103 @@ export function PageHeader({
 }
 
 /**
- * Which node this page reads, retargetable without a redeploy: comparing one
- * node's answer against a peer's is the whole value of the box. It sits in the
- * page header's corner, not in a full-width card above the data.
+ * When the numbers on a page were last read, and whether they are still
+ * being read. Replaces the old "Read from <url> at <time>, again every 20 s"
+ * sentence and the URL box beside it: the reader the node serves reads that
+ * node, and an address in the corner of every page was furniture nobody
+ * used. A failed re-read is still said, in red, because a page showing old
+ * numbers as if they were current is the one thing it must not do quietly.
  */
-export function NodePicker({
-  value,
-  onChange,
-  onRead,
-  loading,
+export function LiveStamp({ at, error }: { at: Date | null; error?: string | null }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 text-[11.5px] ${error ? "text-bad" : "text-ink-3"}`}
+      title={error ?? (at ? `Read at ${at.toLocaleTimeString()}; re-read while this tab is visible` : undefined)}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${error ? "bg-bad" : at ? "bg-accent" : "bg-ink-3"}`} />
+      {error ? "update failed" : at ? `updated ${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "reading…"}
+    </span>
+  );
+}
+
+/** A section that starts folded: detail a person may want, not on first read. */
+export function Disclosure({
+  summary,
+  children,
+  open,
 }: {
-  value: string;
-  onChange: (next: string) => void;
-  onRead: () => void;
-  loading: boolean;
+  summary: React.ReactNode;
+  children: React.ReactNode;
+  open?: boolean;
 }) {
   return (
-    <form
-      className="flex w-full items-center gap-1.5 sm:w-auto"
-      onSubmit={(event) => {
-        event.preventDefault();
-        onRead();
+    <details className="disclosure" open={open}>
+      <summary>{summary}</summary>
+      <div className="disclosure-body">{children}</div>
+    </details>
+  );
+}
+
+/**
+ * A panel that slides over the page from the right, for an action that needs
+ * a few answers before it does something -- offering compute, connecting an
+ * agent. Escape and the backdrop close it. Not a route: closing it returns the
+ * reader to exactly where they were.
+ */
+export function Sheet({
+  title,
+  onClose,
+  children,
+}: {
+  title: React.ReactNode;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const panel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    panel.current?.focus();
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-canvas/60 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label={typeof title === "string" ? title : undefined}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
       }}
     >
-      <label htmlFor="node" className="text-[12px] text-ink-3">
-        Node
-      </label>
-      <input
-        id="node"
-        className="field field-mono min-w-0 flex-1 py-1.5 sm:w-64 sm:flex-none"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        spellCheck={false}
-        title="Read another node without a redeploy"
-      />
-      <button className="btn btn-sm py-1.5" type="submit" disabled={loading}>
-        {loading ? "Reading…" : "Read"}
-      </button>
-    </form>
+      <div
+        ref={panel}
+        tabIndex={-1}
+        className="flex h-full w-full max-w-xl flex-col border-l border-edge bg-surface shadow-2xl focus:outline-none"
+      >
+        <div className="flex items-center gap-3 border-b border-edge px-5 py-3.5">
+          <h2 className="min-w-0 flex-1 text-[15px] font-semibold">{title}</h2>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-5 py-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+/** A command with its copy button, the shape every "run this" takes here. */
+export function Command({ text, className = "" }: { text: string; className?: string }) {
+  return (
+    <div className={`relative ${className}`}>
+      <pre className="code pr-9 text-[11.5px]">{text}</pre>
+      <div className="absolute top-2 right-2">
+        <CopyButton value={text} />
+      </div>
+    </div>
   );
 }
 

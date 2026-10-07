@@ -11,7 +11,7 @@ import {
 import { resolveNode } from "@/lib/site";
 import { type Chain, fetchChain } from "@/lib/chain";
 import { type CheckpointAnswer, readCheckpoint } from "@/lib/checkpoint";
-import { Box, EmptyState, Hash, NodePicker, Note, PageHeader, Stat } from "@/components/ui";
+import { Box, EmptyState, Hash, Note, PageHeader, Stat } from "@/components/ui";
 
 /**
  * The address book this node has been handed.
@@ -23,7 +23,6 @@ import { Box, EmptyState, Hash, NodePicker, Note, PageHeader, Stat } from "@/com
  * than letting a reader assume a list of addresses is a list of connections.
  */
 export default function Page() {
-  const [base, setBase] = useState(NODE_URL);
   const [peers, setPeers] = useState<Peer[] | null>(null);
   const [note, setNote] = useState("");
   const [chain, setChain] = useState<Chain | null>(null);
@@ -60,21 +59,7 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
-    // Ask which node to read before reading it. Same-origin when one answers --
-    // the daemon serves this page at /ui/, so that is the common case and it
-    // costs one /health -- and otherwise the first seed from the published list
-    // that is up. On the public site there is no same-origin node at all, and
-    // before this the box showed github.io and every request 404'd into the
-    // snapshot.
-    //
-    // Shown *and* used, which is the part worth being careful about: the box
-    // has to name the origin the numbers below came from, or a reader comparing
-    // two nodes is comparing one node against a label. Empty stays empty for
-    // fetching -- relative requests survive a tunnel or a proxy on an unknown
-    // path -- and becomes this page's own origin for display, because nobody
-    // can retype "" after clearing the box.
     void resolveNode().then((url) => {
-      setBase(url || window.location.origin);
       void load(url);
     });
   }, [load]);
@@ -84,14 +69,7 @@ export default function Page() {
       <PageHeader
         title="Peers"
         subtitle="Addresses announced in this node's log. For active connections and node types, open Network."
-        actions={
-          <NodePicker
-            value={base}
-            onChange={setBase}
-            onRead={() => void load(base)}
-            loading={loading}
-          />
-        }
+        
       />
 
       {(chain || checkpoint?.kind === "signed") && (

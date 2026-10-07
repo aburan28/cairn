@@ -481,6 +481,46 @@
     @apply flex gap-1 border-b border-edge px-2;
   }
 
+  /* A folded section: details a person may want, not on first read. */
+  .disclosure {
+    @apply min-w-0 rounded-[var(--radius-card)] border border-edge bg-surface;
+  }
+
+  .disclosure > summary {
+    @apply flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 text-[12.5px]
+           font-medium text-ink-2 select-none hover:text-ink;
+  }
+
+  .disclosure > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .disclosure > summary::before {
+    content: "▸";
+    @apply text-[10px] text-ink-3 transition-transform duration-150;
+  }
+
+  .disclosure[open] > summary::before {
+    transform: rotate(90deg);
+  }
+
+  .disclosure-body {
+    @apply border-t border-edge px-4 py-3;
+  }
+
+  /* A choice among a few, as one row of pills: the role filter, the policy. */
+  .segmented {
+    @apply inline-flex rounded-lg border border-edge bg-surface-2 p-0.5;
+  }
+
+  .segmented > button {
+    @apply cursor-pointer rounded-md px-2.5 py-1 text-[12px] text-ink-2 transition-colors hover:text-ink;
+  }
+
+  .segmented > button[aria-pressed="true"] {
+    @apply bg-surface font-medium text-ink shadow-sm;
+  }
+
   .tab {
     @apply -mb-px cursor-pointer border-b-2 border-transparent px-2.5 py-2 text-[12.5px]
            text-ink-2 hover:text-ink;

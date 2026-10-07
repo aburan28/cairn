@@ -20,7 +20,6 @@ import {
   Card,
   EmptyState,
   Hash,
-  NodePicker,
   Note,
   PageHeader,
   Progress,
@@ -57,7 +56,6 @@ function FrontierPage() {
   const params = useSearchParams();
   const id = params.get("id") ?? "";
 
-  const [base, setBase] = useState(NODE_URL);
   const [objective, setObjective] = useState<ObjectiveResponse | null>(null);
   const [moves, setMoves] = useState<FrontierMove[] | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
@@ -93,21 +91,7 @@ function FrontierPage() {
   );
 
   useEffect(() => {
-    // Ask which node to read before reading it. Same-origin when one answers --
-    // the daemon serves this page at /ui/, so that is the common case and it
-    // costs one /health -- and otherwise the first seed from the published list
-    // that is up. On the public site there is no same-origin node at all, and
-    // before this the box showed github.io and every request 404'd into the
-    // snapshot.
-    //
-    // Shown *and* used, which is the part worth being careful about: the box
-    // has to name the origin the numbers below came from, or a reader comparing
-    // two nodes is comparing one node against a label. Empty stays empty for
-    // fetching -- relative requests survive a tunnel or a proxy on an unknown
-    // path -- and becomes this page's own origin for display, because nobody
-    // can retype "" after clearing the box.
     void resolveNode().then((url) => {
-      setBase(url || window.location.origin);
       void load(url);
     });
   }, [load]);
@@ -130,14 +114,7 @@ function FrontierPage() {
       <PageHeader crumb={{ href: "/objectives", label: "Objectives" }}
         title="Frontier"
         subtitle="The best verified result on this objective, and every result it displaced, in order."
-        actions={
-          <NodePicker
-            value={base}
-            onChange={setBase}
-            onRead={() => void load(base)}
-            loading={loading}
-          />
-        }
+        
       />
 
 
