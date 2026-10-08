@@ -322,6 +322,11 @@ impl Roster {
         Ok(Liveness::Live)
     }
 
+    /// When `host` last registered, if this roster still holds it.
+    pub fn last_seen(&self, host: &str) -> Option<u64> {
+        self.hosts.get(host).map(|seen| seen.received_at)
+    }
+
     fn forget(&mut self, now: u64) {
         self.hosts
             .retain(|_, seen| now.saturating_sub(seen.received_at) <= FORGET_SECONDS);

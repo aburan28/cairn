@@ -139,11 +139,19 @@ allow = headers.get("Allow") or headers.get("allow")
 assert allow and "POST" in allow, headers
 status, headers, _ = get("/mcp", method="OPTIONS")
 assert status == 204, status
-cors = headers.get("Access-Control-Allow-Origin") or headers.get("access-control-allow-origin")
-assert cors == "*", headers
+assert not any(k.lower() == "access-control-allow-origin" for k in headers), headers
+request = urllib.request.Request(
+    base + "/mcp", data=json.dumps(init).encode(),
+    headers={"Content-Type": "application/json", "Origin": "https://attacker.example"},
+    method="POST")
+try:
+    urllib.request.urlopen(request)
+    raise AssertionError("browser origin was admitted")
+except urllib.error.HTTPError as error:
+    assert error.code == 403, error.code
 status, _, body = get("/")
 assert status == 200 and "streamable-http" in body, (status, body)
-print("  GET /mcp is 405, OPTIONS preflights CORS, GET / describes the server")
+print("  GET /mcp is 405, browser origins are refused, GET / describes the server")
 
 status, _, body = get("/mcp", method="DELETE", session=first)
 assert (status, body) == (204, ""), (status, body)

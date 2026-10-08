@@ -37,7 +37,7 @@ import {
   EmptyState,
   Hash,
   MemberBadge,
-  NodePicker,
+  LiveStamp,
   Note,
   PageHeader,
   Progress,
@@ -193,12 +193,12 @@ function Task() {
   }
 
   const picker = (
-    <NodePicker
-      value={base}
-      onChange={setBase}
-      onRead={() => void load(base === window.location.origin ? "" : base)}
-      loading={loading}
-    />
+    <>
+      <LiveStamp at={readAt} error={progress ? error : null} />
+      <Link href={`/coordination?id=${encodeURIComponent(id)}`} className="btn btn-sm">
+        Coordination
+      </Link>
+    </>
   );
 
   if (notFound) {
@@ -349,9 +349,6 @@ function Dashboard({
       />
 
       <p className="mb-4 text-[12px] text-ink-3">
-        Read from <span className="mono">{origin}</span>
-        {readAt && <> at {readAt.toLocaleTimeString()}</>}, again every {REFRESH_SECONDS} s while
-        this tab is visible.{" "}
         <span className="text-accent">Settled</span> figures are recomputed from the node&rsquo;s
         log; <span className="text-warn">reported</span> ones are what workers posted and nobody
         checked.
@@ -590,7 +587,7 @@ function Dashboard({
               </span>
             }
           >
-            <p className="text-[13.5px] leading-relaxed text-ink">{statement}</p>
+            <p className="text-[13.5px] leading-relaxed text-ink [overflow-wrap:anywhere]">{statement}</p>
           </Box>
         )}
         <div className="flex min-w-0 flex-col gap-4">

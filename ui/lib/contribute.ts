@@ -233,6 +233,8 @@ export function workCommand(options: {
   /** A fleet leader's `signs_as`: the machine submits under it, the leader
    *  signs and is paid, and the slice stays the machine's own name's. */
   leader?: string | null;
+  /** What the machine offers: see `Offer`. Omitted fields leave the flag out. */
+  offer?: Offer;
 }): string {
   const worker = options.worker.trim().replace(/[|\s]+/g, "-") || "<your-name>";
   return [
@@ -241,6 +243,63 @@ export function workCommand(options: {
     `  --objective ${options.objective || "<objective-id>"}`,
     `  --worker ${worker}`,
     ...(options.leader ? [`  --submitter ${options.leader}`] : []),
+    ...offerFlags(options.offer),
     `  -- ${options.solver?.trim() || "./your-solver"}`,
   ].join(" \\\n");
+}
+
+/**
+ * Compute offered to one objective: how many threads, which GPUs, how many
+ * hours a day. `cairn work` turns these into the environment a solver's
+ * runtime reads (`CUDA_VISIBLE_DEVICES`, `OMP_NUM_THREADS`) and a daily
+ * budget it pauses at (`src/agent/work.rs`). An offer is not proof of
+ * anything: the roster shows what the machine said it offers, and only the
+ * pinned checker's verdicts on what it finds are paid.
+ */
+export type Offer = {
+  threads?: number | null;
+  /** GPU indices; an empty list offers none and hides them all. */
+  gpus?: number[] | null;
+  /** 1-24; 24 or more is no limit and is left out. */
+  hoursPerDay?: number | null;
+  /** What the roster calls this machine's hardware. */
+  device?: string | null;
+};
+
+export function offerFlags(offer: Offer | undefined): string[] {
+  if (!offer) return [];
+  const out: string[] = [];
+  if (offer.device?.trim()) out.push(`  --device ${quote(offer.device.trim())}`);
+  if (offer.threads && offer.threads > 0) out.push(`  --threads ${Math.floor(offer.threads)}`);
+  if (offer.gpus) {
+    const gpus = [...new Set(offer.gpus.filter((g) => Number.isInteger(g) && g >= 0))].sort((a, b) => a - b);
+    out.push(`  --gpus ${gpus.length ? gpus.join(",") : "none"}`);
+  }
+  if (offer.hoursPerDay && offer.hoursPerDay > 0 && offer.hoursPerDay < 24) {
+    out.push(`  --hours-per-day ${Math.floor(offer.hoursPerDay)}`);
+  }
+  return out;
+}
+
+/** Single-quoted for a POSIX shell when it needs to be. */
+function quote(text: string): string {
+  return /^[A-Za-z0-9._\/:@+-]+$/.test(text) ? text : `'${text.replace(/'/g, "'\\''")}'`;
+}
+
+/** One line saying what an offer amounts to, for the confirmation. */
+export function describeOffer(offer: Offer): string {
+  const parts: string[] = [];
+  if (offer.gpus) {
+    parts.push(
+      offer.gpus.length === 0
+        ? "no GPU"
+        : `GPU${offer.gpus.length === 1 ? "" : "s"} ${offer.gpus.join(", ")}`,
+    );
+  }
+  if (offer.threads) parts.push(`${offer.threads} thread${offer.threads === 1 ? "" : "s"}`);
+  const hours =
+    offer.hoursPerDay && offer.hoursPerDay < 24
+      ? `up to ${offer.hoursPerDay} hour${offer.hoursPerDay === 1 ? "" : "s"} a day`
+      : "around the clock";
+  return `${parts.length ? parts.join(" and ") : "this machine"}, ${hours}`;
 }

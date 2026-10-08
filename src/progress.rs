@@ -353,6 +353,15 @@ pub struct Board {
 
 impl Board {
     /// Keep a heartbeat. Returns how the worker now reads.
+    /// When `worker` last reported on `objective_id`, if this board still
+    /// holds it. For a caller that narrates arrivals rather than heartbeats.
+    pub fn last_seen(&self, objective_id: &str, worker: &str) -> Option<u64> {
+        self.objectives
+            .get(objective_id)
+            .and_then(|workers| workers.get(worker))
+            .map(|seen| seen.received_at)
+    }
+
     pub fn record(&mut self, heartbeat: Heartbeat, now: u64) -> Result<Liveness, RosterFull> {
         self.forget(now);
         let is_new_objective = !self.objectives.contains_key(&heartbeat.objective_id);

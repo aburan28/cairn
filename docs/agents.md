@@ -77,6 +77,21 @@ read-only tools above (including `score_candidate` and `audit`) are marked
 writing. `score_candidate` and `audit` additionally carry `openWorldHint`,
 because they execute the funder's pinned checker as a subprocess.
 
+## Prompts
+
+The server also offers MCP **prompts** -- text an operator hands their own
+agent, carried by the server that will judge the result.
+
+| prompt | in Claude Code | what it does |
+|---|---|---|
+| `coordinate_task` | `/mcp__cairn__coordinate_task` | turns a plain description of a big search ("every 32-bit seed of …; one piece is a block of 65,536 seeds") into a divided-search objective: a `piecework` block, a tested certificate checker pinned by hash, a goal handle found with `find_goal`, shown to the operator before `post_objective`. Arguments: `description`, and optionally `budget` |
+
+The node serves the same rendering at `GET /prompts/{name}`, which is how the
+reader's Coordination page offers it to an agent that is not Claude Code and
+then watches for the objective to appear. A prompt grants nothing: whatever
+the agent posts afterwards meets the schema gate, the admission rules and the
+`--max-spend` ceiling like any other post.
+
 ## `submit_claim` is two calls, and that is the protocol showing through
 
 Commit–reveal is epoch-batched: a reveal must land in a strictly later epoch
@@ -286,9 +301,11 @@ drops its client's. `scripts/mcp-config.sh --url http://127.0.0.1:8001/mcp`
 writes the stanza (Claude Code: `claude mcp add --transport http cairn URL`);
 `scripts/mcp-http-smoke.sh` drives the whole flow against a real process.
 
-Plain HTTP, always: this binary terminates no TLS (see `cipher_policy`), so a
-bind outside loopback should sit behind an SSH tunnel or a TLS-terminating
-proxy. The server warns when it does not.
+Plain HTTP, always: this binary terminates no TLS (see `cipher_policy`), so it
+refuses a bind outside loopback. Remote clients must use an SSH tunnel or a
+trusted proxy to the loopback address. The endpoint acts as the operator's
+identity and may hold secrets, so it rejects browser `Origin` headers and
+non-loopback `Host` authorities; browser clients cannot call it directly.
 
 ### Check the wiring before blaming the agent
 
