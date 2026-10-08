@@ -48,10 +48,13 @@ record instead.
 | `GET /` (and `/index`) | what this node is and every route it answers, including the ones it has disabled |
 | `GET /peers` | the `peer` records in this log — **known** peers, not open connections |
 | `GET /sessions` | the peer sessions this process has run, from its own memory: `reached` within two minutes, `recent` within thirty, `lost` after — see [Sessions](#sessions-whom-this-process-has-reached). `available: false` on a plain `cairn serve`, which reconciles with nobody |
-| `GET /network` | one answer for the reader's Network page: this node's declared roles (`CAIRN_ROLES`) and hardware, the sessions summary, every worker heartbeating to it on any objective summed by device and class, the registered hosts under `compute.hosts`, and the roles the log evidences identities playing — see [Roles](#roles-what-a-node-says-it-is-for) |
+| `GET /network` | one answer for the reader's Network page: this node's declared roles (`CAIRN_ROLES`) and hardware, the sessions summary, every worker heartbeating to it on any objective summed by device and class, the registered hosts under `compute.hosts`, who is attached over MCP under `node.mcp`, and the roles the log evidences identities playing — see [Roles](#roles-what-a-node-says-it-is-for) and [Agents](#events-agents-and-prompts) |
+| `GET /events?after={seq}` | what this process saw happen -- peers reached, back and unreachable, records synced from them, machines arriving, leases taken, fleet joins, objectives proposed here, an agent attaching over MCP and what it wrote -- said once per change, newest last, from a bounded ring held in memory. See [Events](#events-agents-and-prompts) |
+| `GET /prompts` | the MCP prompts this node's server offers, with the slash command each is in Claude Code |
+| `GET /prompts/{name}?{argument}=` | one prompt, rendered exactly as MCP `prompts/get` renders it, with this node's bundle root. `POST` with `{"arguments": {...}}` for a description longer than a request line may be; nothing is written either way |
 | `GET /leases` | objectives with an advisory lease held in this node's memory |
 | `GET /leases/{id}` | one objective's task leases: who holds each task, who contended for it, what was released and how — see [Leases](#leases-saying-what-you-are-about-to-work) |
-| `GET /knowledge` | every claim's standing as this node derives it from the log -- accepted, corroborated, contested, superseded, withdrawn, refuted, unverified -- newest first and capped, with a tally by standing; `?policy=demanding` applies the stricter built-in confidence policy. See [Knowledge](#knowledge-what-is-believed-and-who-stood-behind-it) |
+| `GET /knowledge` | every claim's standing as this node derives it from the log -- accepted, corroborated, contested, superseded, withdrawn, refuted, unverified -- newest first and capped, with a tally by standing and each claim's bonded attestation counts; `?policy=demanding` applies the stricter built-in confidence policy. See [Knowledge](#knowledge-what-is-believed-and-who-stood-behind-it) |
 | `GET /knowledge/{claim_id}` | one claim: its standing and confidence under the named policy, every relation asserted about it and whether it was heard, and who stood behind its verdict under bond with each attestation's status and whether a docket caught it |
 | `GET /hosts` | machines that registered with `cairn agent`: each host's CPUs, memory, GPUs and the sandboxes it can run jobs under, as it described itself, with the live ones summed — see [Hosts](#hosts-what-machines-are-on-the-network) |
 | `GET /ui/` | the embedded reader, when the binary was built with the `ui` feature |
@@ -212,6 +215,52 @@ Like a heartbeat it is memory, not a record: forgotten on restart, never
 gossiped, read by nothing that pays. A reached peer proved it holds the key
 its id names and nothing else. A plain `cairn serve` runs no p2p service and
 answers `available: false` rather than publishing an empty mesh.
+
+## Events, agents and prompts
+
+**`GET /events`** is the part of "what happened" the log never held. The log
+records what was admitted; it says nothing about the node doing its job --
+that it reached a peer and pulled twelve records from it, that a machine
+started heartbeating, that an agent attached over MCP. Those lines were on
+stderr, narrated for a developer, every five-second session of them. The
+journal (`src/journal.rs`) says each *change* once: a peer the first time it
+is reached and again only after it read as lost; records synced, counted
+exactly, because the node's state lock is held for the whole session; a
+worker when it starts on an objective, not per heartbeat; a host when it
+registers; a lease when it is taken or released; a fleet member joining; an
+objective proposed through this node's `POST /submit`; and an agent's
+`initialize` and every MCP call that wrote something. Reads are counted on
+the presence board below and never narrated -- an agent scores thousands of
+candidates.
+
+It is the same standing as a heartbeat: memory, gone on restart, never
+gossiped, read by nothing that pays. `seq` restarts at 1 with the process and
+`started_at` says when, so a reader that sees it change knows the earlier
+events belonged to a process that no longer exists. The ring holds 500;
+`dropped` says how many a reader asked for and did not get. Text a peer could
+shape (a transport error, a client's name for itself) is clipped and stripped
+of control characters. The reader's Log page draws these as rings beside the
+records' dots.
+
+**`node.mcp` on `GET /network`** is who is attached to this node's MCP server:
+`serving: false` on a node that runs none -- every plain `cairn serve`, and a
+`cairn run --no-mcp` -- and otherwise the client's own name and version from
+`initialize` (unchecked, like a worker's device name), when it connected, how
+many tool calls it has made and how many wrote something, the last tool, the
+key submissions are signed with when there is one, the `--mcp-max-spend`
+ceiling, and the prompts the server offers.
+
+**`GET /prompts`** and **`/prompts/{name}`** serve the MCP prompts as text for
+the reader. `coordinate_task` takes a plain description of a big search and
+teaches an agent the rest: what a unit is, how `piecework.key` decides
+novelty, how the pool pays, what a certificate checker must do, that it is
+pinned by hash, to look for an existing goal with `find_goal`, to test the
+checker on a good and a bad example, and to show the operator the objective
+and wait for a yes before `post_objective`. The Coordination page renders it
+from a description and then watches `/objectives` for the agent's post; in
+Claude Code it is `/mcp__cairn__coordinate_task`. A prompt grants nothing:
+what the agent posts is admitted by the same rules, and refused past the
+spending ceiling, exactly as if it had thought of it alone.
 
 ## Leases: saying what you are about to work
 

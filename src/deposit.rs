@@ -825,6 +825,33 @@ impl DepositDir {
 /// not, so anything short of exact is refused before it is stored.
 const ECC2K_DP_RECORD_BYTES: u64 = 32;
 
+fn campaign_record_count(body: &[u8]) -> Result<u64, DepositError> {
+    if body.starts_with(b"ECC2KDT3") {
+        let header_valid = body.len() >= 16
+            && body[8..12] == 3u32.to_le_bytes()
+            && body[12..16] == 32u32.to_le_bytes();
+        if !header_valid || !(body.len() - 16).is_multiple_of(ECC2K_DP_RECORD_BYTES as usize) {
+            return Err(DepositError::Invalid(String::from(
+                "an ecc2k-dp v3 body needs a version-3, stride-32 header and whole records",
+            )));
+        }
+        let records = (body.len() - 16) / ECC2K_DP_RECORD_BYTES as usize;
+        if records == 0 {
+            return Err(DepositError::Invalid(String::from(
+                "an ecc2k-dp body must carry at least one record",
+            )));
+        }
+        return Ok(records as u64);
+    }
+    if body.is_empty() || !body.len().is_multiple_of(ECC2K_DP_RECORD_BYTES as usize) {
+        return Err(DepositError::Invalid(format!(
+            "an ecc2k-dp body must be a non-empty whole number of 32-byte records; this one is {} bytes",
+            body.len()
+        )));
+    }
+    Ok((body.len() / ECC2K_DP_RECORD_BYTES as usize) as u64)
+}
+
 /// The `.bin.json` commit marker the campaign ingester reads beside a body:
 /// the producer's own sha-256, record count, clock, and format label. Written
 /// after the body, so its presence means the object is complete; a body that
@@ -928,7 +955,7 @@ pub fn issue_grant(
         // here as well is what stops a presigned contributor PUTting bytes
         // the ingester would truncate.
         if let Some(size) = request.size {
-            if size % ECC2K_DP_RECORD_BYTES != 0 {
+            if !size.is_multiple_of(ECC2K_DP_RECORD_BYTES) {
                 return Err(DepositError::Invalid(format!(
                     "an ecc2k-dp body must be a whole number of {ECC2K_DP_RECORD_BYTES}-byte records"
                 )));
@@ -1131,18 +1158,13 @@ pub fn redeem_grant(
     }
 
     let spec = deposits.load(&grant.deposit)?;
-    if spec.key_shape == KeyShape::Ecc2kDp
-        && (body.is_empty() || body.len() as u64 % ECC2K_DP_RECORD_BYTES != 0)
-    {
-        // Before anything is stored: the ingester truncates a partial tail
-        // rather than refusing it, so a short body would become fewer points
-        // than its marker claims.
-        return Err(DepositError::Invalid(format!(
-            "an ecc2k-dp body must be a non-empty whole number of 32-byte records; \
-             this one is {} bytes",
-            body.len()
-        )));
-    }
+    // Validate before writing the body or its marker. The ingester strips a
+    // v3 header, but silently truncates a partial record tail.
+    let campaign_records = if spec.key_shape == KeyShape::Ecc2kDp {
+        Some(campaign_record_count(body)?)
+    } else {
+        None
+    };
     match spec.provider {
         Provider::File => {
             let root = spec
@@ -1154,7 +1176,7 @@ pub fn redeem_grant(
                 put_file(
                     root,
                     &format!("{}.json", grant.key),
-                    commit_marker(&digest, body.len() as u64 / ECC2K_DP_RECORD_BYTES, now)
+                    commit_marker(&digest, campaign_records.expect("campaign records"), now)
                         .as_bytes(),
                 )?;
             }
@@ -1177,7 +1199,8 @@ pub fn redeem_grant(
             // bytes re-PUT to the same key are a no-op, so retrying is safe
             // and reissuing (a new key, a duplicate body) is not needed.
             if spec.key_shape == KeyShape::Ecc2kDp {
-                let marker = commit_marker(&digest, body.len() as u64 / ECC2K_DP_RECORD_BYTES, now);
+                let marker =
+                    commit_marker(&digest, campaign_records.expect("campaign records"), now);
                 let marker_digest = hex::encode(&Sha256::digest(marker.as_bytes()));
                 let marker_url = presign_s3_put(
                     &spec,
@@ -2227,6 +2250,46 @@ mod tests {
         )
         .unwrap();
         redeem_grant(&dir, &good.id, &good_body, &secrets).unwrap();
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(dir.path());
+        let _ = fs::remove_dir_all(secrets);
+    }
+
+    #[test]
+    fn campaign_v3_proxy_upload_validates_header_and_counts_records() {
+        let (dir, secrets) = campaign_dir("orbit-v3-put");
+        let mut body = b"ECC2KDT3".to_vec();
+        body.extend_from_slice(&3u32.to_le_bytes());
+        body.extend_from_slice(&32u32.to_le_bytes());
+        body.extend_from_slice(&[7u8; 64]);
+        let digest = hex::encode(&Sha256::digest(&body));
+        let grant = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "camp",
+                submitter: "cpu-worker",
+                digest: Some(&digest),
+                slot: Some(9),
+                ..GrantRequest::default()
+            },
+            None,
+            &secrets,
+        )
+        .unwrap();
+        let receipt = redeem_grant(&dir, &grant.id, &body, &secrets).unwrap();
+        let root = dir.load("camp").unwrap().root.unwrap();
+        let marker: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(root.join(format!("{}.json", receipt.key))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker["sha256"], digest);
+        assert_eq!(marker["records"], 2);
+        assert_eq!(fs::read(root.join(receipt.key)).unwrap(), body);
+        body[8] = 4;
+        assert!(campaign_record_count(&body).is_err());
+        body[8] = 3;
+        body.pop();
+        assert!(campaign_record_count(&body).is_err());
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(dir.path());
         let _ = fs::remove_dir_all(secrets);

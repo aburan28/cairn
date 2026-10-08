@@ -58,7 +58,7 @@ cairn secret set ECC_BUCKET --value ecc2k130-<account>
 # optional when not using Secrets Manager:
 cairn secret set DATABASE_URL --file ~/rho-dp.url
 
-export CAIRN_CRYPTO_ROOT=/path/to/aburan28/crypto
+export CAIRN_CRYPTO_ROOT=/path/to/aburan28/crypto   # or omit: walk fetches it
 ./scripts/ecc2k-dp.sh secrets-check   # which credentials are stored
 ./scripts/ecc2k-dp.sh status          # live Pages snapshot (JSON)
 ./scripts/ecc2k-dp.sh upload --dp-file dps.bin --slot 0
@@ -75,6 +75,29 @@ the PUT while the local file keeps its witnesses. No Python AWS stack, no
 keys in the environment — and a remote worker with no credentials at all can
 upload the same way through `request_upload_grant` (or `POST /deposit/grant`),
 which answers a presigned body URL plus a signed marker URL.
+
+## Running the search on a CPU
+
+No GPU, AWS identity, or Postgres is needed for a local walk. The bitsliced
+CPU backend builds with g++ and OpenMP:
+
+```sh
+./scripts/ecc2k-dp.sh walk --seconds 120 --dp-file /tmp/dps.bin
+./scripts/ecc2k-dp.sh verify-local --dp-file /tmp/dps.bin --slot 0
+./scripts/ecc2k-dp.sh strip --dp-file /tmp/dps.bin --out /tmp/dps-v1.bin
+./scripts/ecc2k-dp.sh witness --corpus /tmp/dps.bin --out-dir /tmp/claims --max 8
+```
+
+`walk` fetches the crypto checkout (sparse, `ecc2k130/` only) and builds the
+walker on first use, then walks the real curve-131 parameters. Its v2 corpus
+has 72-byte records carrying witness counters behind an `ECC2KDP2` header.
+`strip` derives uploadable v1 bytes, and `witness` emits claim artifacts from
+the carried counts and verifies them with the pinned checker. `upload` strips
+v2 before sending the body, while the local file keeps its witnesses. A v3
+table corpus keeps its 16-byte header; the deposit proxy validates that header
+and its 32-byte records before writing the body and commit marker. Remote v3
+workers must request a proxy grant (omit `size`) so the node can inspect the
+header; v1 workers with an exact size can use presigned S3 URLs.
 
 `cairn secret path` prints the secrets directory. `cairn secret run` is what
 the script uses internally: named secrets are exported into the child's

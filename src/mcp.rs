@@ -203,6 +203,93 @@ impl SpendCeiling {
     }
 }
 
+/// Who is attached to this node over MCP, for `GET /network`.
+///
+/// Only the daemon's own session has one: a standalone `cairn mcp` serves no
+/// HTTP, so there is no page to tell. Everything here is this process's
+/// account of its stdio session -- the client's name is whatever the client
+/// called itself in `initialize`, unchecked, the same standing as a worker's
+/// device name.
+#[derive(Debug, Default)]
+pub(crate) struct Presence {
+    /// `clientInfo` from the last `initialize`: name and version.
+    client: Option<(String, String)>,
+    connected_at: Option<u64>,
+    last_call_at: Option<u64>,
+    calls: u64,
+    /// Tool calls that appended something and were admitted.
+    writes: u64,
+    last_tool: Option<String>,
+    /// The key submissions are signed with, when there is one.
+    signs_as: Option<String>,
+    /// What `post_objective` may spend in total. See [`SpendCeiling`].
+    spend_limit: u64,
+}
+
+pub(crate) type SharedPresence = Arc<Mutex<Presence>>;
+
+impl Presence {
+    pub(crate) fn shared() -> SharedPresence {
+        Arc::new(Mutex::new(Presence::default()))
+    }
+
+    pub(crate) fn to_value(&self) -> Value {
+        let iso = |at: Option<u64>| match at {
+            Some(at) => Value::string(crate::time::format_iso8601_utc(
+                i64::try_from(at).unwrap_or(i64::MAX),
+            )),
+            None => Value::Null,
+        };
+        Value::object([
+            ("serving", Value::Bool(true)),
+            ("transport", Value::string("stdio")),
+            (
+                "client",
+                match &self.client {
+                    Some((name, version)) => Value::object([
+                        ("name", Value::string(name.clone())),
+                        ("version", Value::string(version.clone())),
+                    ]),
+                    None => Value::Null,
+                },
+            ),
+            ("connected_at", iso(self.connected_at)),
+            ("last_call_at", iso(self.last_call_at)),
+            ("calls", Value::Int(i128::from(self.calls))),
+            ("writes", Value::Int(i128::from(self.writes))),
+            (
+                "last_tool",
+                match &self.last_tool {
+                    Some(tool) => Value::string(tool.clone()),
+                    None => Value::Null,
+                },
+            ),
+            (
+                "signs_as",
+                match &self.signs_as {
+                    Some(key) => Value::string(key.clone()),
+                    None => Value::Null,
+                },
+            ),
+            ("spend_limit", Value::Int(i128::from(self.spend_limit))),
+            (
+                "prompts",
+                Value::array(
+                    crate::prompts::ALL
+                        .iter()
+                        .map(|definition| Value::string(definition.name)),
+                ),
+            ),
+        ])
+    }
+}
+
+/// What the daemon hands its MCP session so the HTTP half can see it.
+struct Attachment {
+    presence: SharedPresence,
+    journal: crate::journal::Shared,
+}
+
 /// Run `cairn mcp`: the standalone stdio server, owning its own ledger.
 ///
 /// [`crate::daemon`] uses the same protocol engine with the daemon's
@@ -326,10 +413,21 @@ pub(crate) fn start_shared_stdio(
     log: &Path,
     key_path: &Path,
     spend: SpendCeiling,
+    presence: SharedPresence,
+    journal: crate::journal::Shared,
 ) -> Result<Receiver<()>, String> {
     let identity = identity_path.map(load_identity).transpose()?;
     let cipher = pending_cipher(log, key_path)?;
-    let server = Server::new_shared(state, identity, cipher).with_spend_ceiling(spend);
+    {
+        let mut shown = presence
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        shown.signs_as = identity.as_ref().map(Identity::submitter_id);
+        shown.spend_limit = spend.limit;
+    }
+    let server = Server::new_shared(state, identity, cipher)
+        .with_spend_ceiling(spend)
+        .attached(Attachment { presence, journal });
     eprintln!(
         "cairn mcp {SERVER_VERSION}: sharing daemon ledger {}, stdio ready",
         log.display()
@@ -765,6 +863,10 @@ struct Server {
     meta: Option<Json>,
     /// What `post_objective` may still commit. See [`SpendCeiling`].
     spend: SpendCeiling,
+    /// The daemon's presence board and journal, when this session is the
+    /// daemon's own. `None` for a standalone server and in every unit test,
+    /// which therefore narrate to nobody.
+    attachment: Option<Attachment>,
 }
 
 impl Server {
@@ -811,7 +913,92 @@ impl Server {
             identity,
             meta: None,
             spend: SpendCeiling::new(0),
+            attachment: None,
         }
+    }
+
+    fn attached(mut self, attachment: Attachment) -> Server {
+        self.attachment = Some(attachment);
+        self
+    }
+
+    /// The client's name for itself, for a sentence about what it did.
+    fn client_name(&self) -> String {
+        self.attachment
+            .as_ref()
+            .and_then(|a| {
+                a.presence
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .client
+                    .as_ref()
+                    .map(|(name, _)| name.clone())
+            })
+            .unwrap_or_else(|| "An agent".to_string())
+    }
+
+    /// Note a tool call on the presence board, and the ones that wrote
+    /// something in the journal. Reads are counted and not narrated: an agent
+    /// scores thousands of candidates, and a feed of them would bury the
+    /// three things that happened.
+    fn observe(
+        &self,
+        tool: &str,
+        args: &Json,
+        outcome: &Result<String, String>,
+        reason: Option<&str>,
+    ) {
+        let Some(attachment) = &self.attachment else {
+            return;
+        };
+        let now = crate::time::unix_seconds();
+        // A post, a commitment or a reveal. `already_committed` answers Ok
+        // and appends nothing, so it is a read here.
+        let wrote = outcome.is_ok()
+            && (tool == "post_objective"
+                || (tool == "submit_claim" && matches!(reason, Some("committed" | "revealed"))));
+        {
+            let mut presence = attachment
+                .presence
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            presence.calls += 1;
+            presence.last_call_at = Some(now);
+            presence.last_tool = Some(tool.to_string());
+            if wrote {
+                presence.writes += 1;
+            }
+        }
+        if !wrote {
+            return;
+        }
+        let who = self.client_name();
+        let objective = args.get("objective_id").and_then(Json::as_str);
+        let text = match (tool, outcome) {
+            ("post_objective", Ok(text)) => {
+                let id = text
+                    .strip_prefix("posted objective ")
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .unwrap_or("");
+                format!("{who} posted objective {}", crate::journal::short(id))
+            }
+            _ => format!(
+                "{who} {} an answer to {}",
+                if reason == Some("revealed") {
+                    "revealed"
+                } else {
+                    "committed"
+                },
+                objective.map_or_else(|| "an objective".to_string(), crate::journal::short),
+            ),
+        };
+        crate::journal::note(
+            &attachment.journal,
+            crate::journal::Kind::Agent,
+            crate::journal::Tone::Good,
+            &text,
+            objective,
+        );
     }
 
     /// Record a claim id the agent legitimately learned from this server.
@@ -985,11 +1172,12 @@ impl Server {
             "ping" => success(id, json!({})),
             "tools/list" => success(id, json!({ "tools": tool_definitions() })),
             "tools/call" => self.call_tool(id, &params),
-            // Declared capabilities are tools only, so a client should not be
-            // asking for these -- but answering "empty" is friendlier than
-            // "unknown method" for clients that probe.
+            "prompts/list" => success(id, json!({ "prompts": prompt_definitions() })),
+            "prompts/get" => self.get_prompt(id, &params),
+            // No resources are declared, so a client should not be asking --
+            // but answering "empty" is friendlier than "unknown method" for
+            // clients that probe.
             "resources/list" => success(id, json!({ "resources": [] })),
-            "prompts/list" => success(id, json!({ "prompts": [] })),
             other => error_response(
                 id,
                 code::METHOD_NOT_FOUND,
@@ -1000,6 +1188,41 @@ impl Server {
     }
 
     fn initialize(&self, id: Json, params: &Json) -> Json {
+        if let Some(attachment) = &self.attachment {
+            let info = params.get("clientInfo");
+            let field = |key: &str| {
+                info.and_then(|info| info.get(key))
+                    .and_then(Json::as_str)
+                    .map(|text| {
+                        text.chars()
+                            .filter(|c| !c.is_control())
+                            .take(80)
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default()
+            };
+            let (name, version) = (field("name"), field("version"));
+            let name = if name.is_empty() {
+                "an MCP client".to_string()
+            } else {
+                name
+            };
+            {
+                let mut presence = attachment
+                    .presence
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                presence.client = Some((name.clone(), version.clone()));
+                presence.connected_at = Some(crate::time::unix_seconds());
+            }
+            crate::journal::note(
+                &attachment.journal,
+                crate::journal::Kind::Agent,
+                crate::journal::Tone::Good,
+                format!("Agent connected over MCP: {name} {version}").trim_end(),
+                Some(&name),
+            );
+        }
         let requested = params.get("protocolVersion").and_then(Json::as_str);
         // Echo the client's version when we speak it, otherwise our newest.
         // Answering with a version the client did not ask for is legal; making
@@ -1012,7 +1235,10 @@ impl Server {
             id,
             json!({
                 "protocolVersion": version,
-                "capabilities": { "tools": { "listChanged": false } },
+                "capabilities": {
+                    "tools": { "listChanged": false },
+                    "prompts": { "listChanged": false }
+                },
                 "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
                 "instructions":
                     "Objectives are funded questions with a pinned verifier. Score candidates \
@@ -1055,6 +1281,11 @@ impl Server {
         // as a JSON-RPC error: the model needs to see the message and try
         // again, and a transport-level error is not shown to it.
         let meta = self.meta.take();
+        let reason = meta
+            .as_ref()
+            .and_then(|meta| meta.get("cairn/reason"))
+            .and_then(Json::as_str);
+        self.observe(name, &args, &result, reason);
         let with_meta = |mut payload: Json| {
             if let Some(meta) = &meta {
                 payload["_meta"] = meta.clone();
@@ -1092,6 +1323,78 @@ impl Server {
                 id,
                 with_meta(json!({ "content": [text_block(&message)], "isError": true })),
             ),
+        }
+    }
+}
+
+// -- prompts ---------------------------------------------------------------
+
+/// `prompts/list`: every prompt in [`crate::prompts::ALL`], in MCP's shape.
+fn prompt_definitions() -> Json {
+    Json::Array(
+        crate::prompts::ALL
+            .iter()
+            .map(|definition| {
+                json!({
+                    "name": definition.name,
+                    "title": definition.title,
+                    "description": definition.description,
+                    "arguments": definition
+                        .arguments
+                        .iter()
+                        .map(|argument| json!({
+                            "name": argument.name,
+                            "description": argument.description,
+                            "required": argument.required,
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
+impl Server {
+    /// `prompts/get`: one prompt, rendered with the client's arguments and
+    /// this node's bundle root, as a single user message. A bad argument is
+    /// a JSON-RPC error rather than a result: unlike a tool, a prompt that
+    /// failed has no model on the other end to read why -- the client shows
+    /// it to the person who typed the slash command.
+    fn get_prompt(&self, id: Json, params: &Json) -> Json {
+        let Some(name) = params.get("name").and_then(Json::as_str) else {
+            return error_response(id, code::INVALID_PARAMS, "prompts/get needs a name");
+        };
+        let arguments: BTreeMap<String, String> = params
+            .get("arguments")
+            .and_then(Json::as_object)
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(key, value)| match value {
+                        Json::String(text) => Some((key.clone(), text.clone())),
+                        Json::Number(number) => Some((key.clone(), number.to_string())),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let context = crate::prompts::Context {
+            root: Some(self.node.read().root().display().to_string()),
+        };
+        match crate::prompts::render(name, &arguments, &context) {
+            Ok(text) => {
+                let description = crate::prompts::ALL
+                    .iter()
+                    .find(|definition| definition.name == name)
+                    .map_or("", |definition| definition.title);
+                success(
+                    id,
+                    json!({
+                        "description": description,
+                        "messages": [{ "role": "user", "content": text_block(&text) }],
+                    }),
+                )
+            }
+            Err(why) => error_response(id, code::INVALID_PARAMS, &why),
         }
     }
 }
@@ -3116,6 +3419,124 @@ mod tests {
     /// back from `list_objectives` with the id `post_objective` reported, and
     /// `score_candidate` dispatches to its verifier -- so the path is the same
     /// log the other tools read, not a side channel.
+    #[test]
+    fn prompts_are_declared_listed_and_rendered_with_this_servers_root() {
+        let mut s = server();
+        let init = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18", "capabilities": {} }
+        })
+        .to_string();
+        let r: Json = serde_json::from_str(&s.handle_line(&init).unwrap()).unwrap();
+        assert!(r["result"]["capabilities"]["prompts"].is_object(), "{r}");
+
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "prompts/list" }).to_string();
+        let r: Json = serde_json::from_str(&s.handle_line(&list).unwrap()).unwrap();
+        let prompts = r["result"]["prompts"].as_array().unwrap();
+        assert_eq!(prompts[0]["name"], crate::prompts::COORDINATE_TASK);
+        assert_eq!(prompts[0]["arguments"][0]["name"], "description");
+        assert_eq!(prompts[0]["arguments"][0]["required"], true);
+
+        let get = json!({
+            "jsonrpc": "2.0", "id": 3, "method": "prompts/get",
+            "params": {
+                "name": "coordinate_task",
+                "arguments": { "description": "walk every seed below 2^20", "budget": 900 }
+            }
+        })
+        .to_string();
+        let r: Json = serde_json::from_str(&s.handle_line(&get).unwrap()).unwrap();
+        let message = &r["result"]["messages"][0];
+        assert_eq!(message["role"], "user");
+        let text = message["content"]["text"].as_str().unwrap();
+        assert!(text.contains("walk every seed below 2^20"), "{text}");
+        assert!(text.contains("at most 900 units"), "{text}");
+        let root = s.node.read().root().display().to_string();
+        assert!(text.contains(&format!("`{root}`")), "{text}");
+
+        // A prompt that cannot render is the person's error to read, not the
+        // model's, so it is a JSON-RPC error.
+        let bad = json!({
+            "jsonrpc": "2.0", "id": 4, "method": "prompts/get",
+            "params": { "name": "coordinate_task", "arguments": {} }
+        })
+        .to_string();
+        let r: Json = serde_json::from_str(&s.handle_line(&bad).unwrap()).unwrap();
+        assert_eq!(r["error"]["code"], code::INVALID_PARAMS, "{r}");
+    }
+
+    /// The daemon's session shows on `GET /network` and narrates what it
+    /// wrote; a read is counted and not narrated, and a server nobody attached
+    /// -- every other test here -- touches no board at all.
+    #[test]
+    fn an_attached_session_reports_its_client_and_journals_only_writes() {
+        let presence = Presence::shared();
+        let journal = crate::journal::Journal::shared(0);
+        let mut s = server().attached(Attachment {
+            presence: Arc::clone(&presence),
+            journal: Arc::clone(&journal),
+        });
+        let init = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": { "name": "claude-code", "version": "2.1.0" }
+            }
+        })
+        .to_string();
+        s.handle_line(&init).unwrap();
+        let _ = call(&mut s, "list_objectives", json!({}));
+        let posted = call(
+            &mut s,
+            "post_objective",
+            json!({
+                "objective": {
+                    "goal": "GOAL-attached",
+                    "statement": "Anything.",
+                    "verifier": {
+                        "kind": "certificate",
+                        "checker": "checkers/never.py",
+                        "checker_sha256": "00".repeat(32),
+                        "entrypoint": "check"
+                    },
+                    "reward": 0,
+                    "funder": "agent"
+                }
+            }),
+        );
+        assert!(posted.starts_with("posted objective"), "{posted}");
+
+        let shown = presence.lock().unwrap().to_value();
+        assert_eq!(
+            shown
+                .get("client")
+                .and_then(|c| c.get("name"))
+                .and_then(Value::as_str),
+            Some("claude-code")
+        );
+        assert_eq!(shown.get("calls").and_then(Value::as_u64), Some(2));
+        assert_eq!(shown.get("writes").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            shown.get("last_tool").and_then(Value::as_str),
+            Some("post_objective")
+        );
+
+        let feed = journal.lock().unwrap().to_value(0, 50);
+        let texts: Vec<String> = feed
+            .get("events")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.get("text").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(texts[0].contains("claude-code 2.1.0"), "{texts:?}");
+        assert!(
+            texts[1].starts_with("claude-code posted objective"),
+            "{texts:?}"
+        );
+    }
+
     #[test]
     fn post_objective_appends_and_the_other_tools_see_it() {
         let mut s = server();

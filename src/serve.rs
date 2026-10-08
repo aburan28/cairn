@@ -490,6 +490,13 @@ pub struct Serving {
     /// Set once sign-in has been decided, so a second enable does not mint a
     /// second reading of the environment over a test's pinned client.
     google_pinned: bool,
+    /// What this process saw happen, for `GET /events`. Its own on a plain
+    /// `cairn serve`; the daemon's, shared with its p2p loops and its MCP
+    /// session, inside `cairn run`. See [`crate::journal`].
+    journal: crate::journal::Shared,
+    /// Who is attached over MCP, when this server runs inside a daemon that
+    /// serves it: `node.mcp` on `GET /network`.
+    agents: Option<crate::mcp::SharedPresence>,
 }
 
 /// A fleet and the identity that signs for it.
@@ -546,7 +553,35 @@ impl Serving {
             http_external: None,
             google: GoogleAuth::anonymous(),
             google_pinned: false,
+            journal: crate::journal::Journal::shared(crate::time::unix_seconds()),
+            agents: None,
         }
+    }
+
+    /// Narrate into the daemon's journal rather than one of this server's
+    /// own, so `GET /events` carries what the p2p loops and the MCP session
+    /// saw as well.
+    pub fn with_journal(mut self, journal: crate::journal::Shared) -> Serving {
+        self.journal = journal;
+        self
+    }
+
+    /// Publish who is attached over MCP. Crate-only: the board is the MCP
+    /// server's, and only the daemon has one to share.
+    pub(crate) fn with_agents(mut self, agents: crate::mcp::SharedPresence) -> Serving {
+        self.agents = Some(agents);
+        self
+    }
+
+    /// Say something in this server's journal.
+    fn note(
+        &self,
+        kind: crate::journal::Kind,
+        tone: crate::journal::Tone,
+        text: &str,
+        subject: Option<&str>,
+    ) {
+        crate::journal::note(&self.journal, kind, tone, text, subject);
     }
 
     /// Offer Google sign-in when the operator configured it.
@@ -1322,6 +1357,11 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         }
         ("GET", "/sessions") => sessions(stream, serving),
         ("GET", "/network") => network(stream, serving),
+        ("GET", "/events") => events(stream, serving, &request),
+        ("GET", "/prompts") => prompts_index(stream),
+        ("GET", path) if path.starts_with("/prompts/") => {
+            prompt_one(stream, serving, &path["/prompts/".len()..], &request)
+        }
         ("GET", "/hosts") => hosts_index(stream, serving),
         ("GET", "/knowledge") => knowledge_index(stream, serving, &request),
         ("GET", path) if path.starts_with("/knowledge/") => {
@@ -1381,6 +1421,34 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ),
         ("POST", "/fleet/join") => fleet_join(stream, &mut reader, serving, &request),
         ("POST", "/objective/prepare") => prepare_objective(stream, &mut reader, &request),
+        // A description can be longer than a request line may be, so the
+        // reader posts it; nothing is written, and the answer is the GET's.
+        ("POST", path) if path.starts_with("/prompts/") => {
+            let name = path["/prompts/".len()..].to_string();
+            match read_json_body(&mut reader, &request, "/prompts/{name}") {
+                Ok(body) => {
+                    let arguments: BTreeMap<String, String> = body
+                        .get("arguments")
+                        .and_then(|args| match args {
+                            Value::Object(fields) => Some(fields),
+                            _ => None,
+                        })
+                        .map(|fields| {
+                            fields
+                                .iter()
+                                .filter_map(|(key, value)| match value {
+                                    Value::String(text) => Some((key.clone(), text.clone())),
+                                    Value::Int(n) => Some((key.clone(), n.to_string())),
+                                    _ => None,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    render_prompt(stream, serving, &name, &arguments)
+                }
+                Err((status, message)) => json_error(stream, status, &message),
+            }
+        }
         ("POST", "/deposit/grant") => deposit_grant(stream, &mut reader, serving, &request),
         ("PUT", path) if path.starts_with("/deposit/upload/") => deposit_upload(
             stream,
@@ -1593,6 +1661,9 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /peers"),
                 Value::string("GET /sessions"),
                 Value::string("GET /network"),
+                Value::string("GET /events?after={seq}"),
+                Value::string("GET /prompts"),
+                Value::string("GET /prompts/{name}?{argument}="),
                 // Named even when the table behind it is empty, because the
                 // whole point of this list is that a reader who cannot find a
                 // route learns why. A binary built without the `ui` feature
@@ -1609,6 +1680,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                     "POST /submit (disabled: this node is read-only)"
                 }),
                 Value::string("POST /objective/prepare"),
+                Value::string("POST /prompts/{name}"),
                 Value::string("POST /progress"),
                 Value::string("POST /hosts"),
                 Value::string("POST /lease"),
@@ -2353,6 +2425,20 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                             None => Value::Null,
                         },
                     ),
+                    // Who is attached over MCP: the client's own name for
+                    // itself and what it has called, from this process's
+                    // stdio session. `serving: false` on a node that runs
+                    // no MCP, which is every plain publisher.
+                    (
+                        "mcp",
+                        match &serving.agents {
+                            Some(agents) => agents
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .to_value(),
+                            None => Value::object([("serving", Value::Bool(false))]),
+                        },
+                    ),
                 ]),
             ),
             ("peers", peers),
@@ -2370,6 +2456,117 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             ),
         ]),
     )
+}
+
+/// `GET /events?after=<seq>&limit=<n>`: what this process saw happen. See
+/// [`crate::journal`].
+fn events(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    let number = |key: &str| request.query.get(key).and_then(|v| v.parse::<u64>().ok());
+    let after = number("after").unwrap_or(0);
+    let limit = number("limit").map_or(crate::journal::MAX_PAGE, |n| {
+        usize::try_from(n).unwrap_or(crate::journal::MAX_PAGE)
+    });
+    let page = serving
+        .journal
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .to_value(after, limit);
+    json(stream, 200, &page)
+}
+
+/// `GET /prompts`: the prompts this node's MCP server offers, for the reader.
+fn prompts_index(stream: &mut TcpStream) -> io::Result<()> {
+    let prompts = crate::prompts::ALL.iter().map(|definition| {
+        Value::object([
+            ("name", Value::string(definition.name)),
+            ("title", Value::string(definition.title)),
+            ("description", Value::string(definition.description)),
+            (
+                "slash_command",
+                Value::string(format!("/mcp__cairn__{}", definition.name)),
+            ),
+            (
+                "arguments",
+                Value::array(definition.arguments.iter().map(|argument| {
+                    Value::object([
+                        ("name", Value::string(argument.name)),
+                        ("description", Value::string(argument.description)),
+                        ("required", Value::Bool(argument.required)),
+                    ])
+                })),
+            ),
+        ])
+    });
+    json(
+        stream,
+        200,
+        &Value::object([
+            ("prompts", Value::array(prompts)),
+            (
+                "note",
+                Value::string(
+                    "The same text an agent gets from this node's MCP server with prompts/get. \
+                     GET /prompts/{name}?<argument>=<value> renders one. A prompt grants \
+                     nothing: what an agent posts afterwards is admitted by the same rules as \
+                     anything else.",
+                ),
+            ),
+        ]),
+    )
+}
+
+/// `GET /prompts/{name}?description=…`: one prompt, rendered exactly as MCP
+/// `prompts/get` renders it, with this node's bundle root.
+fn prompt_one(
+    stream: &mut TcpStream,
+    serving: &Serving,
+    name: &str,
+    request: &Request,
+) -> io::Result<()> {
+    let arguments: BTreeMap<String, String> = request
+        .query
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    render_prompt(stream, serving, name, &arguments)
+}
+
+fn render_prompt(
+    stream: &mut TcpStream,
+    serving: &Serving,
+    name: &str,
+    arguments: &BTreeMap<String, String>,
+) -> io::Result<()> {
+    let context = crate::prompts::Context {
+        root: Some(
+            std::fs::canonicalize(&serving.root)
+                .unwrap_or_else(|_| serving.root.clone())
+                .display()
+                .to_string(),
+        ),
+    };
+    match crate::prompts::render(name, arguments, &context) {
+        Ok(text) => json(
+            stream,
+            200,
+            &Value::object([
+                ("name", Value::string(name)),
+                (
+                    "slash_command",
+                    Value::string(format!("/mcp__cairn__{name}")),
+                ),
+                ("text", Value::string(text)),
+            ]),
+        ),
+        Err(why) => {
+            let status = if crate::prompts::ALL.iter().any(|d| d.name == name) {
+                400
+            } else {
+                404
+            };
+            json_error(stream, status, &why)
+        }
+    }
 }
 
 /// The fleet summed by device, by device class and by objective, with the
@@ -2710,6 +2907,22 @@ fn knowledge_index(stream: &mut TcpStream, serving: &Serving, request: &Request)
     );
     let claims = node.all_claims();
     let graph = node.knowledge_graph(&claims);
+    // Who stood behind each verdict under bond, counted once for the whole
+    // index rather than per row: a reader drawing a verification level for
+    // every claim should not need a request per claim to do it.
+    let slashed = node.slashed_attestations();
+    let mut bonded: BTreeMap<String, (i128, i128, i128)> = BTreeMap::new();
+    for (id, attestation) in node.attestations() {
+        let row = bonded.entry(attestation.claim_id.clone()).or_default();
+        match attestation.status.as_str() {
+            "accept" => row.0 += 1,
+            "reject" => row.1 += 1,
+            _ => {}
+        }
+        if slashed.contains(&id) {
+            row.2 += 1;
+        }
+    }
     // Newest first, so the page a reader lands on is the recent frontier.
     let mut ordered: Vec<(&String, &crate::records::Claim)> = claims.iter().collect();
     ordered.sort_by(|a, b| {
@@ -2743,6 +2956,17 @@ fn knowledge_index(stream: &mut TcpStream, serving: &Serving, request: &Request)
             fields.insert(
                 "created_at".to_string(),
                 Value::string(claim.created_at.clone()),
+            );
+            // Beside the standing, never in it: the same split the per-claim
+            // route keeps. Counts only; the rows are on that route.
+            let (accept, reject, slashed) = bonded.get(id.as_str()).copied().unwrap_or_default();
+            fields.insert(
+                "attestations".to_string(),
+                Value::object([
+                    ("accept", Value::Int(accept)),
+                    ("reject", Value::Int(reject)),
+                    ("slashed", Value::Int(slashed)),
+                ]),
             );
             rows.push(Value::Object(fields));
         }
@@ -2833,6 +3057,12 @@ fn fleet_join(
         &fleet::auth::key_hex(&member.key)[..12],
         member.name
     );
+    serving.note(
+        crate::journal::Kind::Fleet,
+        crate::journal::Tone::Good,
+        &format!("Machine {} joined this node's fleet", member.name),
+        Some(&member.name),
+    );
     let iso = |unix: u64| crate::time::format_iso8601_utc(i64::try_from(unix).unwrap_or(i64::MAX));
     json(
         stream,
@@ -2865,6 +3095,28 @@ fn fleet_join(
     )
 }
 
+/// `: 16 CPUs, 2 GPUs`, from what a host said about itself, for a sentence.
+/// Empty when it said nothing a sentence can use.
+fn describe_hardware(hardware: &Value) -> String {
+    let cpus = hardware.get("cpus").and_then(Value::as_u64);
+    let gpus = hardware
+        .get("gpus")
+        .and_then(Value::as_array)
+        .map_or(0, <[Value]>::len);
+    let mut parts = Vec::new();
+    if let Some(cpus) = cpus {
+        parts.push(format!("{cpus} CPU{}", if cpus == 1 { "" } else { "s" }));
+    }
+    if gpus > 0 {
+        parts.push(format!("{gpus} GPU{}", if gpus == 1 { "" } else { "s" }));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", parts.join(", "))
+    }
+}
+
 fn host_register(
     stream: &mut TcpStream,
     serving: &Serving,
@@ -2890,11 +3142,28 @@ fn host_register(
     // stranger here is the roster's own cap and the size cap on each entry.
     let now = crate::time::unix_seconds();
     let host = registration.host.clone();
-    let outcome = serving
-        .hosts
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .record(registration, now);
+    let described = describe_hardware(&registration.hardware);
+    let (outcome, previously) = {
+        let mut roster = serving
+            .hosts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previously = roster.last_seen(&host);
+        (roster.record(registration, now), previously)
+    };
+    let returning = previously.map(|at| now.saturating_sub(at) > progress::LIVE_SECONDS);
+    if outcome.is_ok() && returning != Some(false) {
+        let text = match returning {
+            None => format!("Machine {host} registered with this node{described}"),
+            _ => format!("Machine {host} is back{described}"),
+        };
+        serving.note(
+            crate::journal::Kind::Host,
+            crate::journal::Tone::Good,
+            &text,
+            Some(&host),
+        );
+    }
     match outcome {
         Ok(liveness) => json(
             stream,
@@ -3040,6 +3309,17 @@ fn lease_claim(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .claim(claim, now);
+    // A new hold, not a renewal and not a refusal: once per task taken.
+    if let Ok(standing) = &outcome {
+        if standing.held && !standing.renewed {
+            serving.note(
+                crate::journal::Kind::Lease,
+                crate::journal::Tone::Neutral,
+                &format!("{holder} took task {task}"),
+                Some(&objective_id),
+            );
+        }
+    }
     match outcome {
         Ok(standing) => json(
             stream,
@@ -3130,6 +3410,19 @@ fn lease_release(
     if let (Ok(()), Some(verified)) = (&result, verified) {
         serving.note_release(released_key, verified.time);
     }
+    if result.is_ok() {
+        let (verb, tone) = match outcome {
+            lease::Outcome::Completed => ("finished", crate::journal::Tone::Good),
+            lease::Outcome::Failed => ("gave up on", crate::journal::Tone::Warn),
+            lease::Outcome::Abandoned => ("let go of", crate::journal::Tone::Neutral),
+        };
+        serving.note(
+            crate::journal::Kind::Lease,
+            tone,
+            &format!("{holder} {verb} task {task}"),
+            Some(&objective_id),
+        );
+    }
     match result {
         Ok(()) => json(
             stream,
@@ -3201,11 +3494,44 @@ fn heartbeat(
     let now = crate::time::unix_seconds();
     let objective_id = heartbeat.objective_id.clone();
     let worker = heartbeat.worker.clone();
-    let outcome = serving
-        .progress
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .record(heartbeat, now);
+    let device = heartbeat.device.clone();
+    let (outcome, previously) = {
+        let mut board = serving
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previously = board.last_seen(&objective_id, &worker);
+        (board.record(heartbeat, now), previously)
+    };
+    if outcome.is_ok() {
+        // An arrival, or a return after reading as stale: said once, never
+        // per heartbeat.
+        let returning = previously.map(|at| now.saturating_sub(at) > progress::LIVE_SECONDS);
+        if returning != Some(false) {
+            let on = node
+                .objectives()
+                .get(&objective_id)
+                .map(|objective| {
+                    let goal = objective.goal.trim();
+                    goal.strip_prefix("GOAL-").unwrap_or(goal).to_string()
+                })
+                .unwrap_or_else(|| crate::journal::short(&objective_id));
+            let with = device
+                .as_deref()
+                .map(|device| format!(" ({device})"))
+                .unwrap_or_default();
+            let text = match returning {
+                None => format!("Machine {worker}{with} started working on {on}"),
+                _ => format!("Machine {worker}{with} is back on {on}"),
+            };
+            serving.note(
+                crate::journal::Kind::Worker,
+                crate::journal::Tone::Good,
+                &text,
+                Some(&objective_id),
+            );
+        }
+    }
     match outcome {
         Ok(liveness) => json(
             stream,
@@ -3755,6 +4081,17 @@ fn submit(
                 {
                     log::warn!("fleet: cannot journal {id} for {}: {error}", member.name);
                 }
+            }
+            // A proposed objective is news; a worker's commitments and reveals
+            // are the log's to report once admitted, and are many.
+            if kind == "objective" {
+                let goal = value.get("goal").and_then(Value::as_str).unwrap_or("?");
+                serving.note(
+                    crate::journal::Kind::Submission,
+                    crate::journal::Tone::Neutral,
+                    &format!("A new objective ({goal}) was proposed here and queued for admission"),
+                    None,
+                );
             }
             let wait = wait_for(serving, &kind, &value, crate::time::unix_seconds());
             json(
@@ -5912,6 +6249,97 @@ mod tests {
         );
     }
 
+    /// A machine's first heartbeat is an event, its second is not, and a
+    /// reader asking for what came after the last event it saw gets nothing
+    /// new. The journal is this server's own, so nothing another test does
+    /// can appear in it.
+    #[test]
+    fn a_machine_arriving_is_said_once_on_the_event_feed() {
+        let dir = TempDir::new("events-feed");
+        let (addr, id) = serve_orbit_search(&dir);
+        let heartbeat = |steps: u64| {
+            format!(
+                r#"{{"objective_id":"{id}","worker":"garage-gpu","steps":{steps},"device":"rtx-4090"}}"#
+            )
+        };
+        for steps in [10, 20, 30] {
+            let (status, _) = ask_json(addr, "/progress", &heartbeat(steps));
+            assert!(status.starts_with("HTTP/1.1 202"), "{status}");
+        }
+        let (status, body) = get_json(addr, "/events");
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        let events = at(&body, "events").as_array().expect("events").to_vec();
+        let arrivals: Vec<&Value> = events
+            .iter()
+            .filter(|event| at(event, "kind").as_str() == Some("worker"))
+            .collect();
+        assert_eq!(arrivals.len(), 1, "{}", body.canonical_string());
+        let text = at(arrivals[0], "text").as_str().unwrap_or_default();
+        assert!(
+            text.contains("garage-gpu") && text.contains("rtx-4090"),
+            "{text}"
+        );
+        assert_eq!(at(arrivals[0], "subject").as_str(), Some(id.as_str()));
+
+        let last = int(&body, "last");
+        let (_, after) = get_json(addr, &format!("/events?after={last}"));
+        assert_eq!(at(&after, "events").as_array().map(<[Value]>::len), Some(0));
+        assert_eq!(int(&after, "dropped"), 0);
+    }
+
+    /// The reader's prompt and MCP's are one rendering: the description is
+    /// fenced, the bundle root is this node's, and a POST carries a
+    /// description longer than a request line may be.
+    #[test]
+    fn a_prompt_renders_over_get_and_post_and_refuses_what_is_missing() {
+        let dir = TempDir::new("prompts-route");
+        let (addr, _) = serve_orbit_search(&dir);
+        let (status, index) = get_json(addr, "/prompts");
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        let first = &at(&index, "prompts").as_array().unwrap()[0];
+        assert_eq!(
+            at(first, "name").as_str(),
+            Some(crate::prompts::COORDINATE_TASK)
+        );
+        assert_eq!(
+            at(first, "slash_command").as_str(),
+            Some("/mcp__cairn__coordinate_task")
+        );
+
+        let (status, body) = get_json(
+            addr,
+            "/prompts/coordinate_task?description=split%20the%20seeds&budget=500",
+        );
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        let text = at(&body, "text").as_str().unwrap_or_default();
+        assert!(
+            text.contains("<description>\nsplit the seeds\n</description>"),
+            "{text}"
+        );
+        assert!(text.contains("at most 500 units"), "{text}");
+
+        let long = "x".repeat(9_000);
+        let (status, body) = ask_json(
+            addr,
+            "/prompts/coordinate_task",
+            &format!(r#"{{"arguments":{{"description":"{}"}}}}"#, &long[..7_000]),
+        );
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        assert!(at(&body, "text")
+            .as_str()
+            .unwrap_or_default()
+            .contains(&long[..7_000]));
+
+        let (status, _) = get_json(addr, "/prompts/coordinate_task");
+        assert!(status.starts_with("HTTP/1.1 400"), "{status}");
+        let (status, _) = get_json(addr, "/prompts/no_such_prompt?description=x");
+        assert!(status.starts_with("HTTP/1.1 404"), "{status}");
+    }
+
     /// The HTTP route is the MCP tool's function: the same inputs give the
     /// same slice, the slice maps onto the objective's units, and a node that
     /// asks twice in one epoch is told the same thing.
@@ -6148,6 +6576,8 @@ mod tests {
             at(&body, "node.roles.declared").as_array().unwrap(),
             &[Value::string("coordinator"), Value::string("verifier")]
         );
+        // A plain publisher runs no MCP, and says so rather than omitting it.
+        assert_eq!(at(&body, "node.mcp.serving"), &Value::Bool(false));
         // Read-only, so the coordinator declaration is contradicted and said so.
         let warnings = at(&body, "node.warnings").as_array().unwrap();
         assert!(
@@ -6340,6 +6770,18 @@ mod tests {
         let claims = index.get("claims").unwrap().as_array().unwrap();
         assert!(claims.iter().all(|row| row.get("assertions").is_none()));
         assert!(claims.iter().all(|row| row.get("standing").is_some()));
+        // The bond behind a verdict rides beside each row, counted, so a
+        // reader can draw every claim's verification level from one request.
+        let attested = claims
+            .iter()
+            .find(|row| row.get("claim_id").and_then(Value::as_str) == Some(&accepted_claim))
+            .expect("the attested claim is listed");
+        assert_eq!(int(attested, "attestations.accept"), 1);
+        assert_eq!(int(attested, "attestations.slashed"), 0);
+        assert!(claims
+            .iter()
+            .filter(|row| row.get("claim_id").and_then(Value::as_str) != Some(&accepted_claim))
+            .all(|row| int(row, "attestations.accept") == 0));
 
         let (status, _) = get_json(addr, "/knowledge/sha256:nope");
         assert!(status.starts_with("HTTP/1.1 404"), "{status}");

@@ -18,7 +18,6 @@ import {
 import {
   Badge,
   EmptyState,
-  NodePicker,
   Note,
   PageHeader,
   Progress,
@@ -47,7 +46,6 @@ import { resolveNode } from "@/lib/site";
 type Sort = "reward" | "progress" | "goal";
 
 export default function Page() {
-  const [base, setBase] = useState(NODE_URL);
   const [objectives, setObjectives] = useState<Objective[] | null>(null);
   const [details, setDetails] = useState<Record<string, ObjectiveDetail>>({});
   const [error, setError] = useState<string | null>(null);
@@ -86,21 +84,7 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
-    // Ask which node to read before reading it. Same-origin when one answers --
-    // the daemon serves this page at /ui/, so that is the common case and it
-    // costs one /health -- and otherwise the first seed from the published list
-    // that is up. On the public site there is no same-origin node at all, and
-    // before this the box showed github.io and every request 404'd into the
-    // snapshot.
-    //
-    // Shown *and* used, which is the part worth being careful about: the box
-    // has to name the origin the numbers below came from, or a reader comparing
-    // two nodes is comparing one node against a label. Empty stays empty for
-    // fetching -- relative requests survive a tunnel or a proxy on an unknown
-    // path -- and becomes this page's own origin for display, because nobody
-    // can retype "" after clearing the box.
     void resolveNode().then((url) => {
-      setBase(url || window.location.origin);
       void load(url);
     });
   }, [load]);
@@ -162,12 +146,14 @@ export default function Page() {
         title="Objectives"
         subtitle="Every question this node knows about, and what is still payable on it. The node derived all of it from its log."
         actions={
-          <NodePicker
-            value={base}
-            onChange={setBase}
-            onRead={() => void load(base)}
-            loading={loading}
-          />
+          <>
+            <Link href="/goals" className="btn btn-sm">
+              Goals
+            </Link>
+            <Link href="/submit" className="btn btn-sm btn-primary">
+              Post a challenge
+            </Link>
+          </>
         }
       />
 

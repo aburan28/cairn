@@ -4,18 +4,19 @@ import Link from "next/link";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
+  type Angle,
   type Goal,
   type GoalsResponse,
   type Underserved,
   angleLabel,
+  describeAngle,
   describeMatch,
   describeUnderserved,
   fetchGoals,
   findGoals,
 } from "@/lib/goals";
-import { NODE_URL, RouteMissing } from "@/lib/network";
-import { resolveNode } from "@/lib/site";
-import { Badge, Box, EmptyState, Hash, NodePicker, Note, PageHeader, Skeleton, Stat } from "@/components/ui";
+import { useNode } from "@/components/hooks";
+import { Badge, Box, EmptyState, Hash, Note, PageHeader, Skeleton, Stat } from "@/components/ui";
 
 /**
  * Goals: what the network is trying to beat, and from which angles.
@@ -38,8 +39,9 @@ export default function Page() {
 function Header({ picker }: { picker: React.ReactNode }) {
   return (
     <PageHeader
+      crumb={{ href: "/objectives", label: "Objectives" }}
       title="Goals"
-      subtitle="What this network is trying to beat, and from which angles. Read off the goal handle every objective carries; two spellings of one problem are joined and said so."
+      subtitle="The problems this network is working on, and each approach taken to them. Open an approach to see what it is about and what is funded under it."
       actions={picker}
     />
   );
@@ -47,7 +49,8 @@ function Header({ picker }: { picker: React.ReactNode }) {
 
 function Goals() {
   const params = useSearchParams();
-  const [base, setBase] = useState(NODE_URL);
+  const node = useNode();
+  const base = node ?? "";
   const [data, setData] = useState<GoalsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState(params.get("q") ?? "");
@@ -69,11 +72,8 @@ function Goals() {
   }, []);
 
   useEffect(() => {
-    void resolveNode().then((url) => {
-      setBase(url || window.location.origin);
-      void load(url);
-    });
-  }, [load]);
+    if (node !== null) void load(node);
+  }, [load, node]);
 
   // The search is the node's, not the page's: the alias catalog lives there.
   useEffect(() => {
@@ -103,15 +103,9 @@ function Goals() {
   }, [query, base]);
 
   const picker = (
-    <NodePicker
-      value={base}
-      onChange={(url) => {
-        setBase(url);
-        void load(url);
-      }}
-      onRead={() => void load(base === window.location.origin ? "" : base)}
-      loading={loading}
-    />
+    <Link href="/submit" className="btn btn-sm btn-primary">
+      {loading ? "Reading…" : "Post a challenge"}
+    </Link>
   );
 
   const shown = useMemo(() => {
@@ -171,10 +165,10 @@ function Goals() {
 
       <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
         <Stat label="Goals" value={String(data.total)} from="distinct problems the objectives name" />
-        <Stat label="Angles named" value={String(totals.angles)} from="approaches declared as GOAL-key/angle" />
+        <Stat label="Approaches named" value={String(totals.angles)} from="declared as GOAL-key/approach" />
         <Stat label="Objectives" value={`${totals.open} open / ${totals.objectives}`} from="under every goal" />
         <Stat
-          label="Live workers"
+          label="Machines working"
           value={String(totals.workers)}
           from="heartbeating in the last three minutes, reported"
           tone="warn"
@@ -224,7 +218,7 @@ function Goals() {
       {/* -- where compute is scarce ------------------------------------------ */}
       {!focus && (data.underserved?.length ?? 0) > 0 && (
         <div className="mt-5">
-          <Scarce rows={data.underserved ?? []} />
+          <Scarce rows={data.underserved ?? []} goals={data.goals} />
         </div>
       )}
 
@@ -261,7 +255,13 @@ function Goals() {
  * worker would matter most. Heartbeats are self-reported, so a busy-looking
  * angle may not be; the worst that does is send fewer workers there.
  */
-function Scarce({ rows }: { rows: Underserved[] }) {
+function Scarce({ rows, goals }: { rows: Underserved[]; goals: Goal[] }) {
+  // The label an angle has on its goal's card, so the two places agree.
+  const label = (row: Underserved) => {
+    const angles = goals.find((g) => g.key === row.goal)?.angles ?? [];
+    const index = angles.findIndex((a) => a.path === row.angle);
+    return index >= 0 ? angleLabel(angles[index], index) : angleLabel({ path: row.angle, objectives: [] }, 0);
+  };
   return (
     <Box
       title="Where compute is scarce"
@@ -276,7 +276,7 @@ function Scarce({ rows }: { rows: Underserved[] }) {
             <Link href={`/goals?key=${encodeURIComponent(row.goal)}`} className="text-ink">
               {row.goal_name}
             </Link>
-            <span className="mono text-[12px] text-ink-2">{angleLabel(row.angle)}</span>
+            <span className="mono text-[12px] text-ink-2">{label(row)}</span>
             <span className="text-ink-3">{describeUnderserved(row)}</span>
             {row.objectives[0] && (
               <Link
@@ -328,35 +328,75 @@ function GoalCard({ goal }: { goal: Goal }) {
         )}
         {goal.summary && <span className="basis-full text-ink-2">{goal.summary}</span>}
       </div>
-      <div className="flex flex-col gap-3">
-        {goal.angles.map((angle) => (
-          <div key={angle.path || "(none)"} className="rounded-md border border-line p-3">
-            <div className="mb-2 flex flex-wrap items-baseline gap-2">
-              <span className="mono text-[13px]">{angleLabel(angle.path)}</span>
-              {angle.parent !== null && (
-                <span className="text-[12px] text-ink-3">
-                  refines <span className="mono">{angle.parent}</span>
-                </span>
-              )}
-              <span className="text-[12px] text-ink-3">
-                {angle.open} open · {angle.settled} settled
-                {angle.live_workers > 0 ? ` · ${angle.live_workers} live` : ""}
-              </span>
-            </div>
-            <ul className="flex flex-col gap-1.5">
-              {angle.objectives.map((entry) => (
-                <li key={entry.id} className="flex flex-wrap items-baseline gap-2 text-[13px]">
-                  <Hash value={entry.id} href={`/challenge?id=${encodeURIComponent(entry.id)}`} chars={12} />
-                  <Badge tone={entry.settled ? "neutral" : "accent"}>{entry.settled ? "settled" : "open"}</Badge>
-                  <span className="mono text-[12px] text-ink-3">{entry.verifier_kind}</span>
-                  <span className="text-ink-2">{entry.statement_excerpt}</span>
-                  <span className="mono text-[12px] text-ink-3">{entry.reward.toLocaleString()} units</span>
-                </li>
-              ))}
-            </ul>
-          </div>
+      <div className="flex flex-col gap-2">
+        {goal.angles.map((angle, index) => (
+          <AngleRow key={angle.path || "(none)"} angle={angle} index={index} />
         ))}
       </div>
     </Box>
+  );
+}
+
+/**
+ * One approach to a goal, folded to a line until it is opened. Opened, it says
+ * what the approach is -- its method family when the name is one of the agreed
+ * words, otherwise that its funders named none -- and what is funded under it,
+ * with each objective's statement, so "what is this other approach even about"
+ * has an answer on the page.
+ */
+function AngleRow({ angle, index }: { angle: Angle; index: number }) {
+  const [open, setOpen] = useState(false);
+  const label = angleLabel(angle, index);
+  return (
+    <div className="rounded-md border border-edge">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex w-full cursor-pointer flex-wrap items-baseline gap-x-2 gap-y-0.5 px-3 py-2.5 text-left hover:bg-surface-2"
+      >
+        <span className="text-[10px] text-ink-3" aria-hidden>
+          {open ? "▾" : "▸"}
+        </span>
+        <span className="mono text-[13px] text-ink">{label}</span>
+        {angle.parent !== null && (
+          <span className="text-[12px] text-ink-3">
+            refines <span className="mono">{angle.parent}</span>
+          </span>
+        )}
+        <span className="ml-auto text-[12px] text-ink-3">
+          {angle.open} open · {angle.settled} settled
+          {angle.live_workers > 0 ? ` · ${angle.live_workers} working` : ""}
+        </span>
+      </button>
+      {open && (
+        <div className="border-t border-edge px-3 py-3">
+          <div className="flex flex-col gap-1 text-[12.5px] leading-relaxed text-ink-2">
+            {describeAngle(angle).map((line) => (
+              <p key={line}>{line}</p>
+            ))}
+          </div>
+          <ul className="mt-3 flex flex-col gap-2">
+            {angle.objectives.map((entry) => (
+              <li key={entry.id} className="rounded-md bg-surface-2 px-3 py-2 text-[12.5px]">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone={entry.settled ? "neutral" : "accent"}>{entry.settled ? "settled" : "open"}</Badge>
+                  <span className="mono text-[11.5px] text-ink-3">{entry.verifier_kind}</span>
+                  <span className="mono text-[11.5px] text-ink-3">{entry.reward.toLocaleString("en-US")} units</span>
+                  <span className="ml-auto">
+                    <Hash value={entry.id} href={`/challenge?id=${encodeURIComponent(entry.id)}`} chars={10} />
+                  </span>
+                </div>
+                {entry.statement_excerpt && (
+                  <p className="mt-1 text-ink-2" title="The funder's words, unchecked">
+                    {entry.statement_excerpt}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }
