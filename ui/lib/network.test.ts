@@ -2,18 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   type External,
   type FleetWorker,
-  type NetworkResponse,
+  type RoleName,
   type ThisNode,
   classLabel,
   describeHost,
   describeReachability,
-  effectiveRoles,
   fleetMembers,
   fleetSigning,
   fleetTotals,
   formatMemory,
   formatUptime,
-  isLeader,
+  peerStatus,
+  primaryRole,
   reachTone,
   roleWarning,
   share,
@@ -253,102 +253,41 @@ describe("fleet signing", () => {
   });
 });
 
-describe("effectiveRoles", () => {
-  const network = (over: Record<string, unknown> = {}): NetworkResponse =>
-    ({
-      generated_at: "2026-10-04T12:00:00Z",
-      version: "test",
-      node: {
-        roles: {
-          declared: [],
-          source: "CAIRN_ROLES",
-          known: [
-            { role: "coordinator", duty: "funds questions", evidence: "objectives" },
-            { role: "verifier", duty: "checks answers", evidence: "attestations" },
-          ],
-        },
-        warnings: [],
-        hardware: { cpus: 4, memory_mb: 8192, os: "linux", arch: "x86_64", verifier_limits: {}, note: "" },
-        verifiers: { servable: [], unservable: {}, sandbox: {} },
-        accepts_submissions: false,
-        runs_p2p: false,
-        ...((over.node ?? {}) as Record<string, unknown>),
-      },
-      peers: { available: false, reached: 0, recent: 0, lost: 0, unreached: 0, announced: 0 },
-      compute: {
-        workers: [],
-        live: 0,
-        stale: 0,
-        gone: 0,
-        steps_per_second: 0,
-        lanes: 0,
-        devices: [],
-        classes: [],
-        objectives: [],
-        live_within_seconds: 180,
-        stale_within_seconds: 1800,
-        note: "",
-      },
-      roles: {
-        coordinators: { total: 0, shown: 0, identities: [] },
-        executors: { total: 0, shown: 0, identities: [] },
-        verifiers: { total: 0, shown: 0, identities: [] },
-        note: "",
-      },
-      note: "",
-    }) as unknown as NetworkResponse;
+describe("primaryRole", () => {
+  const roles = (declared: RoleName[] = []) => ({ declared, source: "CAIRN_ROLES", known: [] });
 
-  it("lists declared roles first, with their duty", () => {
-    const roles = effectiveRoles(
-      network({ node: { roles: { declared: ["coordinator"], source: "CAIRN_ROLES", known: [{ role: "coordinator", duty: "funds questions", evidence: "objectives" }] }, accepts_submissions: true, runs_p2p: true, verifiers: { servable: [], unservable: {}, sandbox: {} } } }),
-    );
-    expect(roles[0]).toMatchObject({ role: "coordinator", source: "declared" });
+  it("calls a node work arrives at a leader, declared or not", () => {
+    const role = primaryRole({ accepts_submissions: true, runs_p2p: true, fleet: null, roles: roles() });
+    expect(role.key).toBe("leader");
+    expect(role.title).toBe("Leader");
+    expect(role.summary).toMatch(/paid under its own name/);
   });
 
-  it("adds leader when the node leads a fleet, beside any declared role", () => {
-    const roles = effectiveRoles(
-      network({
-        node: {
-          roles: { declared: ["coordinator"], source: "CAIRN_ROLES", known: [] },
-          accepts_submissions: true,
-          runs_p2p: false,
-          verifiers: { servable: [], unservable: {}, sandbox: {} },
-          fleet: { sources: ["enrolled"], signs_as: "ab".repeat(32), members: { enrolled: 2, live: 1 } },
-        },
-      }),
-    );
-    expect(roles.map((r) => r.role)).toEqual(["coordinator", "leader"]);
-    expect(roles[1]).toMatchObject({ source: "fleet" });
-    expect(roles[1].detail).toContain("2 enrolled");
+  it("says a fleet leader signs for its members", () => {
+    const role = primaryRole({
+      accepts_submissions: true,
+      runs_p2p: true,
+      fleet: { sources: ["enrolled"], signs_as: "a".repeat(64), members: { enrolled: 3, live: 2 } },
+      roles: roles(["verifier"]),
+    });
+    expect(role.key).toBe("leader");
+    expect(role.summary).toMatch(/3 enrolled machines/);
+    expect(role.also).toEqual(["checks answers under bond"]);
   });
 
-  it("suggests roles from capabilities when nothing is declared, so a node is never blank", () => {
-    const roles = effectiveRoles(
-      network({
-        node: {
-          roles: { declared: [], source: "CAIRN_ROLES", known: [] },
-          accepts_submissions: true,
-          runs_p2p: true,
-          verifiers: { servable: ["certificate"], unservable: {}, sandbox: {} },
-        },
-      }),
-    );
-    expect(roles.map((r) => `${r.role}/${r.source}`)).toEqual([
-      "coordinator/suggested",
-      "verifier/suggested",
-      "relay/suggested",
-    ]);
-    expect(roles[0].detail).toContain("CAIRN_ROLES");
+  it("is a peer or a mirror when no work arrives, and never blank", () => {
+    expect(primaryRole({ accepts_submissions: false, runs_p2p: true, fleet: null, roles: roles() }).key).toBe("peer");
+    expect(primaryRole({ accepts_submissions: false, runs_p2p: false, roles: roles(["relay"]) })).toMatchObject({
+      key: "mirror",
+      also: ["relays the log for other nodes"],
+    });
   });
+});
 
-  it("is empty only for a node that does nothing at all", () => {
-    expect(effectiveRoles(network())).toEqual([]);
-  });
-
-  it("reports leadership from the fleet field alone", () => {
-    expect(isLeader(network())).toBe(false);
-    expect(
-      isLeader(network({ node: { fleet: { sources: ["loopback"], signs_as: "ab".repeat(32) } } })),
-    ).toBe(true);
+describe("peerStatus", () => {
+  it("reads a session's window in words", () => {
+    expect(peerStatus({ status: "reached", age_seconds: 40 })).toBe("connected · 40s ago");
+    expect(peerStatus({ status: "recent", age_seconds: 600 })).toBe("last seen 10m ago");
+    expect(peerStatus({ status: "unreached", age_seconds: null })).toBe("never reached");
   });
 });

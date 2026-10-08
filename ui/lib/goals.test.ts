@@ -3,12 +3,12 @@ import {
   type Goal,
   type Underserved,
   angleLabel,
+  describeAngle,
   composeHandle,
   describeMatch,
   describeUnderserved,
   normalizeGoal,
   parseHandle,
-  shortHash,
 } from "./goals";
 
 const goal = (over: Partial<Goal>): Goal => ({
@@ -47,17 +47,48 @@ describe("goal handles", () => {
     expect(parseHandle(" ECC2K-130 / rho / ").angle).toEqual(["rho"]);
     expect(composeHandle("certicom-ecc2k130", ["Rho", "GPU-Kernel"])).toBe("GOAL-certicom-ecc2k130/rho/gpu-kernel");
     expect(composeHandle("GOAL-x", [])).toBe("GOAL-x");
-    expect(angleLabel("rho/distributed")).toBe("rho/distributed");
+  });
+});
+
+describe("angleLabel and describeAngle", () => {
+  const entry = (id: string, reward = 100, kind = "certificate") => ({
+    id,
+    goal: "GOAL-x",
+    statement_excerpt: "",
+    verifier_kind: kind,
+    reward,
+    funder: "f",
+    settled: false,
+    open: true,
+    live_workers: 0,
+  });
+  const angle = (path: string, ids: string[]) => ({
+    path,
+    segments: path ? path.split("/") : [],
+    parent: path.includes("/") ? path.split("/")[0] : null,
+    objectives: ids.map((id) => entry(id)),
+    open: ids.length,
+    settled: 0,
+    live_workers: 0,
   });
 
-  it("names an unnamed approach stably and distinctly per goal", () => {
-    const first = angleLabel("", "certicomecc2k130", 1);
-    expect(first).toMatch(/^approach 1 · [0-9a-f]{6}$/);
-    expect(angleLabel("", "certicomecc2k130", 1)).toBe(first);
-    expect(angleLabel("", "othergoal", 1)).not.toBe(first);
-    expect(angleLabel("", "certicomecc2k130", 2)).toContain("approach 2");
-    expect(shortHash("certicomecc2k130")).toMatch(/^[0-9a-f]{6}$/);
-    expect(shortHash("certicomecc2k130")).toBe(shortHash("certicomecc2k130"));
+  it("names an unnamed approach by its place and its first objective, never 'no particular approach'", () => {
+    expect(angleLabel(angle("", ["sha256:7c3e19aa00", "sha256:ffff"]), 0)).toBe("Approach 1 · 7c3e19");
+    expect(angleLabel(angle("", ["sha256:0011223344"]), 2)).toBe("Approach 3 · 001122");
+    expect(angleLabel(angle("", []), 1)).toBe("Approach 2");
+  });
+
+  it("keeps a named angle's own words", () => {
+    expect(angleLabel(angle("rho/distributed", ["sha256:ab"]), 4)).toBe("rho/distributed");
+  });
+
+  it("explains an angle from its family and what is funded under it", () => {
+    const lines = describeAngle({ ...angle("rho/gpu-kernel", ["sha256:a", "sha256:b"]), live_workers: 2 });
+    expect(lines[0]).toMatch(/^Pollard rho/);
+    expect(lines).toContain("A refinement of rho.");
+    expect(lines).toContain("2 objectives (2 open), 200 units funded in all, answers checked by certificate.");
+    expect(lines).toContain("2 machines are working on it now.");
+    expect(describeAngle(angle("", ["sha256:a"]))[0]).toMatch(/named no method/);
   });
 });
 

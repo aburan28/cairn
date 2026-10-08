@@ -318,12 +318,12 @@ case "$UI_CODE" in
       echo "  GET $page -> 200, says \"$sentinel\", links nowhere on github.com"
     done <<'PAGES'
 /ui/objectives/|still payable
+/ui/knowledge/|How well verified each result
 /ui/chain/|where they forked
 /ui/log/|Every record this node holds
 /ui/network/|Whom this node has reached
 /ui/coordination/|How a divided search is coordinated
-/ui/agents/|Whether this node leads
-/ui/knowledge/|How believed each settled claim is
+/ui/contribute/|Ways to take part
 PAGES
     ;;
   404)

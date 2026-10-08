@@ -1,529 +1,420 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useCallback, useMemo, useState } from "react";
+import { type Chain, epochScales, fetchChain, firstBrokenLink, totalClaims } from "@/lib/chain";
+import { type CheckpointResponse, coversHead, readCheckpoint } from "@/lib/checkpoint";
 import {
-  type KnowledgeClaim,
   type KnowledgeIndex,
-  confidencePercent,
-  evidenceLine,
-  fetchKnowledgeClaim,
-  fetchKnowledgeIndex,
-  standingHelp,
-  standingTone,
+  type KnowledgeRow,
+  type Policy,
+  caveats,
+  fetchKnowledge,
+  verification,
 } from "@/lib/knowledge";
-import { NODE_URL } from "@/lib/site";
-import { resolveNode } from "@/lib/site";
+import { ago } from "@/lib/events";
+import { loadObjectives } from "@/lib/site";
+import { objectiveTitle } from "@/lib/title";
+import { shortActor } from "@/components/events";
+import { useEvery, useNode } from "@/components/hooks";
 import {
   Badge,
   Box,
   CopyButton,
+  Disclosure,
   EmptyState,
   Hash,
-  NodeSource,
+  LiveStamp,
   Note,
   PageHeader,
-  Progress,
-  SectionHeading,
   Skeleton,
+  Stat,
 } from "@/components/ui";
 
+const SUBTITLE =
+  "How well verified each result on this node is, and the chain that commits to them: two nodes that settled the same results share a head, and where they differ is where they forked.";
+
+/** Links drawn before "show all": the recent past is what a fork is found in. */
+const RECENT_LINKS = 12;
+
 /**
- * How believed each settled claim is, as this node derives it from the log.
+ * Knowledge: every result, how well verified it is, and the chain.
  *
- * The chain page shows *that* claims settled; this one shows what happened
- * to them since: the verifier's verdict, what later verified claims said
- * about them, and a confidence number under the policy named at the top.
- * `?id=` is one claim with its relations and its bonded attestations;
- * without it, the table of every claim, newest first.
+ * The chain page used to be the whole of this -- links, a head, a
+ * checkpoint -- which answers "is my copy the same as yours" and not the
+ * question a person reading results has: *how sure is anyone of this one?*
+ * The node has computed that all along (`GET /knowledge`, `src/knowledge.rs`)
+ * and no page read it. Now each result shows four kinds of evidence as a
+ * ladder (`lib/knowledge.ts`) beside the node's confidence under a policy the
+ * reader picks, and the chain sits underneath as the commitment to all of it.
  *
- * Standing moves no money and settles nothing. A contested claim is the log
- * working, not the log failing.
+ * Nothing here pays anyone. Settlement reads verdicts and citations; standing
+ * and confidence are a view, and two readers with different policies get
+ * different numbers from the same log on purpose.
  */
 export default function Page() {
-  return (
-    <Suspense
-      fallback={
-        <div className="flex flex-col gap-3">
-          <PageHeader
-            title="Knowledge"
-            subtitle="How believed each settled claim is: the verifier's verdict, what later verified claims said, and a confidence number under your policy."
-          />
-          <Skeleton className="h-4 w-full max-w-lg" />
-          <Skeleton className="h-20 w-full" />
-        </div>
-      }
-    >
-      <Knowledge />
-    </Suspense>
-  );
-}
-
-function Knowledge() {
-  const params = useSearchParams();
-  const id = params.get("id") ?? "";
-  return id ? <Claim id={id} /> : <Index />;
-}
-
-function Index() {
-  const [base, setBase] = useState(NODE_URL);
-  const [policy, setPolicy] = useState<"default" | "demanding">("default");
-  const [data, setData] = useState<KnowledgeIndex | null>(null);
+  const base = useNode();
+  const [policy, setPolicy] = useState<Policy>("default");
+  const [knowledge, setKnowledge] = useState<KnowledgeIndex | null>(null);
+  const [knowledgeMissing, setKnowledgeMissing] = useState(false);
+  const [chain, setChain] = useState<Chain | null>(null);
+  const [checkpoint, setCheckpoint] = useState<CheckpointResponse | null>(null);
+  const [titles, setTitles] = useState<Map<string, string>>(new Map());
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [standing, setStanding] = useState<string | null>(null);
+  const [readAt, setReadAt] = useState<Date | null>(null);
 
-  const load = useCallback(
-    async (url: string, name: "default" | "demanding") => {
-      setLoading(true);
-      setError(null);
-      try {
-        setData(await fetchKnowledgeIndex(url, name));
-      } catch (cause) {
-        setData(null);
+  const load = useCallback(async () => {
+    if (base === null) return;
+    // Each part fails on its own: a node older than /knowledge still has a
+    // chain, and a checkpoint in the wrong shape is no reason to hide either.
+    const [nextKnowledge, nextChain, answer, feed] = await Promise.all([
+      fetchKnowledge(base, policy).catch((cause: unknown) => {
         setError(cause instanceof Error ? cause.message : String(cause));
-      } finally {
-        setLoading(false);
-      }
-    },
-    [],
-  );
+        return undefined;
+      }),
+      fetchChain(base).catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        return null;
+      }),
+      readCheckpoint(base),
+      loadObjectives(base).catch(() => null),
+    ]);
+    if (nextKnowledge === null) setKnowledgeMissing(true);
+    else if (nextKnowledge) setKnowledge(nextKnowledge);
+    if (nextChain) setChain(nextChain);
+    setCheckpoint(answer.kind === "signed" ? answer.value : null);
+    if (feed?.live) setTitles(new Map(feed.objectives.map((o) => [o.id, objectiveTitle(o)] as const)));
+    if (nextKnowledge !== undefined && nextChain) setError(null);
+    setReadAt(new Date());
+  }, [base, policy]);
 
-  useEffect(() => {
-    void resolveNode().then((url) => {
-      setBase(url || window.location.origin);
-      void load(url, policy);
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [load]);
-  useEffect(() => {
-    if (base !== NODE_URL || data) void load(base === window.location.origin ? "" : base, policy);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [policy]);
+  useEvery(load, 30, base !== null, policy);
 
-  const picker = (
-    <>
-      <label className="flex items-center gap-1.5 text-[12px] text-ink-3">
-        Policy
-        <select
-          className="field py-1.5"
-          value={policy}
-          onChange={(event) => setPolicy(event.target.value as "default" | "demanding")}
-          title="The reader's weighting: demanding wants replication before belief"
-        >
-          <option value="default">default</option>
-          <option value="demanding">demanding</option>
-        </select>
-      </label>
-      <NodeSource
-        value={base}
-        onChange={setBase}
-        onRead={() => void load(base === window.location.origin ? "" : base, policy)}
-        loading={loading}
-      />
-    </>
-  );
-
-  const rows = useMemo(() => {
-    if (!data) return [];
-    return standing ? data.claims.filter((row) => row.standing === standing) : data.claims;
-  }, [data, standing]);
-
-  if (error && !data) {
-    return (
-      <>
-        <PageHeader title="Knowledge" actions={picker} />
-        <Note title="Could not read this node" tone="bad">
-          {error}
-        </Note>
-      </>
-    );
-  }
-
-  if (!data) {
-    return (
-      <div className="flex flex-col gap-3">
-        <PageHeader
-          title="Knowledge"
-          subtitle="How believed each settled claim is: the verifier's verdict, what later verified claims said, and a confidence number under your policy."
-          actions={picker}
-        />
-        <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-4">
-          <Skeleton className="h-20" />
-          <Skeleton className="h-20" />
-          <Skeleton className="h-20" />
-          <Skeleton className="h-20" />
-        </div>
-      </div>
-    );
-  }
+  const counts = knowledge?.by_standing ?? {};
+  const verified = (counts.accepted ?? 0) + (counts.corroborated ?? 0);
+  const challenged =
+    (counts.contested ?? 0) + (counts.superseded ?? 0) + (counts.withdrawn ?? 0) + (counts.refuted ?? 0);
+  const now = readAt?.getTime() ?? Date.now();
 
   return (
     <>
       <PageHeader
         title="Knowledge"
-        subtitle="How believed each settled claim is: the verifier's verdict, what later verified claims said, and a confidence number under your policy. Standing moves no money."
-        meta={
+        subtitle={SUBTITLE}
+        actions={
           <>
-            <Badge tone="accent">{data.total} claims</Badge>
-            <Badge tone="neutral" title="The policy this page's numbers were computed under">
-              policy: {data.policy.name}
-            </Badge>
+            <div className="segmented" role="group" aria-label="Confidence policy">
+              <button
+                type="button"
+                aria-pressed={policy === "default"}
+                onClick={() => setPolicy("default")}
+                title="Acceptance by the pinned checker counts for most of it"
+              >
+                Standard
+              </button>
+              <button
+                type="button"
+                aria-pressed={policy === "demanding"}
+                onClick={() => setPolicy("demanding")}
+                title="Wants independent replication before belief; one refutation is close to fatal"
+              >
+                Demanding
+              </button>
+            </div>
+            <LiveStamp at={readAt} error={knowledge || chain ? error : null} />
           </>
         }
-        actions={picker}
       />
 
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          className={`btn btn-sm ${standing === null ? "btn-primary" : ""}`}
-          onClick={() => setStanding(null)}
-        >
-          all <span className="mono">{data.total}</span>
-        </button>
-        {Object.entries(data.by_standing)
-          .sort(([, a], [, b]) => b - a)
-          .map(([name, count]) => (
-            <button
-              type="button"
-              key={name}
-              className={`btn btn-sm ${standing === name ? "btn-primary" : ""}`}
-              onClick={() => setStanding(standing === name ? null : name)}
-              title={standingHelp(name)}
-            >
-              {name} <span className="mono">{count}</span>
-            </button>
-          ))}
-      </div>
-
-      {rows.length === 0 ? (
-        <EmptyState title={standing ? `No ${standing} claim here` : "No claim in this log yet"}>
-          {standing
-            ? "Nothing derived to this standing under the chosen policy."
-            : "Standing appears once a claim is verified."}
-        </EmptyState>
-      ) : (
-        <div className="box mb-5 overflow-x-auto">
-          <table className="w-full min-w-[52rem] border-collapse text-left text-[12.5px]">
-            <thead>
-              <tr className="border-b border-edge text-[11px] text-ink-3">
-                <th className="px-4 py-2 font-medium">Claim</th>
-                <th className="px-3 py-2 font-medium">Standing</th>
-                <th className="px-3 py-2 font-medium">Confidence</th>
-                <th className="px-3 py-2 font-medium">Evidence</th>
-                <th className="px-3 py-2 font-medium">By</th>
-                <th className="px-4 py-2 font-medium">On</th>
-              </tr>
-            </thead>
-            <tbody className="divide-edge-y">
-              {rows.map((row) => (
-                <tr key={row.claim_id} className="align-top hover:bg-surface-2">
-                  <td className="px-4 py-2.5">
-                    <Hash
-                      value={row.claim_id}
-                      href={`/knowledge?id=${encodeURIComponent(row.claim_id)}`}
-                      chars={8}
-                    />
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <Badge tone={standingTone(row.standing)} title={standingHelp(row.standing)}>
-                      {row.standing}
-                    </Badge>
-                    {row.reproducible === "not-here" && (
-                      <div className="mt-1 text-[11px] text-warn" title="The pinned verifier code is missing from this node's store">
-                        not re-derivable here
-                      </div>
-                    )}
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <div className="flex min-w-28 items-center gap-2">
-                      <div className="min-w-20 flex-1">
-                        <Progress value={row.confidence_per_mille / 1000} />
-                      </div>
-                      <span className="mono text-[12px] text-ink-2">
-                        {confidencePercent(row.confidence_per_mille)}%
-                      </span>
-                    </div>
-                  </td>
-                  <td className="px-3 py-2.5 text-[12px] text-ink-2">{evidenceLine(row)}</td>
-                  <td className="mono px-3 py-2.5 text-[12px] text-ink-2">{row.submitter}</td>
-                  <td className="px-4 py-2.5">
-                    <Link
-                      href={`/challenge?id=${encodeURIComponent(row.objective_id)}`}
-                      className="text-accent hover:underline"
-                      title={row.objective_id}
-                    >
-                      challenge →
-                    </Link>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {error && !knowledge && !chain && (
+        <div className="mb-4">
+          <Note title="Could not read this node" tone="bad">
+            {error}
+          </Note>
         </div>
       )}
-      {data.total > data.shown && (
-        <p className="mb-4 text-[12px] text-ink-3">
-          Showing {data.shown} of {data.total}; the newest first.
-        </p>
+
+      {/* -- results --------------------------------------------------------- */}
+      {knowledge && (
+        <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+          <Stat label="Results" value={String(knowledge.total)} from="claims in this log" />
+          <Stat label="Verified" value={String(verified)} from="accepted by their checker" tone="accent" />
+          <Stat label="Replicated" value={String(counts.corroborated ?? 0)} from="reproduced independently" tone="accent" />
+          <Stat
+            label="Challenged"
+            value={String(challenged)}
+            from="disputed, replaced or withdrawn"
+            tone={challenged > 0 ? "warn" : "neutral"}
+          />
+        </div>
       )}
-      <p className="text-[12px] text-ink-3">{data.note}</p>
+
+      <Ladder />
+
+      {knowledgeMissing ? (
+        <div className="mt-4">
+          <EmptyState title="This node is older than the knowledge report">
+            A node built with <span className="mono">GET /knowledge</span> shows how well verified each result is.
+            The chain below is still this node&rsquo;s.
+          </EmptyState>
+        </div>
+      ) : knowledge === null ? (
+        <Skeleton className="mt-4 h-48 w-full" />
+      ) : knowledge.claims.length === 0 ? (
+        <div className="mt-4">
+          <EmptyState title="No result yet">
+            A result appears here once someone reveals an answer to a challenge and its checker has spoken.
+          </EmptyState>
+        </div>
+      ) : (
+        <Box
+          className="mt-4"
+          flush
+          title={
+            <>
+              Results, newest first{" "}
+              <span className="mono ml-1 font-normal text-ink-3">
+                {knowledge.shown < knowledge.total ? `${knowledge.shown} of ${knowledge.total}` : knowledge.total}
+              </span>
+            </>
+          }
+          aside={
+            <span className="text-[11px] font-normal text-ink-3">
+              confidence under the {knowledge.policy.name === "default" ? "standard" : knowledge.policy.name} policy
+            </span>
+          }
+        >
+          <ul className="divide-edge-y">
+            {knowledge.claims.map((row) => (
+              <ResultRow key={row.claim_id} row={row} title={titles.get(row.objective_id)} now={now} />
+            ))}
+          </ul>
+        </Box>
+      )}
+
+      {/* -- the chain ------------------------------------------------------- */}
+      <h2 className="mt-8 mb-3 text-[13px] font-semibold tracking-[0.06em] text-ink-2 uppercase">The chain</h2>
+      {chain ? <ChainSection chain={chain} checkpoint={checkpoint} /> : <Skeleton className="h-32 w-full" />}
     </>
   );
 }
 
-function Claim({ id }: { id: string }) {
-  const [base, setBase] = useState(NODE_URL);
-  const [policy, setPolicy] = useState<"default" | "demanding">("default");
-  const [claim, setClaim] = useState<KnowledgeClaim | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const load = useCallback(
-    async (url: string, name: "default" | "demanding") => {
-      setLoading(true);
-      setError(null);
-      try {
-        setClaim(await fetchKnowledgeClaim(id, url, name));
-      } catch (cause) {
-        setClaim(null);
-        setError(cause instanceof Error ? cause.message : String(cause));
-      } finally {
-        setLoading(false);
-      }
-    },
-    [id],
-  );
-
-  useEffect(() => {
-    void resolveNode().then((url) => {
-      setBase(url || window.location.origin);
-      void load(url, policy);
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [load]);
-
-  const picker = (
-    <>
-      <label className="flex items-center gap-1.5 text-[12px] text-ink-3">
-        Policy
-        <select
-          className="field py-1.5"
-          value={policy}
-          onChange={(event) => {
-            const next = event.target.value as "default" | "demanding";
-            setPolicy(next);
-            void load(base === window.location.origin ? "" : base, next);
-          }}
-        >
-          <option value="default">default</option>
-          <option value="demanding">demanding</option>
-        </select>
-      </label>
-      <NodeSource
-        value={base}
-        onChange={setBase}
-        onRead={() => void load(base === window.location.origin ? "" : base, policy)}
-        loading={loading}
-      />
-    </>
-  );
-
-  if (error && !claim) {
-    return (
-      <>
-        <PageHeader crumb={{ href: "/knowledge", label: "Knowledge" }} title="No such claim" actions={picker} />
-        <Note title="Could not read this claim" tone="bad">
-          {error}
-        </Note>
-      </>
-    );
-  }
-
-  if (!claim) {
-    return (
-      <div className="flex flex-col gap-3">
-        <Skeleton className="h-7 w-56" />
-        <Skeleton className="h-4 w-full max-w-lg" />
-        <Skeleton className="h-20 w-full" />
-      </div>
-    );
-  }
-
-  const state = claim.state;
+/** The four kinds of evidence, once, so every row's dots mean something. */
+function Ladder() {
+  const steps = [
+    ["Checked", "The challenge's pinned checker accepted it. Nothing below counts without this."],
+    ["Re-checkable here", "This node holds the checker's code, so anyone with the log can run the check again."],
+    ["Backed by a bond", "A validator re-ran the check and staked money on the verdict, and nobody has shown them wrong."],
+    ["Replicated", "An independent party reproduced the result in an answer its checker accepted."],
+  ] as const;
   return (
-    <>
-      <PageHeader
-        crumb={{ href: "/knowledge", label: "Knowledge" }}
-        title="One claim, and what became of it"
-        meta={
-          <>
-            <Badge tone={standingTone(state.standing)} title={standingHelp(state.standing)}>
-              {state.standing}
-            </Badge>
-            <span className="mono text-[12px] text-ink-2">
-              {confidencePercent(state.confidence_per_mille)}% under {claim.policy.name}
-            </span>
-            <Hash value={claim.claim_id} chars={8} />
-          </>
-        }
-        actions={picker}
-      />
-
-      <div className="mb-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
-        <Box title="Standing">
-          <div className="mb-2 max-w-64">
-            <Progress value={state.confidence_per_mille / 1000} label="confidence" />
-          </div>
-          <dl className="kv mt-3">
-            <dt>verdict</dt>
-            <dd className="mono">{state.verdict ?? "none recorded"}</dd>
-            <dt>re-derivable</dt>
-            <dd className="mono">{state.reproducible}</dd>
-            <dt>corroborations</dt>
-            <dd className="mono">{state.corroborations} independent parties</dd>
-            <dt>refutations</dt>
-            <dd className="mono">{state.refutations}</dd>
-            <dt>disputes</dt>
-            <dd className="mono">{state.disputes}</dd>
-            {state.superseded_by.length > 0 && (
-              <>
-                <dt>superseded by</dt>
-                <dd>
-                  <ul className="flex flex-col gap-0.5">
-                    {state.superseded_by.map((other) => (
-                      <li key={other}>
-                        <Hash value={other} href={`/knowledge?id=${encodeURIComponent(other)}`} chars={8} />
-                      </li>
-                    ))}
-                  </ul>
-                </dd>
-              </>
-            )}
-            {state.retracted_by && (
-              <>
-                <dt>retracted by</dt>
-                <dd>
-                  <Hash
-                    value={state.retracted_by}
-                    href={`/knowledge?id=${encodeURIComponent(state.retracted_by)}`}
-                    chars={8}
-                  />
-                </dd>
-              </>
-            )}
-          </dl>
-          <p className="hint mt-3">
-            {standingHelp(state.standing)}. Counts are independent parties after collapsing
-            correlated sources — one party under ten names corroborates once.
-          </p>
-        </Box>
-
-        <div className="flex min-w-0 flex-col gap-4">
-          <Box title="Claim">
-            <dl className="kv">
-              <dt>submitter</dt>
-              <dd className="mono">{claim.submitter}</dd>
-              <dt>objective</dt>
-              <dd>
-                <Link
-                  href={`/challenge?id=${encodeURIComponent(claim.objective_id)}`}
-                  className="text-accent hover:underline"
-                >
-                  challenge →
-                </Link>
-              </dd>
-              <dt>claim</dt>
-              <dd>
-                <div className="flex items-start gap-1">
-                  <code className="mono text-[11.5px] [overflow-wrap:anywhere]">{claim.claim_id}</code>
-                  <CopyButton value={claim.claim_id} />
-                </div>
-              </dd>
-            </dl>
-          </Box>
-
-          <Box
-            title={
-              <>
-                Bonded attestations{" "}
-                <span className="mono ml-1 font-normal text-ink-3">
-                  {claim.attestations.accept + claim.attestations.reject}
-                </span>
-              </>
-            }
-          >
-            {claim.attestations.accept + claim.attestations.reject === 0 ? (
-              <p className="text-[12.5px] text-ink-3">
-                Nobody has stood behind this verdict under bond.
-              </p>
-            ) : (
-              <>
-                <p className="text-[12.5px] text-ink-2">
-                  {claim.attestations.accept} accept · {claim.attestations.reject} reject
-                  {claim.attestations.slashed > 0 && (
-                    <span className="text-bad"> · {claim.attestations.slashed} slashed</span>
-                  )}{" "}
-                  · {claim.attestations.bond_each.toLocaleString("en-US")} bonded each.
-                </p>
-                <ul className="mt-2 flex flex-col gap-1.5">
-                  {claim.attestations.attestations.map((row) => (
-                    <li key={row.attestation_id} className="text-[12px] text-ink-2">
-                      <span className="mono">{row.attestor}</span> said {row.status}
-                      {row.slashed && <span className="text-bad">, slashed</span>}
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-            <p className="hint mt-2">
-              Beside the standing, never inside it: a bonded opinion is neither a verdict
-              nor a relation.
-            </p>
-          </Box>
-        </div>
+    <section className="card card-pad">
+      <div className="mb-3 flex flex-wrap items-baseline gap-2">
+        <h2 className="text-[13.5px] font-semibold text-ink">How verified is a result?</h2>
+        <span className="text-[12px] text-ink-3">Four kinds of evidence, each one a fact the log or this node can show.</span>
       </div>
+      <ol className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {steps.map(([title, text], n) => (
+          <li key={title} className="flex gap-2.5">
+            <span className="mono flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[11px] text-accent">
+              {n + 1}
+            </span>
+            <div>
+              <div className="text-[12.5px] font-medium text-ink">{title}</div>
+              <div className="text-[12px] leading-snug text-ink-3">{text}</div>
+            </div>
+          </li>
+        ))}
+      </ol>
+      <p className="mt-3 text-[11.5px] text-ink-3">
+        Confidence is this node&rsquo;s weighting of that evidence, under the policy you pick above — a reader&rsquo;s
+        choice, not the network&rsquo;s. It never moves money: payment follows the checker&rsquo;s verdict alone.
+      </p>
+    </section>
+  );
+}
 
-      <SectionHeading count={state.assertions.length}>What was said about it</SectionHeading>
-      {state.assertions.length === 0 ? (
-        <EmptyState title="Nothing has been said about this claim">
-          Relations from later verified claims — replicates, refutes, supersedes — appear here.
-        </EmptyState>
-      ) : (
-        <div className="box mb-5 overflow-x-auto">
-          <table className="w-full min-w-[40rem] border-collapse text-left text-[12.5px]">
-            <thead>
-              <tr className="border-b border-edge text-[11px] text-ink-3">
-                <th className="px-4 py-2 font-medium">By</th>
-                <th className="px-3 py-2 font-medium">Relation</th>
-                <th className="px-3 py-2 font-medium">Heard</th>
-                <th className="px-4 py-2 font-medium">Voice</th>
-              </tr>
-            </thead>
-            <tbody className="divide-edge-y">
-              {state.assertions.map((row) => (
-                <tr key={`${row.by}/${row.relation}`} className="hover:bg-surface-2">
-                  <td className="px-4 py-2.5">
-                    <Hash value={row.by} href={`/knowledge?id=${encodeURIComponent(row.by)}`} chars={8} />
-                  </td>
-                  <td className="mono px-3 py-2.5 text-ink">{row.relation}</td>
-                  <td className="px-3 py-2.5">
-                    <Badge tone={row.grounded ? "accent" : "neutral"}>
-                      {row.grounded ? "counts" : "not heard"}
-                    </Badge>
-                  </td>
-                  <td className="mono px-4 py-2.5 text-[12px] text-ink-3">
-                    {row.grounded ? `class ${row.class}` : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+function ResultRow({ row, title, now }: { row: KnowledgeRow; title: string | undefined; now: number }) {
+  const [open, setOpen] = useState(false);
+  const v = useMemo(() => verification(row), [row]);
+  const against = caveats(row);
+  return (
+    <li className="contain-rows">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex w-full cursor-pointer items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-surface-2"
+      >
+        <span className="flex shrink-0 gap-1" aria-label={`${v.level} of 4 kinds of evidence`} title={`${v.level} of 4`}>
+          {v.checks.map((check) => (
+            <span
+              key={check.key}
+              className={`h-2 w-2 rounded-full ${check.done ? "bg-accent" : "border border-edge-strong"}`}
+            />
+          ))}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="line-clamp-1 text-[13px] text-ink">{title ?? row.objective_id.slice(7, 19)}</span>
+          <span className="text-[11.5px] text-ink-3">
+            by <span className="mono">{shortActor(row.submitter)}</span> · {ago(row.created_at, now)}
+            {against.length > 0 && <span className="text-warn"> · {against[0]}</span>}
+          </span>
+        </span>
+        <Badge tone={v.tone}>{v.label}</Badge>
+        <span className="hidden w-28 shrink-0 sm:block" title={`${row.confidence_per_mille / 10}% under this policy`}>
+          <span className="flex items-center gap-2">
+            <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-3">
+              <span
+                className={`block h-full rounded-full ${v.tone === "bad" ? "bg-bad" : v.tone === "warn" ? "bg-warn" : "bg-accent"}`}
+                style={{ width: `${v.percent}%` }}
+              />
+            </span>
+            <span className="mono w-8 text-right text-[11.5px] text-ink-2">{v.percent}%</span>
+          </span>
+        </span>
+      </button>
+      {open && (
+        <div className="border-t border-edge bg-surface-2 px-4 py-3 pl-12">
+          <ul className="flex flex-col gap-1.5">
+            {v.checks.map((check) => (
+              <li key={check.key} className="flex gap-2 text-[12.5px]">
+                <span className={check.done ? "text-accent" : "text-ink-3"} aria-hidden>
+                  {check.done ? "✓" : "○"}
+                </span>
+                <span className={check.done ? "text-ink" : "text-ink-2"}>
+                  <b className="font-medium">{check.label}.</b> {check.why}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {against.length > 0 && (
+            <p className="mt-2 text-[12.5px] text-warn">Against it: {against.join("; ")}.</p>
+          )}
+          <div className="mt-3 flex flex-wrap items-center gap-3 text-[12px]">
+            <Hash value={row.claim_id} label="result" chars={10} />
+            <Link href={`/knowledge/claim?id=${encodeURIComponent(row.claim_id)}`} className="text-accent hover:underline">
+              View relations and bonded checks →
+            </Link>
+            <Link href={`/challenge?id=${encodeURIComponent(row.objective_id)}`} className="text-accent hover:underline">
+              Open the challenge →
+            </Link>
+          </div>
         </div>
       )}
-      <p className="text-[12px] text-ink-3">{claim.note}</p>
-    </>
+    </li>
+  );
+}
+
+function ChainSection({ chain, checkpoint }: { chain: Chain; checkpoint: CheckpointResponse | null }) {
+  const broken = firstBrokenLink(chain.chain);
+  const scales = epochScales(chain.chain);
+  const covers = checkpoint ? coversHead(checkpoint.checkpoint, chain.height) : null;
+  const newest = [...chain.chain].reverse();
+  return (
+    <div className="flex flex-col gap-4">
+      {/* The one claim this page makes on its own behalf: the node says "here
+          is a chain", and rendering it unchecked would be taking it on faith. */}
+      {broken !== null && (
+        <Note title="This is not a chain" tone="bad">
+          The link for epoch {broken} does not name the link before it. The node served something inconsistent — do
+          not compare this head against anything.
+        </Note>
+      )}
+      {scales.length > 1 && (
+        <Note title="Settled under more than one epoch length" tone="bad">
+          Its epoch numbers span {scales.length} orders of magnitude, which happens when{" "}
+          <code className="mono">CAIRN_EPOCH_SECONDS</code> changed between batches. That value decides which epoch a
+          record falls in, and so which reveals were legal: a log holding both was settled under two rules.
+        </Note>
+      )}
+
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
+        <Box
+          title="Head"
+          aside={<span className="text-[11px] font-normal text-ink-3">a peer with a different one has forked from you</span>}
+        >
+          <div className="flex items-start gap-1">
+            <code className="mono text-[12.5px] text-accent">{chain.head || "— no epoch has settled yet"}</code>
+            {chain.head && <CopyButton value={chain.head} />}
+          </div>
+          <dl className="kv mt-3">
+            <dt>links</dt>
+            <dd className="mono">{chain.links}, one per settled epoch</dd>
+            <dt>results settled</dt>
+            <dd className="mono">{totalClaims(chain.chain)}</dd>
+            <dt>log entries</dt>
+            <dd className="mono">{chain.height}</dd>
+          </dl>
+        </Box>
+        <Box title="Signed checkpoint">
+          {checkpoint ? (
+            <dl className="kv">
+              <dt>covers</dt>
+              <dd className="mono text-[12px]">
+                {checkpoint.checkpoint.height} of {chain.height} entries
+                <div className={`text-[11.5px] ${covers === "ahead" ? "text-bad" : "text-ink-3"}`}>
+                  {covers === "at"
+                    ? "every entry"
+                    : covers === "behind"
+                      ? "behind the log, normal after appends"
+                      : "ahead of this log: not this log"}
+                </div>
+              </dd>
+              <dt>merkle root</dt>
+              <dd>
+                <Hash value={checkpoint.checkpoint.root} chars={8} />
+              </dd>
+              <dt>signed by</dt>
+              <dd>
+                <Hash value={checkpoint.public_key} chars={8} />
+              </dd>
+            </dl>
+          ) : (
+            <p className="text-[12.5px] text-ink-3">Nobody has signed a checkpoint of this log.</p>
+          )}
+          <p className="mt-3 text-[11.5px] leading-relaxed text-ink-3">
+            Shown, not verified here: <code className="mono">cairn verify --from</code> checks the signature, and{" "}
+            <code className="mono">cairn audit</code> re-derives the whole chain.
+          </p>
+        </Box>
+      </div>
+
+      {chain.chain.length > 0 && (
+        <Disclosure summary={`Links, newest first (${chain.chain.length})`}>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[34rem] border-collapse text-left text-[12.5px]">
+              <thead>
+                <tr className="border-b border-edge text-[11px] text-ink-3">
+                  <th className="py-2 pr-3 font-medium">Epoch</th>
+                  <th className="px-3 py-2 font-medium">Link</th>
+                  <th className="px-3 py-2 font-medium">Previous</th>
+                  <th className="py-2 pl-3 font-medium">Results settled</th>
+                </tr>
+              </thead>
+              <tbody className="divide-edge-y">
+                {newest.slice(0, RECENT_LINKS).map((link) => (
+                  <tr key={link.epoch} className="align-top">
+                    <td className="mono py-2 pr-3 font-semibold text-ink">{link.epoch}</td>
+                    <td className="px-3 py-2">
+                      <Hash value={link.link} chars={8} />
+                    </td>
+                    <td className="px-3 py-2">
+                      {link.prev === "" ? <span className="pill pill-open">first</span> : <Hash value={link.prev} chars={8} />}
+                    </td>
+                    <td className="mono py-2 pl-3 text-ink-2">{link.claims.length}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {newest.length > RECENT_LINKS && (
+              <p className="mt-2 text-[11.5px] text-ink-3">
+                and {newest.length - RECENT_LINKS} older; <span className="mono">GET /chain</span> has every link.
+              </p>
+            )}
+          </div>
+        </Disclosure>
+      )}
+    </div>
   );
 }

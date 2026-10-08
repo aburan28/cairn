@@ -120,6 +120,23 @@ impl Reach {
     }
 }
 
+/// What a successful session changed about a peer.
+///
+/// Sessions are an exchange every few ticks, not a held connection, so
+/// "connected" is not an event a session can report on its own. These are the
+/// transitions worth telling a person about: a peer reached for the first
+/// time, and a peer back after long enough silent to have counted as lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Contact {
+    /// No session with this peer had succeeded before.
+    First,
+    /// The last success was at least [`RECENT_SECONDS`] ago: the peer read as
+    /// lost, and is back.
+    Back { silent_for: u64 },
+    /// An ordinary session with a peer already reached.
+    Again,
+}
+
 /// Everything this process knows about one peer, from its own sessions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerStanding {
@@ -251,6 +268,9 @@ impl Sessions {
 
     /// A session with `peer` completed. `entries` is this node's ledger
     /// length afterwards.
+    ///
+    /// Returns what the session changed about the peer, for a caller that
+    /// narrates changes rather than sessions -- see [`Contact`].
     pub fn succeeded(
         &mut self,
         peer: PeerId,
@@ -258,7 +278,14 @@ impl Sessions {
         direction: Direction,
         entries: usize,
         now: u64,
-    ) -> Result<Reach, RosterFull> {
+    ) -> Result<Contact, RosterFull> {
+        let contact = match self.peers.get(&peer).and_then(|s| s.last_ok_at) {
+            None => Contact::First,
+            Some(at) if now.saturating_sub(at) >= RECENT_SECONDS => Contact::Back {
+                silent_for: now.saturating_sub(at),
+            },
+            Some(_) => Contact::Again,
+        };
         let standing = self.row(peer, addr, direction, now)?;
         standing.last_ok_at = Some(now);
         standing.entries_after = Some(entries);
@@ -273,7 +300,7 @@ impl Sessions {
         if direction == Direction::Inbound && addr.is_some_and(|addr| reach::is_public(addr.ip())) {
             self.inbound_from_public_at = Some(now);
         }
-        Ok(Reach::Reached)
+        Ok(contact)
     }
 
     /// What `peer` said it is, in the hello of a session that completed.
@@ -289,6 +316,10 @@ impl Sessions {
 
     /// A session with `peer` failed. For an inbound failure the peer is not
     /// known -- see [`Sessions::inbound_failed`].
+    ///
+    /// Returns whether this failure starts a streak: the first ever with this
+    /// peer, or the first since a session last succeeded. A seed that is down
+    /// fails every tick, and a reader wants to hear that once.
     pub fn failed(
         &mut self,
         peer: PeerId,
@@ -296,7 +327,15 @@ impl Sessions {
         direction: Direction,
         error: &str,
         now: u64,
-    ) -> Result<(), RosterFull> {
+    ) -> Result<bool, RosterFull> {
+        let news = match self.peers.get(&peer) {
+            None => true,
+            Some(standing) => match (standing.last_ok_at, standing.last_failed_at) {
+                (_, None) => true,
+                (Some(ok), Some(failed)) => failed < ok,
+                (None, Some(_)) => false,
+            },
+        };
         let standing = self.row(peer, addr, direction, now)?;
         standing.last_failed_at = Some(now);
         standing.failures += 1;
@@ -304,7 +343,7 @@ impl Sessions {
         // carries the address it was dialling, never the remote's words, but
         // a cap costs nothing and a roster is not a log.
         standing.last_error = Some(error.chars().take(200).collect());
-        Ok(())
+        Ok(news)
     }
 
     /// An inbound handshake failed before the remote was authenticated.
@@ -630,6 +669,40 @@ mod tests {
             Some("Connection refused")
         );
         assert_eq!(row.get("last_ok_at").unwrap(), &Value::Null);
+    }
+
+    #[test]
+    fn a_session_says_first_contact_and_return_once_and_failures_once_per_streak() {
+        let mut sessions = Sessions::new(0);
+        let out = Direction::Outbound;
+        // A seed that is down fails every tick; only the first is news.
+        assert_eq!(sessions.failed(id(9), None, out, "refused", 5), Ok(true));
+        assert_eq!(sessions.failed(id(9), None, out, "refused", 10), Ok(false));
+        // Its first success is first contact, however many failures came first.
+        assert_eq!(
+            sessions.succeeded(id(9), None, out, 3, 20),
+            Ok(Contact::First)
+        );
+        assert_eq!(
+            sessions.succeeded(id(9), None, out, 3, 25),
+            Ok(Contact::Again)
+        );
+        // A failure after a success starts a new streak, and is news again.
+        assert_eq!(sessions.failed(id(9), None, out, "reset", 30), Ok(true));
+        assert_eq!(sessions.failed(id(9), None, out, "reset", 35), Ok(false));
+        // Silent long enough to have read as lost: back, with how long.
+        let later = 25 + RECENT_SECONDS;
+        assert_eq!(
+            sessions.succeeded(id(9), None, out, 4, later),
+            Ok(Contact::Back {
+                silent_for: RECENT_SECONDS
+            })
+        );
+        // Merely recent is not a return: in a big mesh that is every peer.
+        assert_eq!(
+            sessions.succeeded(id(9), None, out, 4, later + REACHED_SECONDS + 5),
+            Ok(Contact::Again)
+        );
     }
 
     #[test]

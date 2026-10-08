@@ -1,127 +1,157 @@
 "use client";
 
-import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { type LogRecord, NODE_URL, fetchLog, kindCounts } from "@/lib/log";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { type LogRecord, fetchLog, kindCounts } from "@/lib/log";
 import { type ObjectiveIndex, indexObjectives, toEvent } from "@/lib/events";
-import { type Session, fetchSessions, reachTone } from "@/lib/network";
+import { KIND_LABEL, type NodeEvent, absorb, fetchEvents, timeline } from "@/lib/journal";
 import { objectiveTitle } from "@/lib/title";
-import { Badge, Box, Card, EmptyState, Hash, NodeSource, Note, PageHeader } from "@/components/ui";
-import { EventRow } from "@/components/events";
-import { loadObjectives, resolveNode } from "@/lib/site";
-import { formatAge } from "@/lib/progress";
+import { loadObjectives } from "@/lib/site";
+import { useEvery, useNode } from "@/components/hooks";
+import { EventRow, NodeEventRow } from "@/components/events";
+import { Card, EmptyState, LiveStamp, Note, PageHeader, Skeleton } from "@/components/ui";
+
+/** Rows drawn at once. A long log is thousands of records; the rest are a click away. */
+const PAGE = 200;
+
+type View = "all" | "records" | "events";
 
 /**
- * Every record this node holds, as a feed of what happened.
+ * Everything that happened, newest first: the records the log admitted, and
+ * what this node saw happen around them.
  *
- * This is the file `cairn audit` reads and every other page here derives its
- * numbers from. It used to render as a table whose rows expanded into the
- * pretty-printed payload, which made a person read JSON to learn that alice
- * was paid. Each record is now a sentence (`lib/events.ts`), newest first,
- * naming the challenge it belongs to; expanding one shows its fields
- * labelled, and the exact record the node wrote is one further click.
- * Filtering and search still run over the records themselves.
+ * The records are the file `cairn audit` reads and every other page derives
+ * its numbers from; each is a sentence (`lib/events.ts`), its fields and its
+ * exact bytes one click away. The node events are `GET /events`: a peer
+ * reached, records synced from it, a machine starting, an agent attaching --
+ * the part of "what happened" the log never held, and that an operator used
+ * to read on stderr if at all. They are drawn as rings rather than dots and
+ * labelled with what they are about, because they are this process's memory
+ * and not the log's.
+ *
+ * The URL box that used to sit in the header is gone: this is the reader the
+ * node serves, and it reads that node.
  */
 export default function Page() {
-  const [base, setBase] = useState(NODE_URL);
+  const base = useNode();
   const [records, setRecords] = useState<LogRecord[] | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [sessionsAvailable, setSessionsAvailable] = useState<boolean | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [filter, setFilter] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
+  const [events, setEvents] = useState<{ events: NodeEvent[]; started_at: string | null }>({
+    events: [],
+    started_at: null,
+  });
+  const [eventsMissing, setEventsMissing] = useState(false);
   const [index, setIndex] = useState<ObjectiveIndex | null>(null);
   const [titles, setTitles] = useState<Map<string, string>>(new Map());
-  const [now, setNow] = useState(() => Date.now());
+  const [error, setError] = useState<string | null>(null);
+  const [readAt, setReadAt] = useState<Date | null>(null);
+  const [view, setView] = useState<View>("all");
+  const [kind, setKind] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [shown, setShown] = useState(PAGE);
+  const lastSeq = useRef(0);
 
-  const load = useCallback(async (url: string) => {
-    setLoading(true);
-    setError(null);
+  const loadRecords = useCallback(async () => {
+    if (base === null) return;
     try {
-      const [next, feed, roster] = await Promise.all([
-        fetchLog(url),
-        loadObjectives(url).catch(() => null),
-        fetchSessions(url).catch(() => null),
-      ]);
-      setRecords(next.records);
-      setProblems(next.problems);
-      setSessions(roster?.available ? roster.peers : []);
-      setSessionsAvailable(roster ? roster.available : null);
-      setFilter(null);
+      const [log, feed] = await Promise.all([fetchLog(base), loadObjectives(base).catch(() => null)]);
+      setRecords(log.records);
+      setProblems(log.problems);
       // Titles only from a live answer: the snapshot's objectives are a
       // different log's, and naming this node's records after them would be
       // wrong in exactly the cases where the ids happened to collide.
       const live = feed?.live ? feed.objectives : [];
       setIndex(indexObjectives(live));
       setTitles(new Map(live.map((o) => [o.id, objectiveTitle(o)] as const)));
-      setNow(Date.now());
+      setReadAt(new Date());
+      setError(null);
     } catch (cause) {
-      setRecords(null);
-      setProblems([]);
       setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
     }
-  }, []);
+  }, [base]);
 
-  useEffect(() => {
-    // Ask which node to read before reading it. Same-origin when one answers --
-    // the daemon serves this page at /ui/, so that is the common case and it
-    // costs one /health -- and otherwise the first seed from the published list
-    // that is up. On the public site there is no same-origin node at all, and
-    // before this the box showed github.io and every request 404'd into the
-    // snapshot.
-    //
-    // Shown *and* used, which is the part worth being careful about: the box
-    // has to name the origin the numbers below came from, or a reader comparing
-    // two nodes is comparing one node against a label. Empty stays empty for
-    // fetching -- relative requests survive a tunnel or a proxy on an unknown
-    // path -- and becomes this page's own origin for display, because nobody
-    // can retype "" after clearing the box.
-    void resolveNode().then((url) => {
-      setBase(url || window.location.origin);
-      void load(url);
-    });
-  }, [load]);
+  const loadEvents = useCallback(async () => {
+    if (base === null) return;
+    try {
+      const page = await fetchEvents(base, lastSeq.current);
+      if (page === null) {
+        setEventsMissing(true);
+        return;
+      }
+      // A restarted node numbers from 1 again; `absorb` notices by the start
+      // time and the next ask starts from the new process's beginning.
+      setEvents((held) => {
+        const next = absorb(held, page);
+        lastSeq.current = next.events.length ? next.events[next.events.length - 1].seq : 0;
+        return next;
+      });
+    } catch {
+      // The records are the page; a feed that did not answer this once is
+      // asked again on the next tick.
+    }
+  }, [base]);
 
-  const counts = useMemo(() => (records ? kindCounts(records) : []), [records]);
-  const visible = useMemo(() => {
-    if (!records) return [];
+  // The log is the big read, and only grows: once a minute. The events are
+  // a cursor over a small ring, so they can be asked for often.
+  useEvery(loadRecords, 60, base !== null);
+  useEvery(loadEvents, 10, base !== null);
+
+  const items = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return [...records].reverse().filter((record) => {
-      if (filter && record.kind !== filter) return false;
-      if (!needle) return true;
-      // The whole record, because the useful search here is "find the line
-      // mentioning this id" and an id can appear in any field of any kind.
-      return (
-        record.hash.includes(needle) ||
-        record.kind.toLowerCase().includes(needle) ||
-        JSON.stringify(record.payload).toLowerCase().includes(needle)
-      );
-    });
-  }, [records, filter, query]);
+    const recordsShown =
+      view === "events"
+        ? []
+        : (records ?? []).filter((record) => {
+            if (view === "records" && kind && record.kind !== kind) return false;
+            if (!needle) return true;
+            // The whole record, because the useful search here is "find the
+            // line mentioning this id" and an id can appear in any field.
+            return (
+              record.hash.includes(needle) ||
+              record.kind.toLowerCase().includes(needle) ||
+              JSON.stringify(record.payload).toLowerCase().includes(needle)
+            );
+          });
+    const eventsShown =
+      view === "records"
+        ? []
+        : events.events.filter((event) => {
+            if (view === "events" && kind && (KIND_LABEL[event.kind as keyof typeof KIND_LABEL] ?? event.kind) !== kind) {
+              return false;
+            }
+            if (!needle) return true;
+            return event.text.toLowerCase().includes(needle) || (event.subject ?? "").toLowerCase().includes(needle);
+          });
+    return timeline(recordsShown, eventsShown);
+  }, [records, events, view, kind, query]);
+
+  const recordKinds = useMemo(() => (records ? kindCounts(records) : []), [records]);
+  const eventKinds = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const event of events.events) {
+      const label = KIND_LABEL[event.kind as keyof typeof KIND_LABEL] ?? event.kind;
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+    return [...counts.entries()];
+  }, [events]);
+  const now = readAt?.getTime() ?? Date.now();
+
+  const choose = (next: View) => {
+    setView(next);
+    setKind(null);
+    setShown(PAGE);
+  };
 
   return (
     <>
       <PageHeader
         title="Log"
-        subtitle="Every record this node holds, newest first. Click an event for its details and the record as written."
-        actions={
-          <NodeSource
-            value={base}
-            onChange={setBase}
-            onRead={() => void load(base === window.location.origin ? "" : base)}
-            loading={loading}
-          />
-        }
+        subtitle="Every record this node holds, and everything it saw happen around them — other nodes connecting, records syncing, machines and agents arriving. Newest first."
+        actions={<LiveStamp at={readAt} error={records ? error : null} />}
       />
 
-
       <div className="flex flex-col gap-4">
-        {error && (
-          <Note title="could not read the log" tone="bad">
+        {error && !records && (
+          <Note title="Could not read the log" tone="bad">
             {error}
           </Note>
         )}
@@ -129,13 +159,9 @@ export default function Page() {
         {/* Reported, not thrown: one bad line used to blank the whole page,
             which hid every good line and the fact that one was bad. */}
         {problems.length > 0 && (
-          <Note
-            title={`${problems.length} line${problems.length === 1 ? "" : "s"} could not be read as a record`}
-            tone="bad"
-          >
-            The rows below are the lines that could.{" "}
-            <code className="mono">cairn audit</code> reads the same file; run it to see
-            what it makes of them.
+          <Note title={`${problems.length} line${problems.length === 1 ? "" : "s"} could not be read as a record`} tone="bad">
+            The rows below are the lines that could. <code className="mono">cairn audit</code> reads the same file;
+            run it to see what it makes of them.
             <ul className="mt-1.5 flex flex-col gap-0.5">
               {problems.map((problem) => (
                 <li key={problem} className="mono text-[11.5px] text-ink-3">
@@ -146,135 +172,99 @@ export default function Page() {
           </Note>
         )}
 
-        <NetworkActivity peers={sessions} available={sessionsAvailable} />
+        {records === null && !error && <Skeleton className="h-64 w-full" />}
 
-        {records && records.length === 0 && problems.length === 0 && (
-          <EmptyState title="This node's log is empty." />
-        )}
-
-        {records && records.length > 0 && (
+        {records !== null && (
           <>
             <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                className={`btn btn-sm ${filter === null ? "btn-primary" : ""}`}
-                onClick={() => setFilter(null)}
-              >
-                all <span className="mono">{records.length}</span>
-              </button>
-              {counts.map(([kind, count]) => (
-                <button
-                  type="button"
-                  key={kind}
-                  className={`btn btn-sm ${filter === kind ? "btn-primary" : ""}`}
-                  onClick={() => setFilter(filter === kind ? null : kind)}
-                >
-                  {kind.replace(/_/g, " ")} <span className="mono">{count}</span>
+              <div className="segmented" role="group" aria-label="What to show">
+                <button type="button" aria-pressed={view === "all"} onClick={() => choose("all")}>
+                  Everything
                 </button>
-              ))}
+                <button type="button" aria-pressed={view === "records"} onClick={() => choose("records")}>
+                  Records <span className="mono text-ink-3">{records.length}</span>
+                </button>
+                <button type="button" aria-pressed={view === "events"} onClick={() => choose("events")}>
+                  Node events <span className="mono text-ink-3">{events.events.length}</span>
+                </button>
+              </div>
               <input
                 className="field ml-auto max-w-64"
                 value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="search every field…"
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setShown(PAGE);
+                }}
+                placeholder="search…"
                 aria-label="Search the log"
               />
             </div>
 
-            <Card className="overflow-hidden">
-              <ul className="divide-edge-y">
-                {visible.map((record) => {
-                  const event = toEvent(record, index);
-                  return (
-                    <EventRow
-                      key={record.seq}
-                      event={event}
-                      record={record}
-                      objectiveTitle={event.objectiveId ? titles.get(event.objectiveId) : null}
-                      now={now}
-                    />
-                  );
-                })}
-              </ul>
-              {visible.length === 0 && (
-                <p className="px-4 py-8 text-center text-[13px] text-ink-3">
-                  Nothing matches.
-                </p>
-              )}
-            </Card>
+            {view !== "all" && (view === "records" ? recordKinds.length : eventKinds.length) > 1 && (
+              <div className="flex flex-wrap gap-1.5">
+                {(view === "records" ? recordKinds : eventKinds).map(([name, count]) => (
+                  <button
+                    type="button"
+                    key={name}
+                    className={`btn btn-sm ${kind === name ? "btn-primary" : ""}`}
+                    onClick={() => {
+                      setKind(kind === name ? null : name);
+                      setShown(PAGE);
+                    }}
+                  >
+                    {name.replace(/_/g, " ")} <span className="mono">{count}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {view === "events" && eventsMissing ? (
+              <EmptyState title="This node is older than its event feed">
+                A node built with <span className="mono">GET /events</span> lists the other nodes it reached, the
+                records it synced, and the machines and agents that arrived.
+              </EmptyState>
+            ) : items.length === 0 ? (
+              <EmptyState title={query ? "Nothing matches." : view === "events" ? "Nothing has happened yet." : "This node's log is empty."}>
+                {view === "events" && !query
+                  ? "Other nodes connecting, machines and agents arriving and records syncing appear here as they happen."
+                  : null}
+              </EmptyState>
+            ) : (
+              <Card className="overflow-hidden">
+                <ul className="divide-edge-y">
+                  {items.slice(0, shown).map((item) => {
+                    if (item.type === "event") {
+                      return <NodeEventRow key={`e${item.event.seq}`} event={item.event} now={now} />;
+                    }
+                    const event = toEvent(item.record, index);
+                    return (
+                      <EventRow
+                        key={`r${item.record.seq}`}
+                        event={event}
+                        record={item.record}
+                        objectiveTitle={event.objectiveId ? titles.get(event.objectiveId) : null}
+                        now={now}
+                      />
+                    );
+                  })}
+                </ul>
+                {items.length > shown && (
+                  <div className="border-t border-edge px-4 py-2.5 text-center">
+                    <button type="button" className="btn btn-sm" onClick={() => setShown(shown + PAGE)}>
+                      Show {Math.min(PAGE, items.length - shown)} more of {items.length - shown}
+                    </button>
+                  </div>
+                )}
+              </Card>
+            )}
 
             <p className="text-[12px] text-ink-3">
-              The sentences are this page&rsquo;s reading of each record, not fields the node
-              wrote. The record itself is under each event.
+              A filled dot is a record in the log, re-derivable by anyone who has it. A ring is something this node saw
+              and holds in memory only: nobody checks it, and it is gone when the node restarts.
             </p>
           </>
         )}
       </div>
     </>
-  );
-}
-
-/**
- * Connections this run, beside the log — never inside it.
- *
- * The feed above is the file `cairn audit` reads, and mixing in anything the
- * node did not write would break that. But "connected to a peer" is still
- * something an operator wants to see next to the records, so the sessions
- * the node holds in memory sit here, labelled as memory: they vanish on
- * restart and prove nothing to anyone else.
- */
-function NetworkActivity({ peers, available }: { peers: Session[]; available: boolean | null }) {
-  if (available === false) return null;
-  if (available === null) return null;
-  const ordered = [...peers].sort((a, b) => {
-    const rank = (s: Session["status"]) =>
-      s === "reached" ? 0 : s === "recent" ? 1 : s === "lost" ? 2 : 3;
-    return rank(a.status) - rank(b.status);
-  });
-  return (
-    <Box
-      title="Network activity"
-      aside={<span className="text-[11px] font-normal text-warn">this run only, not in the log</span>}
-    >
-      {ordered.length === 0 ? (
-        <p className="text-[12.5px] text-ink-3">
-          No peer session yet this run. Connections appear here as they happen; what was
-          settled is in the feed below.{" "}
-          <Link href="/network" className="text-accent hover:underline">
-            Full network view →
-          </Link>
-        </p>
-      ) : (
-        <ul className="flex flex-col gap-2">
-          {ordered.slice(0, 8).map((peer) => (
-            <li key={peer.peer_id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[12.5px]">
-              <Badge tone={reachTone(peer.status)}>{peer.status}</Badge>
-              <Hash value={peer.peer_id} chars={8} />
-              <span className="text-ink-3">
-                {peer.age_seconds !== null ? (
-                  <>
-                    last session {formatAge(peer.age_seconds)} ago {peer.last_direction}
-                    {peer.entries_after !== null && <> · log at {peer.entries_after} entries after</>}
-                  </>
-                ) : peer.last_error ? (
-                  <>never connected · {peer.last_error}</>
-                ) : (
-                  <>never connected</>
-                )}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {ordered.length > 8 && (
-        <p className="mt-2 text-[12px] text-ink-3">
-          and {ordered.length - 8} more —{" "}
-          <Link href="/network" className="text-accent hover:underline">
-            all connections
-          </Link>
-          .
-        </p>
-      )}
-    </Box>
   );
 }

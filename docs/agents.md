@@ -77,6 +77,21 @@ read-only tools above (including `score_candidate` and `audit`) are marked
 writing. `score_candidate` and `audit` additionally carry `openWorldHint`,
 because they execute the funder's pinned checker as a subprocess.
 
+## Prompts
+
+The server also offers MCP **prompts** -- text an operator hands their own
+agent, carried by the server that will judge the result.
+
+| prompt | in Claude Code | what it does |
+|---|---|---|
+| `coordinate_task` | `/mcp__cairn__coordinate_task` | turns a plain description of a big search ("every 32-bit seed of …; one piece is a block of 65,536 seeds") into a divided-search objective: a `piecework` block, a tested certificate checker pinned by hash, a goal handle found with `find_goal`, shown to the operator before `post_objective`. Arguments: `description`, and optionally `budget` |
+
+The node serves the same rendering at `GET /prompts/{name}`, which is how the
+reader's Coordination page offers it to an agent that is not Claude Code and
+then watches for the objective to appear. A prompt grants nothing: whatever
+the agent posts afterwards meets the schema gate, the admission rules and the
+`--max-spend` ceiling like any other post.
+
 ## `submit_claim` is two calls, and that is the protocol showing through
 
 Commit–reveal is epoch-batched: a reveal must land in a strictly later epoch

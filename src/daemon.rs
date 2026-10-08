@@ -657,6 +657,8 @@ fn bind_http(
     config: &Config,
     sessions: Arc<Mutex<Sessions>>,
     peers: (&str, Option<usize>),
+    journal: crate::journal::Shared,
+    agents: Option<crate::mcp::SharedPresence>,
 ) -> Result<Option<(TcpListener, serve::Serving)>, String> {
     let Some(addr) = &config.serve else {
         return Ok(None);
@@ -710,6 +712,12 @@ fn bind_http(
     // this process has reached rather than repeating the log's address book
     // under a disclaimer.
     serving = serving.with_sessions(sessions);
+    // One journal for the whole process: the p2p loops, the HTTP handlers and
+    // the MCP session all narrate into it, and `GET /events` serves it.
+    serving = serving.with_journal(journal);
+    if let Some(agents) = agents {
+        serving = serving.with_agents(agents);
+    }
     // A fleet leader signs the records its workers hand it over HTTP, with
     // the ed25519 identity MCP submissions are signed with unless
     // `CAIRN_FLEET_IDENTITY` names another. Refused at startup when the
@@ -913,10 +921,16 @@ pub fn run(config: Config) -> Result<(), String> {
     // before the listener is bound so the roster exists however the start
     // fails after this point, and shared with every loop that runs a session.
     let sessions = Arc::new(Mutex::new(Sessions::new(crate::time::unix_seconds())));
+    // What this process saw happen, for `GET /events`. See `crate::journal`.
+    let journal = crate::journal::Journal::shared(crate::time::unix_seconds());
+    // Who is attached over MCP, for `GET /network`, when anyone can be.
+    let agents = config.mcp.then(crate::mcp::Presence::shared);
     let http = bind_http(
         &config,
         Arc::clone(&sessions),
         (peer_policy.as_str(), service.allowed_peers()),
+        Arc::clone(&journal),
+        agents.clone(),
     )?;
 
     // Zero-configuration discovery on the local segment. Optional by design:
@@ -1007,6 +1021,26 @@ pub fn run(config: Config) -> Result<(), String> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .identify(service.identity(), config.listen);
+    crate::journal::note(
+        &journal,
+        crate::journal::Kind::Node,
+        crate::journal::Tone::Good,
+        &format!(
+            "Node started: peers reach it at {}{}{}",
+            config.listen,
+            config
+                .serve
+                .as_deref()
+                .map(|addr| format!(", its reader and workers at http://{addr}"))
+                .unwrap_or_default(),
+            if config.mcp {
+                ", and an agent over MCP on stdio"
+            } else {
+                ""
+            }
+        ),
+        None,
+    );
 
     // Ask the router to forward the p2p port, so a node behind a home router
     // can be dialled and not only dial. On a thread of its own: every call in
@@ -1163,6 +1197,8 @@ pub fn run(config: Config) -> Result<(), String> {
                 &config.log,
                 &config.key_path(),
                 crate::mcp::SpendCeiling::from_flag_or_env(config.mcp_max_spend)?,
+                agents.clone().unwrap_or_else(crate::mcp::Presence::shared),
+                Arc::clone(&journal),
             )
             .map_err(|error| format!("mcp: {error}"))?,
         )
@@ -1206,6 +1242,7 @@ pub fn run(config: Config) -> Result<(), String> {
 
     let accept_service = Arc::clone(&service);
     let accept_sessions = Arc::clone(&sessions);
+    let accept_journal = Arc::clone(&journal);
     let accept_state = Arc::clone(&state);
     let accept_root_key = Arc::clone(&root_key);
     let accept_checkpoint = config.checkpoint.clone();
@@ -1246,6 +1283,7 @@ pub fn run(config: Config) -> Result<(), String> {
         let in_flight = Arc::clone(&in_flight);
         let accept_service = Arc::clone(&accept_service);
         let accept_sessions = Arc::clone(&accept_sessions);
+        let accept_journal = Arc::clone(&accept_journal);
         let accept_state = Arc::clone(&accept_state);
         let accept_root_key = Arc::clone(&accept_root_key);
         let accept_checkpoint = accept_checkpoint.clone();
@@ -1287,6 +1325,9 @@ pub fn run(config: Config) -> Result<(), String> {
             let State {
                 node, population, ..
             } = &mut *guard;
+            // Exact, because the lock is held for the whole session: nothing
+            // else appends between this read and the one after it.
+            let before = node.ledger().len();
             let outcome = match accept_population {
                 Some(_) => {
                     let mut scorer = RoundScorer::new(accept_registry.clone());
@@ -1315,7 +1356,7 @@ pub fn run(config: Config) -> Result<(), String> {
                     let mut roster = accept_sessions
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let _ = roster.succeeded(
+                    let contact = roster.succeeded(
                         remote,
                         Some(remote_addr),
                         Direction::Inbound,
@@ -1326,6 +1367,16 @@ pub fn run(config: Config) -> Result<(), String> {
                         roster.learned(remote, about);
                     }
                     drop(roster);
+                    if let Ok(contact) = contact {
+                        narrate_session(
+                            &accept_journal,
+                            &peer_id_string(&remote),
+                            remote_addr,
+                            Direction::Inbound,
+                            contact,
+                            node.ledger().len().saturating_sub(before),
+                        );
+                    }
                     persist(
                         &guard,
                         &accept_checkpoint,
@@ -1552,6 +1603,8 @@ pub fn run(config: Config) -> Result<(), String> {
             let State {
                 node, population, ..
             } = &mut *guard;
+            // Exact for the reason the inbound side gives: the lock is held.
+            let before = node.ledger().len();
             let outcome = match config.population {
                 Some(_) => {
                     let mut scorer = RoundScorer::new(registry.clone());
@@ -1577,7 +1630,7 @@ pub fn run(config: Config) -> Result<(), String> {
                     let mut roster = sessions
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let _ = roster.succeeded(
+                    let contact = roster.succeeded(
                         endpoint.peer.id(),
                         Some(endpoint.addr),
                         Direction::Outbound,
@@ -1588,6 +1641,16 @@ pub fn run(config: Config) -> Result<(), String> {
                         roster.learned(endpoint.peer.id(), about);
                     }
                     drop(roster);
+                    if let Ok(contact) = contact {
+                        narrate_session(
+                            &journal,
+                            &peer_id_string(&endpoint.peer.id()),
+                            endpoint.addr,
+                            Direction::Outbound,
+                            contact,
+                            node.ledger().len().saturating_sub(before),
+                        );
+                    }
                     persist(
                         &guard,
                         &config.checkpoint,
@@ -1617,7 +1680,7 @@ pub fn run(config: Config) -> Result<(), String> {
                     // lookup in flight and expects exactly one answer per
                     // contact; this is the failure half.
                     service.unreachable(endpoint.peer.id());
-                    let _ = sessions
+                    let news = sessions
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .failed(
@@ -1627,10 +1690,77 @@ pub fn run(config: Config) -> Result<(), String> {
                             &error.to_string(),
                             crate::time::unix_seconds(),
                         );
+                    if news == Ok(true) {
+                        let peer = peer_id_string(&endpoint.peer.id());
+                        crate::journal::note(
+                            &journal,
+                            crate::journal::Kind::Peer,
+                            crate::journal::Tone::Warn,
+                            &format!(
+                                "Could not reach node {} at {}: {error}",
+                                crate::journal::short(&peer),
+                                endpoint.addr
+                            ),
+                            Some(&peer),
+                        );
+                    }
                 }
             }
         }
         thread::sleep(Duration::from_secs(TICK_SECONDS));
+    }
+}
+
+/// Say what a successful session changed, in the journal: a peer reached
+/// for the first time, a peer back after being lost, and records synced.
+/// An ordinary session that imported nothing is silence -- it happens every
+/// few seconds and changes nothing a person would want told.
+fn narrate_session(
+    journal: &crate::journal::Shared,
+    peer: &str,
+    addr: SocketAddr,
+    direction: Direction,
+    contact: crate::p2p::sessions::Contact,
+    imported: usize,
+) {
+    use crate::journal::{note, short, span, Kind, Tone};
+    use crate::p2p::sessions::Contact;
+    let name = short(peer);
+    let how = match direction {
+        Direction::Inbound => format!("it dialled in from {addr}"),
+        Direction::Outbound => format!("at {addr}"),
+    };
+    match contact {
+        Contact::First => note(
+            journal,
+            Kind::Peer,
+            Tone::Good,
+            &format!("Connected to node {name} ({how})"),
+            Some(peer),
+        ),
+        Contact::Back { silent_for } => note(
+            journal,
+            Kind::Peer,
+            Tone::Good,
+            &format!(
+                "Node {name} is back after {} without a session ({how})",
+                span(silent_for)
+            ),
+            Some(peer),
+        ),
+        Contact::Again => {}
+    }
+    if imported > 0 {
+        note(
+            journal,
+            Kind::Peer,
+            Tone::Good,
+            &format!(
+                "Synced {imported} new record{} from node {name}",
+                if imported == 1 { "" } else { "s" }
+            ),
+            Some(peer),
+        );
     }
 }
 

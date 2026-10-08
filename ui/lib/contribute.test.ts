@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { Bridge } from "./draft";
-import { DECLARED_BY_ROLE, ROLES, lanState, openSheet, setRole, workCommand } from "./contribute";
+import {
+  DECLARED_BY_ROLE,
+  ROLES,
+  describeOffer,
+  lanState,
+  offerFlags,
+  openSheet,
+  setRole,
+  workCommand,
+} from "./contribute";
 
 function recorder(reply: () => Promise<unknown> = async () => true) {
   const sent: unknown[] = [];
@@ -125,5 +134,31 @@ describe("workCommand", () => {
 
   it("strips the commitment-hash separator from a worker name", () => {
     expect(workCommand({ node: "x", objective: "y", worker: "a|b" })).toContain("--worker a-b");
+  });
+});
+
+describe("an offer of compute", () => {
+  it("becomes cairn work flags, leaving out what was not offered", () => {
+    const text = workCommand({
+      node: "http://10.0.0.2:8080",
+      objective: "sha256:ab",
+      worker: "rig",
+      offer: { gpus: [2, 0, 2], threads: 8, hoursPerDay: 6, device: "RTX 4090" },
+    });
+    expect(text).toContain("--gpus 0,2");
+    expect(text).toContain("--threads 8");
+    expect(text).toContain("--hours-per-day 6");
+    expect(text).toContain("--device 'RTX 4090'");
+    // The solver stays last, after the separator.
+    expect(text.trim().endsWith("-- ./your-solver")).toBe(true);
+    expect(offerFlags({ gpus: [], hoursPerDay: 24 })).toEqual(["  --gpus none"]);
+    expect(offerFlags(undefined)).toEqual([]);
+    expect(offerFlags({ threads: 0, hoursPerDay: 0 })).toEqual([]);
+  });
+
+  it("is said in a sentence before anything starts", () => {
+    expect(describeOffer({ gpus: [0], hoursPerDay: 6 })).toBe("GPU 0, up to 6 hours a day");
+    expect(describeOffer({ gpus: [0, 1], threads: 4 })).toBe("GPUs 0, 1 and 4 threads, around the clock");
+    expect(describeOffer({})).toBe("this machine, around the clock");
   });
 });

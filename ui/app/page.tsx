@@ -22,6 +22,8 @@ import { type LogEvent, eventsFor, indexObjectives } from "@/lib/events";
 import { following, onFollowingChange } from "@/lib/follow";
 import { goalSlug, objectiveTitle } from "@/lib/title";
 import { EventRow } from "@/components/events";
+import { useNode } from "@/components/hooks";
+import { type NetworkResponse, fetchNetwork, primaryRole } from "@/lib/network";
 import {
   Badge,
   Box,
@@ -154,12 +156,10 @@ export default function Page() {
       </section>
 
       <div className="app-only">
-        <PageHeader
-          title="Overview"
-          subtitle={objectivesFrom}
-          actions={<Link href="/network" className="btn btn-sm">Network topology →</Link>}
-        />
+        <PageHeader title="Overview" subtitle={objectivesFrom} />
       </div>
+
+      <YourNode />
 
       <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
         <Stat label="Objectives" value={String(objectives.length)} from={objectivesFrom} />
@@ -362,5 +362,59 @@ export default function Page() {
         doing in the first sentence on this page.
       </p>
     </>
+  );
+}
+
+/**
+ * The node serving this page, in one line: what it is and what is connected
+ * to it. Only when the page *is* served by a node (same-origin): on the public
+ * site the reader may be talking to somebody's seed, and calling that "your
+ * node" would be a claim about the visitor that is false.
+ */
+function YourNode() {
+  const base = useNode();
+  const [network, setNetwork] = useState<NetworkResponse | null>(null);
+  useEffect(() => {
+    if (base !== "") return;
+    fetchNetwork(base)
+      .then(setNetwork)
+      .catch(() => setNetwork(null));
+  }, [base]);
+  if (!network) return null;
+  const role = primaryRole(network.node);
+  const mcp = network.node.mcp;
+  const agent = mcp?.serving && mcp.client ? mcp.client.name : "none attached";
+  const hosts = network.compute.hosts?.registered ?? 0;
+  return (
+    <Link
+      href="/network"
+      className="card card-pad mb-5 flex flex-wrap items-center gap-x-8 gap-y-3 transition-colors hover:border-edge-strong hover:bg-surface-2"
+    >
+      <div>
+        <div className="text-[11px] font-semibold tracking-[0.08em] text-ink-3 uppercase">Your node</div>
+        <div className="flex items-center gap-2 text-[20px] font-semibold text-ink">
+          <span className="h-2 w-2 rounded-full bg-accent" aria-hidden />
+          {role.title}
+        </div>
+      </div>
+      <NodeFact label="Agent" value={agent} />
+      <NodeFact
+        label="Machines working"
+        value={String(network.compute.live)}
+        hint={hosts > 0 ? `${hosts} registered with it` : undefined}
+      />
+      <NodeFact label="Other nodes connected" value={network.peers.available ? String(network.peers.reached) : "not syncing"} />
+      <span className="ml-auto text-[12.5px] text-accent">Network →</span>
+    </Link>
+  );
+}
+
+function NodeFact({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[11.5px] text-ink-3">{label}</div>
+      <div className="truncate text-[14px] font-medium text-ink">{value}</div>
+      {hint && <div className="text-[11px] text-ink-3">{hint}</div>}
+    </div>
   );
 }

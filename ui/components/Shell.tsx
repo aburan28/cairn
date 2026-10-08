@@ -18,36 +18,32 @@ import { GoogleSignIn } from "@/components/GoogleSignIn";
 import { NODE_URL } from "@/lib/objectives";
 
 export const ROUTES = [
-  { href: "/", label: "Overview", hint: "What cairn is, and this node's numbers" },
-  { href: "/network", label: "Network", hint: "This node, its peer connections, and node roles" },
-  { href: "/agents", label: "Agents", hint: "Whether this node leads, who works for it, and the MCP stanza to connect" },
-  { href: "/objectives", label: "Objectives", hint: "What this node will pay for" },
-  { href: "/goals", label: "Goals", hint: "What the network is trying to beat, and from which angles" },
+  { href: "/", label: "Overview", hint: "Your node at a glance, and what it is paying for" },
+  { href: "/objectives", label: "Objectives", hint: "Every challenge this node knows, and what is still payable" },
+  { href: "/coordination", label: "Coordination", hint: "Launch a coordinated task from a description, and watch the running ones" },
+  { href: "/network", label: "Network", hint: "Your node's role, the agents and machines connected to it, and other nodes" },
+  { href: "/log", label: "Log", hint: "Everything that happened: the records, and what the node saw" },
+  { href: "/knowledge", label: "Knowledge", hint: "How well verified each result is, and the chain that links them" },
+  { href: "/goals", label: "Goals", hint: "The problems the network is working on, and each approach to them" },
+  { href: "/contribute", label: "Contribute", hint: "Offer compute, connect an agent, check answers, fund a question" },
+  { href: "/submit", label: "Post a challenge", hint: "Fund a question with a pinned checker" },
   { href: "/task", label: "Task progress", hint: "A divided search: what is settled, who is working it, how far along" },
-  { href: "/submit", label: "Post a challenge", hint: "Fund a question, signed by a wallet" },
-  { href: "/contribute", label: "Contribute", hint: "Ways to take part, what each pays, and adding machines on your network" },
-  { href: "/chain", label: "Chain", hint: "Epoch links, and whether you have forked" },
-  { href: "/knowledge", label: "Knowledge", hint: "How believed each settled claim is, under your policy" },
-  { href: "/log", label: "Log", hint: "Every record, as the node stores it" },
-  { href: "/coordination", label: "Coordination", hint: "A divided search's epoch, who holds which slice, and the task leases" },
-  { href: "/peers", label: "Peers", hint: "The log's address book: who announced an address" },
-  { href: "/how-it-works", label: "How it works", hint: "The protocol, in order" },
+  { href: "/peers", label: "Address book", hint: "Every node that announced an address in the log" },
+  { href: "/how-it-works", label: "How it works", hint: "The network in plain words, and its limits" },
 ] as const;
 
 /**
- * The sidebar is six places. Goals, the chain, knowledge, the log,
- * coordination, contribute and posting a challenge stay in `ROUTES`, so ⌘K
- * still opens them, and the pages that need them link to them. A sidebar
- * that listed every one of those sat beside Cairn.app's Node menu, which
- * listed them again, and neither map was the one a person could hold in
- * their head.
+ * Two groups: the places that show this node and its work, and the two
+ * about taking part. Goals, one task's progress, posting a challenge and
+ * the address book stay in `ROUTES`, so ⌘K opens them, and the pages they
+ * belong to link to them -- they are listed under their parent via `match`.
  *
- * `match` lists the routes that belong under an entry without being it --
- * one objective, and its move history, are both "Objectives".
+ * It was four places for a while, which was tidy and hid the Log, the
+ * chain and coordination behind a keyboard shortcut. These are the pages an
+ * operator moves between all day, and a sidebar is where those go.
  */
 const NAV: {
   group: string;
-  siteOnly?: boolean;
   items: { href: string; label: string; icon: React.ReactNode; match?: string[] }[];
 }[] = [
   {
@@ -58,17 +54,19 @@ const NAV: {
         href: "/objectives",
         label: "Objectives",
         icon: <IconTarget />,
-        match: ["/challenge", "/frontier", "/task", "/submit", "/goals"],
+        match: ["/challenge", "/frontier", "/submit", "/goals"],
       },
-      { href: "/agents", label: "Agents", icon: <IconAgents />, match: [] },
-      { href: "/network", label: "Network", icon: <IconNetwork />, match: ["/peers", "/coordination"] },
-      {
-        href: "/chain",
-        label: "Knowledge",
-        icon: <IconBook />,
-        match: ["/knowledge", "/log"],
-      },
-      { href: "/how-it-works", label: "How it works", icon: <IconInfo />, match: ["/contribute"] },
+      { href: "/coordination", label: "Coordination", icon: <IconSplit />, match: ["/task"] },
+      { href: "/network", label: "Network", icon: <IconNetwork />, match: ["/peers"] },
+      { href: "/log", label: "Log", icon: <IconList /> },
+      { href: "/knowledge", label: "Knowledge", icon: <IconCheck />, match: ["/chain"] },
+    ],
+  },
+  {
+    group: "Take part",
+    items: [
+      { href: "/contribute", label: "Contribute", icon: <IconHand /> },
+      { href: "/how-it-works", label: "How it works", icon: <IconBook /> },
     ],
   },
 ];
@@ -553,30 +551,46 @@ function IconNetwork() {
   );
 }
 
+function IconSplit() {
+  return (
+    <Icon>
+      <path d="M2.5 8h3.5M6 8l3-4.5h4.5M6 8l3 4.5h4.5M9 8h4.5" />
+    </Icon>
+  );
+}
+
+function IconList() {
+  return (
+    <Icon>
+      <path d="M5.5 4h8M5.5 8h8M5.5 12h8" />
+      <circle cx="2.8" cy="4" r=".6" fill="currentColor" />
+      <circle cx="2.8" cy="8" r=".6" fill="currentColor" />
+      <circle cx="2.8" cy="12" r=".6" fill="currentColor" />
+    </Icon>
+  );
+}
+
+function IconCheck() {
+  return (
+    <Icon>
+      <path d="M8 1.8 13.2 4v3.8c0 3-2.3 5.4-5.2 6.4-2.9-1-5.2-3.4-5.2-6.4V4Z" />
+      <path d="m5.6 8 1.7 1.7 3.2-3.4" />
+    </Icon>
+  );
+}
+
+function IconHand() {
+  return (
+    <Icon>
+      <path d="M8 13.5s-5-3-5-6.6A2.6 2.6 0 0 1 8 5.3a2.6 2.6 0 0 1 5 1.6c0 3.6-5 6.6-5 6.6Z" />
+    </Icon>
+  );
+}
+
 function IconBook() {
   return (
     <Icon>
       <path d="M2.5 3.5h4A1.5 1.5 0 0 1 8 5v8a1 1 0 0 0-1-1H2.5ZM13.5 3.5h-4A1.5 1.5 0 0 0 8 5v8a1 1 0 0 1 1-1h4.5Z" />
-    </Icon>
-  );
-}
-
-function IconAgents() {
-  return (
-    <Icon>
-      <circle cx="5.5" cy="5.5" r="2.2" />
-      <circle cx="11" cy="6.5" r="1.7" />
-      <path d="M2 13.5c.6-2.3 2-3.5 3.5-3.5s2.9 1.2 3.5 3.5M9.5 10.3c.5-.3 1-.4 1.5-.4 1.2 0 2.3 1 2.8 3" />
-    </Icon>
-  );
-}
-
-function IconInfo() {
-  return (
-    <Icon>
-      <circle cx="8" cy="8" r="5.5" />
-      <path d="M8 7.2v3.3" />
-      <circle cx="8" cy="5" r="0.9" fill="currentColor" stroke="none" />
     </Icon>
   );
 }

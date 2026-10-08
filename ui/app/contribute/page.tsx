@@ -1,17 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { type NetworkResponse, fetchNetwork } from "@/lib/network";
-import { type Objective, loadObjectives, resolveNode } from "@/lib/site";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { type NetworkResponse, fetchNetwork, primaryRole } from "@/lib/network";
+import { type Objective, loadObjectives } from "@/lib/site";
+import { type Underserved, fetchGoals } from "@/lib/goals";
 import {
   type AppRole,
   type AppSheet,
-  DECLARED_BY_ROLE,
+  type Offer,
   PAY_LABEL,
   ROLES,
   ROLE_TOGGLE,
+  type RoleId,
   type RoleInfo,
+  describeOffer,
   lanState,
   openSheet,
   setRole,
@@ -19,30 +22,35 @@ import {
 } from "@/lib/contribute";
 import { type Bridge, appBridge } from "@/lib/draft";
 import { objectiveTitle } from "@/lib/title";
-import { Badge, Box, CopyButton, Note, PageHeader, Skeleton } from "@/components/ui";
+import { AgentConnect } from "@/components/agents";
+import { useNode } from "@/components/hooks";
+import { Badge, Command, Note, PageHeader, Sheet } from "@/components/ui";
 
 /**
- * Ways to take part, what each pays, and how to start.
+ * Ways to take part, what each pays, and -- one click away -- doing it.
  *
- * Inside Cairn.app every role is a button: the app flips the toggle, opens
- * the sheet, or starts the worker, because a window whose whole point is
- * that there is no terminal must not answer "how do I start" with a shell
- * line. In a browser tab there is no app to ask, so the same card says
- * where the control is in the app and what the command is.
+ * Every role is a button. It opens a panel that asks what it needs to and
+ * then does the thing: inside Cairn.app it flips the app's toggle or opens
+ * its sheet; anywhere else it hands over the exact command, filled in from
+ * this node. Offering compute is the one that asks the most -- which GPUs,
+ * how many threads, how many hours a day, on what -- and `cairn work` honours
+ * all of it (`src/agent/work.rs`): the solver is shown only the GPUs offered,
+ * told its thread count, and paused when the day's hours are used.
  *
- * Everything about *this node* comes from `GET /network`: which roles it
- * declares, the contradictions the node itself found in that declaration,
- * and where its HTTP side can be reached from. The role descriptions are
- * `lib/contribute.ts`, which is written against what the rules pay today.
+ * What an offer is not is proof. The roster shows what a machine says it
+ * offers; only the answers a challenge's checker accepts are paid, so a
+ * machine that offers a day and finds nothing earns nothing. The page says
+ * so beside the button, because the alternative -- implying that offering is
+ * earning -- is the one claim here the log could not back.
  */
 export default function Page() {
-  const [base, setBase] = useState<string | null>(null);
+  const base = useNode();
   const [network, setNetwork] = useState<NetworkResponse | null>(null);
-  const [networkError, setNetworkError] = useState<string | null>(null);
   const [objectives, setObjectives] = useState<Objective[]>([]);
-  const [live, setLive] = useState(false);
+  const [underserved, setUnderserved] = useState<Underserved[]>([]);
   const [origin, setOrigin] = useState("");
   const [bridge, setBridge] = useState<Bridge | null>(null);
+  const [open, setOpen] = useState<RoleId | null>(null);
   /** The change the app is restarting the node for, until the page reloads. */
   const [restarting, setRestarting] = useState<{ role: AppRole; on: boolean } | null>(null);
   const [appError, setAppError] = useState<string | null>(null);
@@ -50,765 +58,513 @@ export default function Page() {
   useEffect(() => {
     setOrigin(window.location.origin);
     setBridge(appBridge());
-    void resolveNode().then(async (url) => {
-      setBase(url);
-      const [net, feed] = await Promise.all([
-        fetchNetwork(url).catch((cause: unknown) => {
-          setNetworkError(cause instanceof Error ? cause.message : String(cause));
-          return null;
-        }),
-        loadObjectives(url),
-      ]);
-      setNetwork(net);
-      setLive(feed.live);
-      setObjectives(feed.live ? feed.objectives.filter((o) => o.open) : []);
-    });
+    // `#compute` and friends open their panel, so "Offer compute →" on the
+    // Network page lands on the form rather than on a card to find.
+    const fromHash = window.location.hash.replace("#", "");
+    const ids: Record<string, RoleId> = { compute: "compute", agent: "experimenter", check: "validator", relay: "relay", fund: "funder" };
+    if (ids[fromHash]) setOpen(ids[fromHash]);
   }, []);
+
+  useEffect(() => {
+    if (base === null) return;
+    void Promise.all([
+      fetchNetwork(base).catch(() => null),
+      loadObjectives(base),
+      fetchGoals(base).catch(() => null),
+    ]).then(([net, feed, goals]) => {
+      setNetwork(net);
+      setObjectives(feed.live ? feed.objectives.filter((o) => o.open) : []);
+      setUnderserved(goals?.underserved ?? []);
+    });
+  }, [base]);
 
   const declared = new Set<string>(network?.node.roles.declared ?? []);
 
-  async function toggle(role: AppRole, on: boolean) {
-    if (!bridge) return;
-    setAppError(null);
-    try {
-      await setRole(bridge, role, on);
-      // The app restarts the node and reloads this page when it is back.
-      setRestarting({ role, on });
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      if (message !== "Cancelled.") setAppError(message);
-    }
-  }
+  const toggle = useCallback(
+    async (role: AppRole, on: boolean) => {
+      if (!bridge) return;
+      setAppError(null);
+      try {
+        await setRole(bridge, role, on);
+        // The app restarts the node and reloads this page when it is back.
+        setRestarting({ role, on });
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        if (message !== "Cancelled.") setAppError(message);
+      }
+    },
+    [bridge],
+  );
 
-  async function open(sheet: AppSheet, objective?: string) {
-    if (!bridge) return;
-    setAppError(null);
-    try {
-      await openSheet(bridge, sheet, objective);
-    } catch (cause) {
-      setAppError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
+  const sheet = useCallback(
+    async (name: AppSheet, objective?: string) => {
+      if (!bridge) return;
+      setAppError(null);
+      try {
+        await openSheet(bridge, name, objective);
+      } catch (cause) {
+        setAppError(cause instanceof Error ? cause.message : String(cause));
+      }
+    },
+    [bridge],
+  );
+
+  const role = network ? primaryRole(network.node) : null;
+  const active = ROLES.find((r) => r.id === open) ?? null;
 
   return (
     <>
       <PageHeader
         title="Contribute"
-        subtitle="Ways to take part, what each one pays today, and how to start. Only an objective's pinned checker decides who is paid; no role changes that."
+        subtitle="Ways to take part and what each one pays. Pick one to start; only a challenge's pinned checker decides who is paid."
       />
 
-      <div className="flex flex-col gap-5">
-        <ThisNode network={network} error={networkError} loading={base === null} />
+      {role && network && (
+        <p className="mb-4 text-[12.5px] text-ink-2">
+          This node is a <b className="text-ink">{role.title}</b>
+          {role.also.length > 0 && <> and {role.also.join(", ")}</>}
+          {network.node.reach && !network.node.reach.lan && <> · reachable from this computer only</>}.{" "}
+          <Link href="/network" className="text-accent hover:underline">
+            Network →
+          </Link>
+        </p>
+      )}
 
-        {restarting && (
-          <Note title="restarting the node">
+      {restarting && (
+        <div className="mb-4">
+          <Note title="Restarting the node">
             Cairn.app is starting the node again with{" "}
-            <b className="text-ink">
-              {ROLES.find((r) => r.start.inApp?.role === restarting.role)?.title ?? restarting.role}
-            </b>{" "}
+            <b className="text-ink">{ROLES.find((r) => r.start.inApp?.role === restarting.role)?.title ?? restarting.role}</b>{" "}
             {restarting.on ? "on" : "off"}. This page comes back on its own.
           </Note>
-        )}
-        {appError && (
+        </div>
+      )}
+      {appError && (
+        <div className="mb-4">
           <Note title="Cairn.app said no" tone="warn">
             {appError}
           </Note>
-        )}
+        </div>
+      )}
 
-        <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {ROLES.map((role) => (
-            <RoleCard
-              key={role.id}
-              role={role}
-              on={role.declares ? declared.has(role.declares) : false}
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {ROLES.map((info) => (
+          <RoleCard
+            key={info.id}
+            role={info}
+            on={info.declares ? declared.has(info.declares) : false}
+            onOpen={() => {
+              setOpen(info.id);
+              history.replaceState(null, "", `#${HASH[info.id]}`);
+            }}
+          />
+        ))}
+      </section>
+
+      <p className="mt-5 text-[12px] text-ink-3">
+        Why checking answers and relaying are not paid yet, and what would change that:{" "}
+        <span className="mono">docs/design/roles-and-rewards.md</span>.
+      </p>
+
+      {active && (
+        <Sheet
+          title={active.title}
+          onClose={() => {
+            setOpen(null);
+            history.replaceState(null, "", window.location.pathname);
+          }}
+        >
+          {active.id === "compute" && (
+            <OfferCompute
+              network={network}
+              objectives={objectives}
+              underserved={underserved}
+              origin={base || origin}
               bridge={bridge}
               busy={restarting !== null}
-              node={base ?? ""}
-              onToggle={toggle}
-              onOpen={open}
+              onShare={() => void toggle("worker-host", true)}
+              onWork={(objective) => void sheet("work", objective)}
             />
-          ))}
-        </section>
-
-        <AddMachine
-          network={network}
-          objectives={objectives}
-          live={live}
-          base={base ?? ""}
-          origin={origin}
-          bridge={bridge}
-          busy={restarting !== null}
-          onShare={() => toggle("worker-host", true)}
-          onOpen={open}
-        />
-
-        <p className="text-[12px] text-ink-3">
-          Why validators and relays are not paid yet, and what would change that:{" "}
-          <span className="mono">docs/design/roles-and-rewards.md</span>.
-        </p>
-      </div>
+          )}
+          {active.id === "experimenter" && <Solve objectives={objectives} bridge={bridge} />}
+          {active.id === "validator" && (
+            <Toggled role={active} on={declared.has("verifier")} bridge={bridge} busy={restarting !== null} onToggle={toggle}>
+              <p>
+                You re-run each answer&rsquo;s checker on your own machine and sign what it said, staking 50,000 units per
+                check. The stake comes back after six epochs; if your check is shown wrong, whoever caught it takes it.
+                Checks are what lift a result to <i>backed by a bond</i> on the Knowledge page.
+              </p>
+              {!bridge && (
+                <>
+                  <p className="mt-3">Make a key, then start the node with it:</p>
+                  <Command className="mt-1.5" text={"cairn identity --out validator.identity.json\ncairn run --attest-identity validator.identity.json"} />
+                </>
+              )}
+            </Toggled>
+          )}
+          {active.id === "relay" && (
+            <Toggled role={active} on={declared.has("relay")} bridge={bridge} busy={restarting !== null} onToggle={toggle}>
+              <p>
+                Your node accepts connections from other nodes and serves them the log, so the network stays connected
+                when others are behind routers. It costs bandwidth and opens a port to the internet.
+              </p>
+              {!bridge && <Command className="mt-3" text="cairn run --listen 0.0.0.0:9000" />}
+              <p className="mt-3 text-ink-3">
+                Whether strangers can reach it is on the Network page, under <i>from outside</i>.
+              </p>
+            </Toggled>
+          )}
+          {active.id === "funder" && <Fund />}
+        </Sheet>
+      )}
     </>
   );
 }
 
-function ThisNode({
-  network,
-  error,
-  loading,
-}: {
-  network: NetworkResponse | null;
-  error: string | null;
-  loading: boolean;
-}) {
-  if (error) {
-    return (
-      <Note title="this node did not describe itself" tone="warn">
-        {error} The roles below still apply; this page just cannot say which this node has on.
-      </Note>
-    );
-  }
-  if (!network) {
-    return (
-      <Box title="This node">
-        <Skeleton className={loading ? "h-4 w-64" : "h-4 w-48"} />
-      </Box>
-    );
-  }
-  const { roles, warnings, reach } = network.node;
-  const lan = lanState(reach, "");
+const HASH: Record<RoleId, string> = {
+  compute: "compute",
+  experimenter: "agent",
+  validator: "check",
+  relay: "relay",
+  funder: "fund",
+};
+
+const ACTION: Record<RoleId, string> = {
+  experimenter: "Start solving",
+  compute: "Offer compute",
+  validator: "Check answers",
+  relay: "Relay for the network",
+  funder: "Fund a question",
+};
+
+function RoleCard({ role, on, onOpen }: { role: RoleInfo; on: boolean; onOpen: () => void }) {
+  const tone = role.pay === "paid" ? "accent" : role.pay === "bonded" ? "warn" : "neutral";
   return (
-    <Box title="This node">
-      <dl className="kv">
-        <dt>declares</dt>
-        <dd className="flex flex-wrap gap-1.5">
-          {roles.declared.length === 0 ? (
-            <span className="text-ink-3">no roles</span>
-          ) : (
-            roles.declared.map((role) => <Badge key={role}>{role}</Badge>)
-          )}
-        </dd>
-        <dt>reachable from</dt>
-        <dd>
-          {lan.state === "lan"
-            ? lan.urls.length
-              ? "your network"
-              : "your network (address not found)"
-            : lan.state === "local"
-              ? "this computer only"
-              : "unknown on this node version"}
-        </dd>
-        <dt>can check</dt>
-        <dd>
-          {network.node.verifiers.servable.length
-            ? network.node.verifiers.servable.join(", ")
-            : "no verifier kind on this machine"}
-        </dd>
-      </dl>
-      {warnings.length > 0 && (
-        <ul className="mt-3 flex flex-col gap-1 text-[12.5px] text-warn">
-          {warnings.map((warning) => (
-            <li key={warning}>{warning}</li>
-          ))}
-        </ul>
-      )}
-    </Box>
+    <button
+      type="button"
+      onClick={onOpen}
+      className="card card-pad flex cursor-pointer flex-col gap-2 text-left transition-colors hover:border-edge-strong hover:bg-surface-2"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-[14px] font-semibold text-ink">{role.title}</h2>
+        <Badge tone={tone}>{PAY_LABEL[role.pay]}</Badge>
+        {on && <Badge title="This node does this now">on here</Badge>}
+      </div>
+      <p className="text-[13px] leading-relaxed text-ink-2">{role.does}</p>
+      <p className="text-[12.5px] leading-relaxed text-ink-3">{role.payDetail}</p>
+      <span className="mt-auto pt-1 text-[12.5px] font-medium text-accent">{ACTION[role.id]} →</span>
+    </button>
   );
 }
 
-function RoleCard({
+// -- offer compute ---------------------------------------------------------------
+
+const GPU_CHOICES = [0, 1, 2, 3, 4, 5, 6, 7] as const;
+
+function OfferCompute({
+  network,
+  objectives,
+  underserved,
+  origin,
+  bridge,
+  busy,
+  onShare,
+  onWork,
+}: {
+  network: NetworkResponse | null;
+  objectives: Objective[];
+  underserved: Underserved[];
+  origin: string;
+  bridge: Bridge | null;
+  busy: boolean;
+  onShare: () => void;
+  onWork: (objective?: string) => void;
+}) {
+  const cpus = network?.node.hardware.cpus ?? 8;
+  const [where, setWhere] = useState<"here" | "other">("here");
+  const [gpus, setGpus] = useState<number[]>([]);
+  const [threads, setThreads] = useState(Math.max(1, Math.floor(cpus / 2)));
+  const [hours, setHours] = useState(8);
+  const [objective, setObjective] = useState("");
+  const [worker, setWorker] = useState("");
+  const [device, setDevice] = useState("");
+  const [solver, setSolver] = useState("");
+  const [url, setUrl] = useState("");
+
+  // The default is where one more machine matters most: the richest open
+  // objective on the angle with the most open reward per live worker.
+  useEffect(() => {
+    if (objective || objectives.length === 0) return;
+    const scarce = underserved.flatMap((row) => row.objectives).find((id) => objectives.some((o) => o.id === id));
+    setObjective(scarce ?? objectives[0].id);
+  }, [objectives, underserved, objective]);
+
+  const lan = lanState(network?.node.reach, origin);
+  const urls = useMemo(() => (lan.state === "lan" ? lan.urls : []), [lan]);
+  useEffect(() => {
+    if (!url) setUrl(where === "here" ? origin : (urls[0] ?? ""));
+  }, [where, urls, origin, url]);
+
+  const offer: Offer = { gpus, threads, hoursPerDay: hours, device: device || null };
+  const leader = network?.node.fleet?.signs_as ?? null;
+  const command = workCommand({ node: url, objective: objective || null, worker, solver, leader, offer });
+  const target = objectives.find((o) => o.id === objective);
+
+  return (
+    <div className="flex flex-col gap-5 text-[13px]">
+      <p className="text-ink-2">
+        Put a machine to work on a challenge. It takes its own slice each epoch, runs a solver you supply, and is paid for
+        what the challenge&rsquo;s checker accepts.
+      </p>
+
+      <div className="segmented self-start" role="group" aria-label="Which machine">
+        <button type="button" aria-pressed={where === "here"} onClick={() => { setWhere("here"); setUrl(""); }}>
+          This computer
+        </button>
+        <button type="button" aria-pressed={where === "other"} onClick={() => { setWhere("other"); setUrl(""); }}>
+          Another machine
+        </button>
+      </div>
+
+      {where === "other" && lan.state === "local" && (
+        <Note title="Only this computer can reach this node" tone="warn">
+          Another machine cannot connect until the node listens on your network.
+          {bridge ? (
+            <div className="mt-2">
+              <button type="button" className="btn btn-primary btn-sm" onClick={onShare} disabled={busy}>
+                Share this node on my network
+              </button>
+            </div>
+          ) : (
+            <>
+              {" "}
+              Start it with <code className="mono">cairn run --serve 0.0.0.0:8080</code>. Anyone on that network can then
+              read the log and post answers; nobody can change what has settled.
+            </>
+          )}
+        </Note>
+      )}
+
+      <fieldset className="flex flex-col gap-1.5">
+        <legend className="label">GPUs to offer</legend>
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            className={`btn btn-sm ${gpus.length === 0 ? "btn-primary" : ""}`}
+            onClick={() => setGpus([])}
+          >
+            None
+          </button>
+          {GPU_CHOICES.map((n) => (
+            <button
+              key={n}
+              type="button"
+              className={`btn btn-sm mono ${gpus.includes(n) ? "btn-primary" : ""}`}
+              onClick={() => setGpus(gpus.includes(n) ? gpus.filter((g) => g !== n) : [...gpus, n].sort((a, b) => a - b))}
+              aria-pressed={gpus.includes(n)}
+            >
+              GPU {n}
+            </button>
+          ))}
+        </div>
+        <span className="hint">
+          The solver sees only these, as <span className="mono">CUDA_VISIBLE_DEVICES</span> and{" "}
+          <span className="mono">HIP_VISIBLE_DEVICES</span>; the rest of the machine&rsquo;s GPUs stay yours.
+        </span>
+      </fieldset>
+
+      <label className="flex flex-col gap-1.5">
+        <span className="label mb-0 flex justify-between">
+          CPU threads <span className="mono text-ink">{threads}</span>
+        </span>
+        <input type="range" min={1} max={Math.max(cpus, 1)} value={threads} onChange={(e) => setThreads(Number(e.target.value))} />
+        <span className="hint">
+          Told to the solver as <span className="mono">OMP_NUM_THREADS</span> and{" "}
+          <span className="mono">CAIRN_THREADS</span>
+          {network?.node.hardware.cpus && where === "here" ? `; this computer has ${network.node.hardware.cpus}.` : "."}
+        </span>
+      </label>
+
+      <label className="flex flex-col gap-1.5">
+        <span className="label mb-0 flex justify-between">
+          Hours a day <span className="mono text-ink">{hours >= 24 ? "all day" : hours}</span>
+        </span>
+        <input type="range" min={1} max={24} value={hours} onChange={(e) => setHours(Number(e.target.value))} />
+        <span className="hint">
+          It pauses when today&rsquo;s hours are used and starts again at midnight UTC, still sending what it already
+          committed so nothing goes unpaid.
+        </span>
+      </label>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="flex flex-col gap-1 text-[12px] text-ink-3 sm:col-span-2">
+          Work on
+          <select className="field" value={objective} onChange={(e) => setObjective(e.target.value)} disabled={!objectives.length}>
+            {objectives.length === 0 && <option value="">no open challenge on this node</option>}
+            {objectives.map((o) => (
+              <option key={o.id} value={o.id}>
+                {objectiveTitle(o)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-[12px] text-ink-3">
+          Machine name
+          <input className="field" value={worker} placeholder="garage-gpu" onChange={(e) => setWorker(e.target.value)} spellCheck={false} />
+        </label>
+        <label className="flex flex-col gap-1 text-[12px] text-ink-3">
+          What it is
+          <input className="field" value={device} placeholder="RTX 4090" onChange={(e) => setDevice(e.target.value)} />
+        </label>
+        <label className="flex flex-col gap-1 text-[12px] text-ink-3 sm:col-span-2">
+          Solver command
+          <input className="field field-mono" value={solver} placeholder="./your-solver" onChange={(e) => setSolver(e.target.value)} spellCheck={false} />
+        </label>
+        {where === "other" && (
+          <label className="flex flex-col gap-1 text-[12px] text-ink-3 sm:col-span-2">
+            This node, as the other machine reaches it
+            <input className="field field-mono" value={url} placeholder="http://<this computer>:8080" onChange={(e) => setUrl(e.target.value)} spellCheck={false} />
+          </label>
+        )}
+      </div>
+
+      <div className="rounded-lg border border-accent-line bg-accent-soft px-3 py-2.5 text-[12.5px] text-ink">
+        Offering <b>{describeOffer(offer)}</b>
+        {target ? (
+          <>
+            {" "}
+            to <b>{objectiveTitle(target)}</b>.
+          </>
+        ) : (
+          "."
+        )}
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <div className="text-[12.5px] font-medium text-ink">
+          {where === "here" ? "Start it in a terminal on this computer" : "Start it on that machine"}
+        </div>
+        <Command text={command} />
+        {bridge && where === "here" && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className="btn btn-sm" onClick={() => onWork(objective || undefined)} disabled={busy}>
+              Or use Work on This Mac…
+            </button>
+            <span className="text-[11.5px] text-ink-3">Cairn.app&rsquo;s sheet runs the same worker, without the limits above.</span>
+          </div>
+        )}
+        <p className="hint">
+          Each round the solver gets its slice as JSON on stdin and prints answers, one JSON object per line. The machine
+          appears on the Network page within a minute, with what it offered.
+        </p>
+      </div>
+
+      <div className="rounded-lg border border-edge bg-surface-2 px-3 py-2.5 text-[12px] leading-relaxed text-ink-2">
+        <b className="text-ink">How the work is proven.</b> An offer is what a machine says; nothing checks it, and nothing
+        pays for it. What pays is an answer the challenge&rsquo;s pinned checker accepts — committed, revealed an epoch
+        later, and recorded in the log — so the only proof of work that counts is the work.
+        {leader && " This node leads a fleet: it signs for the machines on its network and is paid for what they find."}
+      </div>
+    </div>
+  );
+}
+
+// -- the others ------------------------------------------------------------------
+
+function Solve({ objectives, bridge }: { objectives: Objective[]; bridge: Bridge | null }) {
+  const richest = [...objectives].sort((a, b) => b.reward - a.reward).slice(0, 4);
+  return (
+    <div className="flex flex-col gap-5 text-[13px]">
+      <p className="text-ink-2">
+        Answer open challenges by hand, with a program, or with an agent. Scoring a candidate first is free and uses the
+        same checker that decides payment; a copy of someone else&rsquo;s answer earns nothing.
+      </p>
+      <div>
+        <div className="label">Open on this node</div>
+        {richest.length === 0 ? (
+          <p className="text-ink-3">Nothing open right now.</p>
+        ) : (
+          <ul className="flex flex-col gap-1.5">
+            {richest.map((o) => (
+              <li key={o.id} className="flex items-baseline gap-2">
+                <Link href={`/challenge?id=${encodeURIComponent(o.id)}`} className="min-w-0 flex-1 truncate text-accent hover:underline">
+                  {objectiveTitle(o)}
+                </Link>
+                <span className="mono shrink-0 text-[12px] text-ink-3">{o.reward.toLocaleString("en-US")}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div>
+        <div className="label">With an agent</div>
+        <AgentConnect bridge={bridge} />
+      </div>
+      <div>
+        <div className="label">By hand</div>
+        <Command text="cairn try <challenge id> --submitter <you> --artifact answer.json" />
+      </div>
+    </div>
+  );
+}
+
+function Toggled({
   role,
   on,
   bridge,
   busy,
-  node,
   onToggle,
-  onOpen,
+  children,
 }: {
   role: RoleInfo;
   on: boolean;
   bridge: Bridge | null;
   busy: boolean;
-  node: string;
   onToggle: (role: AppRole, on: boolean) => void;
-  onOpen: (sheet: AppSheet) => void;
+  children: React.ReactNode;
 }) {
-  const tone = role.pay === "paid" ? "accent" : role.pay === "bonded" ? "warn" : "neutral";
-  const inApp = bridge ? role.start.inApp : undefined;
+  const inApp = role.start.inApp?.role;
   return (
-    <article className="card card-pad flex flex-col gap-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <h2 className="text-[14px] font-semibold text-ink">{role.title}</h2>
-        <Badge tone={tone}>{PAY_LABEL[role.pay]}</Badge>
-        {on && <Badge title="This node declares this role">on here</Badge>}
-      </div>
-      <p className="text-[13px] leading-relaxed text-ink-2">{role.does}</p>
-      <p className="text-[12.5px] leading-relaxed text-ink-2">
-        <b className="font-medium text-ink">How it pays.</b> {role.payDetail}
+    <div className="flex flex-col gap-4 text-[13px] leading-relaxed text-ink-2">
+      <div>{children}</div>
+      <p className="text-[12.5px]">
+        <b className="text-ink">Risk.</b> {role.risk}
       </p>
-      <p className="text-[12.5px] leading-relaxed text-ink-3">
-        <b className="font-medium text-ink-2">Risk.</b> {role.risk}
-      </p>
-      <div className="mt-auto flex flex-col gap-1.5 pt-1 text-[12px]">
-        {inApp ? (
-          <div className="flex flex-wrap items-center gap-2">
-            {inApp.open && (
-              <button
-                type="button"
-                className="btn btn-primary btn-sm"
-                onClick={() => onOpen(inApp.open!.sheet)}
-                disabled={busy}
-              >
-                {inApp.open.label}
-              </button>
-            )}
-            {inApp.role && (
-              <button
-                type="button"
-                className={inApp.open ? "btn btn-sm" : on ? "btn btn-sm" : "btn btn-primary btn-sm"}
-                onClick={() => onToggle(inApp.role!, !on)}
-                disabled={busy}
-                title={
-                  on
-                    ? "Turns this role off and restarts the node"
-                    : "Turns this role on and restarts the node; Cairn.app asks first"
-                }
-              >
-                {on ? ROLE_TOGGLE[inApp.role].on : ROLE_TOGGLE[inApp.role].off}
-              </button>
-            )}
-          </div>
-        ) : (
-          <>
-            {role.start.app && (
-              <div className="text-ink-2">
-                <span className="text-ink-3">In Cairn.app: </span>
-                {role.start.app}
-              </div>
-            )}
-            <BrowserAction role={role} node={node} />
-            {role.start.cli && (
-              <details>
-                <summary className="cursor-pointer text-[12px] text-ink-3">
-                  The command, for a terminal
-                </summary>
-                <div className="relative mt-1.5">
-                  <pre className="code pr-9 text-[11.5px]">{role.start.cli}</pre>
-                  <div className="absolute top-1.5 right-1.5">
-                    <CopyButton value={role.start.cli} />
-                  </div>
-                </div>
-              </details>
-            )}
-          </>
-        )}
-        {role.start.page && (
-          <Link href={role.start.page.href} className="text-accent hover:underline">
-            {role.start.page.label} →
-          </Link>
-        )}
-      </div>
-    </article>
-  );
-}
-
-/**
- * What a browser tab can do for a role without an app to ask: a small
- * planner that turns "offer compute" into the concrete offer — how many
- * GPUs, how many hours — and the exact command that starts it. Nothing here
- * touches the network; it drafts, and the terminal (or Cairn.app) runs.
- */
-function BrowserAction({ role, node }: { role: RoleInfo; node: string }) {
-  const [open, setOpen] = useState(false);
-  if (role.id === "funder") return null;
-  const cta =
-    role.id === "compute"
-      ? "Plan an offer"
-      : role.id === "experimenter"
-        ? "Plan a solve"
-        : role.id === "validator"
-          ? "Plan a check"
-          : "Plan a relay";
-  if (!open) {
-    return (
-      <div>
-        <button type="button" className="btn btn-primary btn-sm" onClick={() => setOpen(true)}>
-          {cta}
-        </button>
-      </div>
-    );
-  }
-  return (
-    <div className="rounded-md border border-edge bg-surface-2 p-2.5">
-      {role.id === "compute" && <ComputePlanner node={node} />}
-      {role.id === "experimenter" && <SolvePlanner />}
-      {role.id === "validator" && <ValidatePlanner />}
-      {role.id === "relay" && <RelayPlanner />}
-      <button
-        type="button"
-        className="mt-1.5 text-[12px] text-ink-3 underline underline-offset-2 hover:text-ink"
-        onClick={() => setOpen(false)}
-      >
-        Close
-      </button>
-    </div>
-  );
-}
-
-/**
- * Offer compute: how much, for how long, under what name — then the `cairn
- * work` line and a pin. The pin is this browser's reminder that the machine
- * is promised, kept in `localStorage` and labelled as such: the network
- * learns about work from heartbeats and settlements, never from a browser
- * toggle.
- */
-function ComputePlanner({ node }: { node: string }) {
-  const [gpus, setGpus] = useState("1");
-  const [hours, setHours] = useState("8");
-  const [worker, setWorker] = useState("");
-  const [pinned, setPinned] = useState<string | null>(null);
-
-  useEffect(() => {
-    try {
-      setPinned(localStorage.getItem("cairn-pinned-compute"));
-    } catch {
-      setPinned(null);
-    }
-  }, []);
-
-  const command = useMemo(
-    () =>
-      workCommand({
-        node: node || "<node-url>",
-        objective: "<objective-id>",
-        worker: worker || "<your-name>",
-      }),
-    [node, worker],
-  );
-
-  const pin = () => {
-    const value = `${gpus || "?"} GPU${gpus === "1" ? "" : "s"} · ${hours || "?"} h/day · ${worker || "unnamed"}`;
-    try {
-      localStorage.setItem("cairn-pinned-compute", value);
-    } catch {
-      /* site data blocked; the offer below is still the useful part */
-    }
-    setPinned(value);
-  };
-  const unpin = () => {
-    try {
-      localStorage.removeItem("cairn-pinned-compute");
-    } catch {
-      /* already gone */
-    }
-    setPinned(null);
-  };
-
-  return (
-    <div className="flex flex-col gap-2 text-[12.5px]">
-      {pinned && (
-        <p className="text-[12px] text-accent">
-          Pinned in this browser: {pinned}.{" "}
-          <button type="button" className="underline underline-offset-2" onClick={unpin}>
-            Unpin
+      {bridge && inApp ? (
+        <div>
+          <button type="button" className={`btn ${on ? "" : "btn-primary"}`} onClick={() => onToggle(inApp, !on)} disabled={busy}>
+            {on ? ROLE_TOGGLE[inApp].on : ROLE_TOGGLE[inApp].off}
           </button>
-        </p>
-      )}
-      <div className="grid grid-cols-3 gap-2">
-        <label className="flex flex-col gap-1 text-[11.5px] text-ink-3">
-          GPUs
-          <input className="field py-1.5" value={gpus} onChange={(e) => setGpus(e.target.value)} inputMode="numeric" />
-        </label>
-        <label className="flex flex-col gap-1 text-[11.5px] text-ink-3">
-          Hours/day
-          <input className="field py-1.5" value={hours} onChange={(e) => setHours(e.target.value)} inputMode="numeric" />
-        </label>
-        <label className="flex flex-col gap-1 text-[11.5px] text-ink-3">
-          Name
-          <input
-            className="field py-1.5"
-            value={worker}
-            onChange={(e) => setWorker(e.target.value)}
-            placeholder="garage-gpu"
-            spellCheck={false}
-          />
-        </label>
-      </div>
-      <p className="text-ink-2">
-        Offering: <b className="text-ink">{gpus || "?"} GPU{gpus === "1" ? "" : "s"}</b>,{" "}
-        <b className="text-ink">{hours || "?"} hours a day</b>
-        {worker && (
-          <>
-            {" "}as <span className="mono">{worker}</span>
-          </>
-        )}
-        . Paid per accepted answer — idle time earns nothing, because nothing in the log can
-        show it was spent.
-      </p>
-      <div className="relative">
-        <pre className="code pr-9 text-[11px]">{command}</pre>
-        <div className="absolute top-1.5 right-1.5">
-          <CopyButton value={command} />
+          <p className="hint">Cairn.app asks first, then restarts the node with it {on ? "off" : "on"}.</p>
         </div>
-      </div>
-      <div>
-        <button type="button" className="btn btn-sm" onClick={pin}>
-          {pinned ? "Update pin" : "Pin this offer here"}
-        </button>
-      </div>
-      <p className="text-[11.5px] text-ink-3">
-        The pin is a reminder in this browser only. Proof of work is the heartbeat on{" "}
-        <Link href="/network" className="text-accent hover:underline">
-          the network page
-        </Link>{" "}
-        and the settlement on the challenge.
-      </p>
+      ) : (
+        role.start.app && <p className="text-[12px] text-ink-3">In Cairn.app: {role.start.app}.</p>
+      )}
     </div>
   );
 }
 
-function SolvePlanner() {
-  const [objective, setObjective] = useState("");
-  const [artifact, setArtifact] = useState("answer.json");
-  const tryLine = `cairn try ${objective || "<objective>"} --submitter <you> --artifact ${artifact || "answer.json"}`;
+function Fund() {
   return (
-    <div className="flex flex-col gap-2 text-[12.5px]">
-      <div className="grid gap-2 sm:grid-cols-2">
-        <label className="flex flex-col gap-1 text-[11.5px] text-ink-3">
-          Objective id
-          <input
-            className="field field-mono py-1.5"
-            value={objective}
-            onChange={(e) => setObjective(e.target.value)}
-            placeholder="sha256:…"
-            spellCheck={false}
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-[11.5px] text-ink-3">
-          Artifact file
-          <input
-            className="field field-mono py-1.5"
-            value={artifact}
-            onChange={(e) => setArtifact(e.target.value)}
-            spellCheck={false}
-          />
-        </label>
-      </div>
+    <div className="flex flex-col gap-3 text-[13px]">
       <p className="text-ink-2">
-        Score first — free, same checker that decides payment — then commit, wait for the epoch
-        to turn, and reveal.
+        You set the bounty aside when you post, and it goes to whoever the checker accepts. It cannot be changed afterwards.
       </p>
-      <div className="relative">
-        <pre className="code pr-9 text-[11px]">{tryLine}</pre>
-        <div className="absolute top-1.5 right-1.5">
-          <CopyButton value={tryLine} />
+      <Link href="/submit" className="card card-pad block transition-colors hover:border-edge-strong hover:bg-surface-2">
+        <div className="font-medium text-ink">A single question →</div>
+        <div className="mt-1 text-[12.5px] text-ink-2">
+          One answer settles it, or each improvement on a score is paid. Write it, pin how answers are checked, sign it.
         </div>
-      </div>
-      <Link href="/objectives" className="text-accent hover:underline">
-        Pick an open objective →
+      </Link>
+      <Link
+        href="/coordination#launch"
+        className="card card-pad block transition-colors hover:border-edge-strong hover:bg-surface-2"
+      >
+        <div className="font-medium text-ink">A coordinated task →</div>
+        <div className="mt-1 text-[12.5px] text-ink-2">
+          A big search split across many machines, each paid per piece it finishes. Describe it and your agent sets it up.
+        </div>
       </Link>
     </div>
-  );
-}
-
-function ValidatePlanner() {
-  const [identity, setIdentity] = useState("validator.identity.json");
-  const [understood, setUnderstood] = useState(false);
-  const line = `cairn run --attest-identity ${identity || "validator.identity.json"}`;
-  return (
-    <div className="flex flex-col gap-2 text-[12.5px]">
-      <label className="flex flex-col gap-1 text-[11.5px] text-ink-3">
-        Identity file
-        <input
-          className="field field-mono py-1.5"
-          value={identity}
-          onChange={(e) => setIdentity(e.target.value)}
-          spellCheck={false}
-        />
-      </label>
-      <label className="flex cursor-pointer items-start gap-2 text-ink-2">
-        <input
-          type="checkbox"
-          className="mt-0.5 accent-[var(--accent)]"
-          checked={understood}
-          onChange={(e) => setUnderstood(e.target.checked)}
-        />
-        I understand each check stakes 50,000 units, lost if the check was wrong.
-      </label>
-      <div className="relative">
-        <pre className="code pr-9 text-[11px]">{line}</pre>
-        <div className="absolute top-1.5 right-1.5">
-          <CopyButton value={line} />
-        </div>
-      </div>
-      {!understood && (
-        <p className="text-[11.5px] text-warn">Correct checks are not paid yet — only the bond moves.</p>
-      )}
-    </div>
-  );
-}
-
-function RelayPlanner() {
-  const [port, setPort] = useState("9000");
-  const line = `cairn run --listen 0.0.0.0:${port || "9000"}`;
-  return (
-    <div className="flex flex-col gap-2 text-[12.5px]">
-      <label className="flex max-w-32 flex-col gap-1 text-[11.5px] text-ink-3">
-        Port
-        <input className="field py-1.5" value={port} onChange={(e) => setPort(e.target.value)} inputMode="numeric" />
-      </label>
-      <p className="text-ink-2">
-        Accept connections and serve the log. Unpaid — nothing in the log can show a relay
-        served anyone — but the network stays connected because of it.
-      </p>
-      <div className="relative">
-        <pre className="code pr-9 text-[11px]">{line}</pre>
-        <div className="absolute top-1.5 right-1.5">
-          <CopyButton value={line} />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/**
- * The second-machine walkthrough: is this node reachable from the LAN, and
- * if so, what that machine does to join -- in its own Cairn.app, or with
- * the exact `cairn work` line for the objective picked here.
- */
-function AddMachine({
-  network,
-  objectives,
-  live,
-  base,
-  origin,
-  bridge,
-  busy,
-  onShare,
-  onOpen,
-}: {
-  network: NetworkResponse | null;
-  objectives: Objective[];
-  live: boolean;
-  base: string;
-  origin: string;
-  bridge: Bridge | null;
-  busy: boolean;
-  onShare: () => void;
-  onOpen: (sheet: AppSheet, objective?: string) => void;
-}) {
-  const lan = lanState(network?.node.reach, base || origin);
-  const [objective, setObjective] = useState<string>("");
-  const [worker, setWorker] = useState("");
-  const [solver, setSolver] = useState("");
-  const [url, setUrl] = useState<string>("");
-
-  useEffect(() => {
-    if (!objective && objectives.length) setObjective(objectives[0].id);
-  }, [objectives, objective]);
-  const urls = lan.state === "lan" ? lan.urls : [];
-  const leader = network?.node.fleet?.signs_as ?? null;
-  useEffect(() => {
-    if (!url && urls.length) setUrl(urls[0]);
-  }, [urls, url]);
-
-  const command = useMemo(
-    () => workCommand({ node: url, objective: objective || null, worker, solver, leader }),
-    [url, objective, worker, solver, leader],
-  );
-  const working = (network?.compute.workers ?? []).filter((w) => w.status === "live");
-
-  return (
-    <Box title="Add a machine on your network">
-      <div className="flex flex-col gap-4 text-[13px]">
-        {lan.state === "local" ? (
-          <Note title="only this computer can reach this node" tone="warn">
-            Another machine cannot connect until the node listens on your network.{" "}
-            {bridge ? (
-              <>
-                Anyone on that network can then read the log and post answers; nobody can
-                change what has settled.
-                <div className="mt-2">
-                  <button type="button" className="btn btn-primary btn-sm" onClick={onShare} disabled={busy}>
-                    Share this node on my network
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                In Cairn.app: Contribute ▸ <b>Share this node on my network</b> (or Settings ▸
-                Roles ▸ Worker host), then restart the node. From a terminal:{" "}
-                <code className="mono">cairn run --serve 0.0.0.0:8080</code>. Anyone on that
-                network can then read the log and post answers; nobody can change what has
-                settled.
-              </>
-            )}
-          </Note>
-        ) : lan.state === "unknown" ? (
-          <Note title="this node does not say where it can be reached" tone="warn">
-            It is older than this page. If you started it with{" "}
-            <code className="mono">--serve 0.0.0.0:8080</code>, use this computer&rsquo;s LAN
-            address below.
-          </Note>
-        ) : null}
-
-        <ol className="flex flex-col gap-3">
-          <li>
-            <b className="text-ink">1. Put Cairn on the other machine.</b>{" "}
-            <span className="text-ink-2">
-              A Mac: install Cairn from the same disk image, which brings Cairn.app. Anything
-              else, with internet: the install line on the Overview. Without: copy the{" "}
-              <code className="mono">cairn</code> binary across — it is one file with nothing to
-              install beside it.
-            </span>
-          </li>
-          <li className="flex flex-col gap-2">
-            <b className="text-ink">2. Pick what it works on, and its name.</b>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <label className="flex flex-col gap-1 text-[12px] text-ink-3">
-                Objective
-                <select
-                  className="field"
-                  value={objective}
-                  onChange={(e) => setObjective(e.target.value)}
-                  disabled={!objectives.length}
-                >
-                  {objectives.length === 0 && (
-                    <option value="">{live ? "no open objectives" : "no node answered"}</option>
-                  )}
-                  {objectives.map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {objectiveTitle(o)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex flex-col gap-1 text-[12px] text-ink-3">
-                Node address
-                {urls.length > 1 ? (
-                  <select className="field field-mono" value={url} onChange={(e) => setUrl(e.target.value)}>
-                    {urls.map((u) => (
-                      <option key={u}>{u}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    className="field field-mono"
-                    value={url}
-                    placeholder="http://<this computer>:8080"
-                    onChange={(e) => setUrl(e.target.value)}
-                    spellCheck={false}
-                  />
-                )}
-              </label>
-              <label className="flex flex-col gap-1 text-[12px] text-ink-3">
-                Machine name (shown on the roster, and paid)
-                <input
-                  className="field"
-                  value={worker}
-                  placeholder="garage-gpu"
-                  onChange={(e) => setWorker(e.target.value)}
-                  spellCheck={false}
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-[12px] text-ink-3">
-                Solver command
-                <input
-                  className="field field-mono"
-                  value={solver}
-                  placeholder="./your-solver"
-                  onChange={(e) => setSolver(e.target.value)}
-                  spellCheck={false}
-                />
-              </label>
-            </div>
-          </li>
-          <li className="flex flex-col gap-2">
-            <b className="text-ink">3. Start it there.</b>
-            {bridge ? (
-              <>
-                <span className="text-[12.5px] text-ink-2">
-                  In Cairn.app on that machine: <b className="text-ink">Contribute ▸ Work on this
-                  Mac…</b>, with the node address and the objective above, its name, and the
-                  solver chosen on that machine. To try the solver here first:
-                </span>
-                <div>
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={() => onOpen("work", objective || undefined)}
-                    disabled={busy}
-                  >
-                    Work on this Mac…
-                  </button>
-                </div>
-                <details className="text-[12.5px] text-ink-2">
-                  <summary className="cursor-pointer text-ink-3">
-                    Without Cairn.app on that machine (Linux, a rented GPU)
-                  </summary>
-                  <div className="relative mt-2">
-                    <pre className="code pr-9 text-[11.5px]">{command}</pre>
-                    <div className="absolute top-2 right-2">
-                      <CopyButton value={command} />
-                    </div>
-                  </div>
-                </details>
-              </>
-            ) : (
-              <div className="relative">
-                <pre className="code pr-9 text-[11.5px]">{command}</pre>
-                <div className="absolute top-2 right-2">
-                  <CopyButton value={command} />
-                </div>
-              </div>
-            )}
-            <span className="text-[12.5px] text-ink-2">
-              Each round the solver gets its slice of the work as JSON on stdin and prints
-              candidate answers, one JSON object per line. The worker commits them, reveals them
-              after the epoch turns, and reports in so the machine shows as <i>working now</i> on
-              the challenge page. The checker decides what is paid.
-              {leader ? (
-                <>
-                  {" "}
-                  This node leads a fleet, so a machine on its network names it as the
-                  submitter: the node signs each machine&rsquo;s records and is paid for them,
-                  while each machine keeps its own slice and its own line on the roster.
-                </>
-              ) : (
-                <> Each machine is paid under its own name.</>
-              )}
-            </span>
-          </li>
-        </ol>
-
-        <div className="text-[12.5px] text-ink-2">
-          <b className="text-ink">Working offline.</b> A network with no internet works the same:
-          {bridge ? (
-            <> Settings ▸ Network ▸ Offline.</>
-          ) : (
-            <>
-              {" "}
-              start the node with <code className="mono">CAIRN_SEEDS=off</code> (Cairn.app:
-              Settings ▸ Network ▸ Offline).
-            </>
-          )}{" "}
-          Nodes on the same network find each other by their LAN beacon, and workers only ever
-          need the node&rsquo;s address.
-        </div>
-
-        <div className="text-[12.5px] text-ink-2">
-          <b className="text-ink">Working now:</b>{" "}
-          {working.length === 0 ? (
-            <span className="text-ink-3">no machine is reporting in to this node.</span>
-          ) : (
-            <>
-              {working.map((w) => w.worker).join(", ")}{" "}
-              <Link href="/network" className="text-accent hover:underline">
-                on the Network page →
-              </Link>
-            </>
-          )}
-        </div>
-      </div>
-    </Box>
   );
 }
