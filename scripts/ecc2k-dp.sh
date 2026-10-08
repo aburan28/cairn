@@ -212,7 +212,7 @@ import hashlib, json, re, struct, sys
 
 V2_MAGIC = b"ECC2KDP2"
 V3_MAGIC = b"ECC2KDT3"
-LEGACY_KEY_RE = re.compile(r"^dp/(slot-\d+)/(\d+)-(\d+)\.bin$")
+ORBIT_KEY_RE = re.compile(r"^dp/(slot-\d+)/([0-9a-f]{32})-(\d+)-([0-9a-f]{64})\.bin$")
 
 def frame(body):
     if body[:8] == V2_MAGIC:
@@ -334,21 +334,21 @@ PY
       "$walker" "${args[@]}" >&2
     fi
     python3 -c "$FRAME_PRELUDE
-body = open('$DP_FILE', 'rb').read()
+body = open(sys.argv[1], 'rb').read()
 kind, records, why = frame(body)
 if kind == 'bad':
     sys.stderr.write('collected file is not a corpus: %s\n' % why)
     sys.exit(1)
-print('collected %d bytes: %s, %d distinguished orbit(s) in %s' % (len(body), kind, records, '$DP_FILE'))
+print('collected %d bytes: %s, %d distinguished orbit(s) in %s' % (len(body), kind, records, sys.argv[1]))
 print('next: verify-local to check it, strip for the campaign upload, witness for a cairn claim')
-"
+" "$DP_FILE"
     ;;
   strip)
     [[ -n "$DP_FILE" ]] || { echo "strip needs --dp-file (the v2 corpus)" >&2; exit 2; }
     [[ -f "$DP_FILE" ]] || { echo "no such file: $DP_FILE" >&2; exit 2; }
     [[ -n "$OUT_FILE" ]] || { echo "strip needs --out (where the v1 bytes go)" >&2; exit 2; }
     python3 -c "$FRAME_PRELUDE
-body = open('$DP_FILE', 'rb').read()
+body = open(sys.argv[1], 'rb').read()
 kind, records, why = frame(body)
 if kind == 'bad':
     sys.stderr.write('not a corpus: %s\n' % why)
@@ -357,13 +357,13 @@ if kind == 'v3':
     sys.stderr.write('not stripping: the ingester reads a v3 table corpus itself and checks it over the original bytes\n')
     sys.exit(1)
 if kind == 'v1':
-    open('$OUT_FILE', 'wb').write(body)
-    print('already v1: copied %d records unchanged to $OUT_FILE' % records)
+    open(sys.argv[2], 'wb').write(body)
+    print('already v1: copied %d records unchanged to %s' % (records, sys.argv[2]))
 else:
-    open('$OUT_FILE', 'wb').write(strip_v2(body))
-    print('stripped v2 -> v1: %d records, seed+canon kept, iters+counts stay in $DP_FILE' % records)
-    print('wrote $OUT_FILE (%d bytes)' % (records * 32))
-"
+    open(sys.argv[2], 'wb').write(strip_v2(body))
+    print('stripped v2 -> v1: %d records, seed+canon kept, iters+counts stay in %s' % (records, sys.argv[1]))
+    print('wrote %s (%d bytes)' % (sys.argv[2], records * 32))
+" "$DP_FILE" "$OUT_FILE"
     ;;
   verify-local)
     [[ -n "$DP_FILE" ]] || { echo "verify-local needs --dp-file" >&2; exit 2; }
@@ -373,7 +373,7 @@ else:
     fi
     python3 -c "$FRAME_PRELUDE
 import time
-body = open('$DP_FILE', 'rb').read()
+body = open(sys.argv[1], 'rb').read()
 kind, records, why = frame(body)
 if kind == 'bad':
     sys.stderr.write('NOT UPLOADABLE: %s\n' % why)
@@ -381,17 +381,18 @@ if kind == 'bad':
 if kind == 'v2':
     print('valid v2 corpus: %d records with carried witnesses (iters+counts)' % records)
     print('NOT UPLOADABLE as-is: the campaign store takes 32-byte records only and refuses v2;')
-    print('run: $0 strip --dp-file $DP_FILE --out <v1 file>')
+    print('run: ecc2k-dp.sh strip --dp-file <v2 corpus> --out <v1 file>')
     sys.exit(1)
 digest = hashlib.sha256(body).hexdigest()
-key = 'dp/slot-%05d/<epoch>-0000000000000000.bin' % int('$SLOT')
-assert LEGACY_KEY_RE.match(key.replace('<epoch>', '1700000000')), 'key shape drifted from dp_ingest LEGACY_KEY_RE'
+slot = int(sys.argv[2])
+key = 'dp/slot-%05d/%s-0-%s.bin' % (slot, '0' * 32, digest)
+assert ORBIT_KEY_RE.match(key), 'key shape drifted from dp_ingest ORBIT_KEY_RE'
 print('format: %s, %d records, %d bytes' % (kind, records, len(body)))
 print('sha256: %s' % digest)
 print('marker: %s' % json.dumps({'sha256': digest, 'records': records, 'producedAt': int(time.time()), 'format': 'ecc2k130-gpu-packed32'}, separators=(',', ':')))
-print('key shape: %s  (matches the legacy worker shape dp_ingest recognises)' % key)
-print('UPLOADABLE: upload would put these bytes under dp/slot-%05d/' % int('$SLOT'))
-"
+print('key shape: %s  (stream id is minted per grant)' % key)
+print('UPLOADABLE: upload would put these bytes under dp/slot-%05d/' % slot)
+" "$DP_FILE" "$SLOT"
     ;;
   witness)
     wit=$(ensure_witness)
