@@ -649,8 +649,15 @@ final class Node: ObservableObject {
             try FileManager.default.createDirectory(at: settings.dataFolder,
                                                     withIntermediateDirectories: true)
         }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false,
-                                                attributes: [.posixPermissions: 0o700])
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory) {
+            guard isDirectory.boolValue,
+                  (try? FileManager.default.destinationOfSymbolicLink(atPath: dir.path)) == nil
+            else { throw CocoaError(.fileWriteFileExists) }
+        } else {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+        }
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
     }
 

@@ -60,6 +60,10 @@ final class BackgroundServiceTests: XCTestCase {
                                  p2pHost: "127.0.0.1", bootstrapFiles: [], attachURL: nil)
         try Node.prepareScratch(local)
         let scratch = folder.appendingPathComponent("tmp", isDirectory: true)
+        // Opening the app again must reuse its scratch directory; a past
+        // launch may also have left permissions broader than the policy.
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scratch.path)
+        try Node.prepareScratch(local)
         XCTAssertEqual(Node.childEnvironment(local)["TMPDIR"], scratch.path)
         let attributes = try FileManager.default.attributesOfItem(atPath: scratch.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o700)
