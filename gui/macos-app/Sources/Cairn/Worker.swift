@@ -22,9 +22,14 @@ struct WorkPlan: Equatable {
     /// The solver's path and its own arguments.
     var solver: String
     var solverArguments: [String] = []
+    var threads: Int? = nil
+    /// GPU indices, or an empty string to explicitly offer CPU only.
+    var gpus: String? = nil
+    var hoursPerDay: Int? = nil
     /// This app's per-run request marker. The worker drains committed answers
     /// when it appears; the path changes for every start.
     var stopFile: String? = nil
+    var pauseFile: String? = nil
 
     /// `cairn work …`, as argv after the binary.
     ///
@@ -38,6 +43,10 @@ struct WorkPlan: Equatable {
                     "--worker", worker, "--heartbeat", "5"]
         if let identity { args += ["--identity", identity] }
         if let stopFile { args += ["--stop-file", stopFile] }
+        if let pauseFile { args += ["--pause-file", pauseFile] }
+        if let threads { args += ["--threads", String(threads)] }
+        if let gpus { args += ["--gpus", gpus.isEmpty ? "none" : gpus] }
+        if let hoursPerDay, hoursPerDay < 24 { args += ["--hours-per-day", String(hoursPerDay)] }
         return args + ["--", solver] + solverArguments
     }
 
@@ -48,6 +57,14 @@ struct WorkPlan: Equatable {
         else { return "The node's address is http://host:port." }
         guard PageRequest.isObjectiveId(objective) else { return "Choose an objective." }
         guard !worker.isEmpty else { return "Give this machine a name." }
+        if let threads, threads < 1 { return "Choose at least one CPU core." }
+        if let hoursPerDay, !(1...24).contains(hoursPerDay) { return "Choose between 1 and 24 hours per day." }
+        if let gpus, !gpus.isEmpty {
+            let indices = gpus.split(separator: ",", omittingEmptySubsequences: false)
+            guard indices.allSatisfy({ UInt32($0) != nil }), Set(indices).count == indices.count else {
+                return "GPU numbers must be unique, separated by commas."
+            }
+        }
         guard !solver.isEmpty else { return "Choose a solver: the program that searches for answers." }
         guard FileManager.default.isExecutableFile(atPath: solver) else {
             return "\(solver) is not a program this Mac can run."
@@ -166,6 +183,9 @@ final class Worker: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var lines: [String] = []
     @Published private(set) var isDraining = false
+    @Published private(set) var isPaused = false
+    @Published private(set) var pauseAcknowledged = false
+    @Published private(set) var isLeaving = false
 
     private var process: Process?
     private var sink: Stderr?
@@ -199,8 +219,12 @@ final class Worker: ObservableObject {
             let cpu = process.map { Self.cpuUsage(root: $0.processIdentifier) }
             let completed = Self.completedRounds(in: lines)
             let roundRate = roundsPerMinute(now: Date(), completed: completed)
-            return ["state": isDraining ? "stopping" : "running", "objective": plan.objective,
+            return ["state": isDraining ? "stopping" : isPaused ? (pauseAcknowledged ? "paused" : "pausing") : "running", "objective": plan.objective,
                     "worker": plan.worker,
+                    "leaving": isLeaving,
+                    "threads": plan.threads as Any? ?? NSNull(),
+                    "gpus": plan.gpus as Any? ?? NSNull(),
+                    "hours_per_day": plan.hoursPerDay as Any? ?? NSNull(),
                     "started_at": ISO8601DateFormatter().string(from: since),
                     "cpu_percent": cpu.map { $0 as Any } ?? NSNull(),
                     "rounds_completed": completed,
@@ -316,6 +340,9 @@ final class Worker: ObservableObject {
         }
         stopping = false
         isDraining = false
+        isPaused = false
+        pauseAcknowledged = false
+        isLeaving = false
         lines = []
         roundSamples = []
         do {
@@ -348,6 +375,51 @@ final class Worker: ObservableObject {
         }
     }
 
+    /// A pause takes effect after the current solver round. Pending reveals
+    /// still flow; the process and its selected objective remain available.
+    func requestPause() -> String? {
+        guard case .running(let plan, _) = state, !isDraining else { return "This work cannot pause now." }
+        guard let path = plan.pauseFile else { return "This worker cannot pause; start a new run from Cairn.app." }
+        if isPaused { return nil }
+        do {
+            try "pause".write(toFile: path, atomically: true, encoding: .utf8)
+            isPaused = true
+            pauseAcknowledged = false
+            return nil
+        } catch {
+            return "Could not pause this work: \(error.localizedDescription)"
+        }
+    }
+
+    func resume() -> String? {
+        guard case .running(let plan, _) = state, isPaused, !isDraining,
+              let path = plan.pauseFile else { return "This work is not paused." }
+        do {
+            try FileManager.default.removeItem(atPath: path)
+            isPaused = false
+            pauseAcknowledged = false
+            return nil
+        } catch {
+            return "Could not resume this work: \(error.localizedDescription)"
+        }
+    }
+
+    /// Leave the selected task after pending answers are revealed. A future
+    /// start opens setup again instead of silently reusing this assignment.
+    func requestExit() -> String? {
+        guard isRunning else { leave(); return nil }
+        if let problem = requestStop() { return problem }
+        isLeaving = true
+        return nil
+    }
+
+    func leave() {
+        guard !isRunning else { return }
+        state = .idle
+        isLeaving = false
+        lines = []
+    }
+
     /// Force the worker down at app quit. The visible Stop button uses
     /// `requestStop()` so pending answers can be revealed first.
     func stop() {
@@ -366,7 +438,11 @@ final class Worker: ObservableObject {
         process = nil
         sink = nil
         if let path = lastPlan?.stopFile { try? FileManager.default.removeItem(atPath: path) }
+        if let path = lastPlan?.pauseFile { try? FileManager.default.removeItem(atPath: path) }
         isDraining = false
+        isPaused = false
+        pauseAcknowledged = false
+        isLeaving = false
         roundSamples = []
         state = .idle
     }
@@ -379,13 +455,24 @@ final class Worker: ObservableObject {
         process = nil
         sink = nil
         if let path = plan?.stopFile { try? FileManager.default.removeItem(atPath: path) }
+        if let path = plan?.pauseFile { try? FileManager.default.removeItem(atPath: path) }
         isDraining = false
+        isPaused = false
+        pauseAcknowledged = false
         roundSamples = []
-        if let plan { state = .exited(plan, status: p.terminationStatus) } else { state = .idle }
+        if isLeaving { state = .idle }
+        else if let plan { state = .exited(plan, status: p.terminationStatus) }
+        else { state = .idle }
+        isLeaving = false
     }
 
     private func refresh() {
         if let sink { lines = sink.snapshot() }
+        if isPaused {
+            pauseAcknowledged = lines.reversed().first {
+                $0.contains("work paused:") || $0.contains("work resumed:")
+            }?.contains("work paused:") ?? false
+        }
     }
 
     nonisolated private static func wait(for p: Process, seconds: Double) -> Bool {

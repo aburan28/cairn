@@ -186,29 +186,24 @@ final class Node: ObservableObject {
         }
         var plan = requested
         plan.stopFile = dataDir.appendingPathComponent("work-stop-\(UUID().uuidString)").path
+        plan.pauseFile = dataDir.appendingPathComponent("work-pause-\(UUID().uuidString)").path
         return worker.start(plan, binary: binary, environment: Self.childEnvironment(settings), logFile: workLogFile)
     }
 
-    /// The reader can select an objective, but only the native app chooses
-    /// the saved executable and arguments. A page never supplies a command.
+    /// The page selects the objective; the native sheet lets the person review
+    /// resources and solver before the app launches anything.
     func startWorkFromPage(objective: String) -> String? {
-        guard let origin = httpOrigin else { return "The node is not running." }
+        guard httpOrigin != nil else { return "The node is not running." }
         guard !worker.isRunning else { return "This Mac is already working. Stop it before changing objectives." }
-        let defaults = UserDefaults.standard
-        let solver = defaults.string(forKey: "workSolver") ?? ""
-        if solver.isEmpty {
-            if sheetIsOpen { return "Close the open Cairn window first, then choose a solver." }
-            work(on: objective)
-            return "Choose a solver in the Work on this Mac window, then press Start."
-        }
-        let savedName = WorkPlan.cleanName(defaults.string(forKey: "workName") ?? "")
-        let plan = WorkPlan(
-            node: origin, objective: objective,
-            worker: savedName.isEmpty ? WorkPlan.defaultName() : savedName,
-            identity: settings.workerIdentity.path, solver: solver,
-            solverArguments: WorkPlan.splitArguments(defaults.string(forKey: "workSolverArguments") ?? "")
-        )
-        return startWork(plan)
+        if sheetIsOpen { return "Close the open Cairn window first." }
+        work(on: objective)
+        return nil
+    }
+
+    func exitWork() -> String? {
+        if let problem = worker.requestExit() { return problem }
+        workObjective = nil
+        return nil
     }
 
     // MARK: finding the binary

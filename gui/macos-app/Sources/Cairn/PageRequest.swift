@@ -47,7 +47,10 @@ enum PageRequest: Equatable {
     /// Local process control stays in the app; the node never accepts it over HTTP.
     case workStatus
     case startWork(objective: String)
+    case pauseWork
+    case resumeWork
     case stopWork
+    case exitWork
 
     static func parse(_ body: Any) -> Result<PageRequest, AIError> {
         guard let object = body as? [String: Any], let kind = object["kind"] as? String else {
@@ -63,6 +66,12 @@ enum PageRequest: Equatable {
             return .success(.startWork(objective: objective))
         case "stop-work":
             return .success(.stopWork)
+        case "pause-work":
+            return .success(.pauseWork)
+        case "resume-work":
+            return .success(.resumeWork)
+        case "exit-work":
+            return .success(.exitWork)
         case "start-dictation":
             return .success(.startDictation)
         case "stop-dictation":

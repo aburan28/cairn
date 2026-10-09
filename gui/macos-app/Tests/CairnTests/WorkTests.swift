@@ -23,6 +23,14 @@ final class WorkTests: XCTestCase {
         let flag = safelyStopped.arguments.firstIndex(of: "--stop-file")
         XCTAssertNotNil(flag)
         if let flag { XCTAssertEqual(safelyStopped.arguments[flag + 1], "/tmp/cairn-stop-unique") }
+        safelyStopped.pauseFile = "/tmp/cairn-pause-unique"
+        safelyStopped.threads = 4
+        safelyStopped.gpus = "0,1"
+        safelyStopped.hoursPerDay = 6
+        XCTAssertTrue(safelyStopped.arguments.contains("--pause-file"))
+        XCTAssertTrue(safelyStopped.arguments.contains("--threads"))
+        XCTAssertTrue(safelyStopped.arguments.contains("--gpus"))
+        XCTAssertTrue(safelyStopped.arguments.contains("--hours-per-day"))
         let unsigned = WorkPlan(node: "http://h:1", objective: objective, worker: "w", identity: nil, solver: "/s")
         XCTAssertEqual(unsigned.arguments, ["work", "--node", "http://h:1", "--objective", objective,
                                           "--worker", "w", "--heartbeat", "5", "--", "/s"])
@@ -47,6 +55,15 @@ final class WorkTests: XCTestCase {
         plan.worker = "w"
         plan.solver = solver.path + ".missing"
         XCTAssertNotNil(plan.problem, "a solver that is not there would fail every round")
+        plan.solver = solver.path
+        plan.threads = 0
+        XCTAssertNotNil(plan.problem)
+        plan.threads = 2
+        plan.gpus = "0,0"
+        XCTAssertNotNil(plan.problem)
+        plan.gpus = "0,1"
+        plan.hoursPerDay = 25
+        XCTAssertNotNil(plan.problem)
     }
 
     func testNamesAreCleanedAsThePageCleansThem() {
@@ -117,6 +134,9 @@ final class WorkTests: XCTestCase {
         XCTAssertEqual(try PageRequest.parse(["kind": "start-work", "objective": objective]).get(),
                        .startWork(objective: objective))
         XCTAssertEqual(try PageRequest.parse(["kind": "stop-work"]).get(), .stopWork)
+        XCTAssertEqual(try PageRequest.parse(["kind": "pause-work"]).get(), .pauseWork)
+        XCTAssertEqual(try PageRequest.parse(["kind": "resume-work"]).get(), .resumeWork)
+        XCTAssertEqual(try PageRequest.parse(["kind": "exit-work"]).get(), .exitWork)
         if case .success = PageRequest.parse(["kind": "start-work", "objective": "--solver /tmp/x"]) {
             XCTFail("a page must not choose an executable")
         }

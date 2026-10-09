@@ -370,7 +370,7 @@ struct SettingsView: View {
             Caption("""
                 Same as "Share this node on my network" below. Each machine opens \
                 Contribute in its own Cairn.app and chooses Work on This Mac… with \
-                this node's address (or runs `cairn work`), and is paid for what the \
+                this node's address, and is paid for what the \
                 checker accepts, like any solver.
                 """)
             Toggle("Relay — let other nodes connect to this one", isOn: relay)
@@ -385,7 +385,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Toggle("Share this node on my network", isOn: $shareHTTP)
             Text(shareHTTP
-                 ? "Other machines on your network can open this node's pages and work its objectives: in their own Cairn.app, Contribute ▸ Work on This Mac… with this node's address, or `cairn work` — the Contribute page here has both. Each machine is paid under its own name; Lead a fleet pays this Mac instead. Anyone on the network can read the log and post answers; nobody can change what has settled."
+                 ? "Other machines on your network can open this node's pages and work its objectives: in their own Cairn.app, open Contribute and set up work with this node's address. Each machine is paid under its own name; Lead a fleet pays this Mac instead. Anyone on the network can read the log and post answers; nobody can change what has settled."
                  : "Only this Mac can open the node's pages or work on it. Turn this on to add machines on your network as workers.")
                 .font(.caption).foregroundStyle(.secondary)
             Toggle("Offline: no internet peers", isOn: $offline)

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Bridge } from "./draft";
-import { readWorkStatus, startWork, stopWork } from "./work-control";
+import { exitWork, pauseWork, readWorkStatus, resumeWork, startWork, stopWork } from "./work-control";
 
 describe("Cairn.app worker bridge", () => {
   it("names only an objective when asking the app to start its saved solver", async () => {
@@ -8,8 +8,11 @@ describe("Cairn.app worker bridge", () => {
     const bridge: Bridge = { postMessage: async (message) => { sent.push(message); return true; } };
     const objective = `sha256:${"ab".repeat(32)}`;
     await startWork(bridge, objective);
+    await pauseWork(bridge);
+    await resumeWork(bridge);
     await stopWork(bridge);
-    expect(sent).toEqual([{ kind: "start-work", objective }, { kind: "stop-work" }]);
+    await exitWork(bridge);
+    expect(sent).toEqual([{ kind: "start-work", objective }, { kind: "pause-work" }, { kind: "resume-work" }, { kind: "stop-work" }, { kind: "exit-work" }]);
   });
 
   it("reads local state and refuses an unknown app reply", async () => {

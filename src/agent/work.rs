@@ -153,6 +153,8 @@ USAGE
     --heartbeat SECONDS  how often to report in while the solver runs (default 30)
     --stop-file PATH     finish the current round and reveal pending answers when
                          this local file appears; for a supervising app
+    --pause-file PATH    finish the current round, then wait while this local file
+                         exists; reveals continue and stop still works
     --device TEXT        what this machine is, for the roster
     --margin SECONDS     post nothing this close to an epoch's end (default 8)
 
@@ -199,6 +201,8 @@ pub struct Options {
     /// A local supervisor's graceful stop request. Unique per run so an old
     /// request cannot stop a new worker with the same name.
     pub stop_file: Option<PathBuf>,
+    /// A local supervisor's reversible pause request, checked between rounds.
+    pub pause_file: Option<PathBuf>,
     pub device: Option<String>,
     pub margin: u64,
     /// Threads the solver is given, through the environment variables the
@@ -626,6 +630,7 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
     let mut rounds = None;
     let mut heartbeat = 30u64;
     let mut stop_file = None;
+    let mut pause_file = None;
     let mut device = None;
     let mut margin = DEFAULT_MARGIN_SECONDS;
     let mut threads = None;
@@ -658,6 +663,7 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
             "--rounds" => rounds = Some(number(value()?)?),
             "--heartbeat" => heartbeat = number(value()?)?,
             "--stop-file" => stop_file = Some(PathBuf::from(value()?.as_str())),
+            "--pause-file" => pause_file = Some(PathBuf::from(value()?.as_str())),
             "--device" => device = Some(value()?.clone()),
             "--margin" => margin = number(value()?)?,
             "--threads" => threads = Some(number(value()?)?),
@@ -755,6 +761,7 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
         rounds,
         heartbeat: Duration::from_secs(heartbeat),
         stop_file,
+        pause_file,
         device,
         margin,
         threads,
@@ -892,6 +899,7 @@ struct Worker {
     budget: Option<Budget>,
     /// Whether the pause for a spent budget has been said already today.
     paused_said: bool,
+    manual_paused_said: bool,
     /// Present only for a named background worker. Its stop request never
     /// interrupts a commitment: the loop drains reveals before it exits.
     control: Option<Control>,
@@ -917,6 +925,7 @@ impl Worker {
             rounds: 0,
             budget: options.hours_per_day.map(Budget::hours),
             paused_said: false,
+            manual_paused_said: false,
             control: None,
             options,
         })
@@ -964,6 +973,20 @@ impl Worker {
                 }
                 self.sleep_to_next_epoch();
                 continue;
+            }
+            if self.pausing_requested() {
+                if !self.manual_paused_said {
+                    say("work paused: waiting to resume; pending reveals continue");
+                    self.manual_paused_said = true;
+                }
+                // Keep revealing committed answers while no new slice is taken.
+                // A stop request is checked first, so a paused worker can leave.
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+            if self.manual_paused_said {
+                say("work resumed: taking the next slice");
+                self.manual_paused_said = false;
             }
             if let Some(budget) = &mut self.budget {
                 let now = now_seconds();
@@ -1098,6 +1121,13 @@ impl Worker {
                 .stop_file
                 .as_ref()
                 .is_some_and(|path| path.exists())
+    }
+
+    fn pausing_requested(&self) -> bool {
+        self.options
+            .pause_file
+            .as_ref()
+            .is_some_and(|path| path.exists())
     }
 
     /// Run the solver once over `assignment`, heartbeating while it runs.
@@ -1511,6 +1541,28 @@ mod tests {
         fs::write(&marker, b"stop").unwrap();
         assert!(worker.stopping_requested());
         fs::remove_file(&marker).unwrap();
+    }
+
+    #[test]
+    fn pause_can_resume_and_stop_takes_precedence() {
+        let marker = std::env::temp_dir().join(format!("cairn-work-pause-{}", nonce()));
+        let stop = std::env::temp_dir().join(format!("cairn-work-stop-{}", nonce()));
+        let options = parse(&args(&format!(
+            "--node http://h:1 --objective sha256:ab --worker w --pause-file {} --stop-file {} -- ./solve",
+            marker.display(), stop.display()
+        )))
+        .unwrap()
+        .unwrap();
+        let worker = Worker::new(options).unwrap();
+        assert!(!worker.pausing_requested());
+        fs::write(&marker, b"pause").unwrap();
+        assert!(worker.pausing_requested());
+        assert!(!worker.stopping_requested());
+        fs::write(&stop, b"stop").unwrap();
+        assert!(worker.stopping_requested());
+        fs::remove_file(&marker).unwrap();
+        assert!(!worker.pausing_requested());
+        fs::remove_file(&stop).unwrap();
     }
 
     #[test]

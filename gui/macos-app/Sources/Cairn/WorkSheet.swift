@@ -26,18 +26,34 @@ struct WorkSheet: View {
     @AppStorage("workSolver") private var solver = ""
     @AppStorage("workSolverArguments") private var solverArguments = ""
     @AppStorage("workName") private var name = ""
+    @AppStorage("workThreads") private var threads = max(1, ProcessInfo.processInfo.activeProcessorCount)
+    @AppStorage("workGPUEnabled") private var gpuEnabled = false
+    @AppStorage("workGPUNumbers") private var gpuNumbers = "0"
+    @AppStorage("workHoursPerDay") private var hoursPerDay = 24
+    @AppStorage("workOrbitBatch") private var orbitBatch = 4
+    @State private var showSolverOptions = false
+    @State private var useCustomSolver = false
+
+    private var bundledWork: (solver: String, arguments: [String])? {
+        let environment = ProcessInfo.processInfo.environment
+        let configured = environment["CAIRN_PYTHON"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let directories = ["/opt/homebrew/bin", "/usr/local/bin"]
+            + Toolchains.searchPath(environment) + ["/usr/bin"]
+        let candidates = configured.isEmpty ? directories.map { URL(fileURLWithPath: $0).appendingPathComponent("python3") }
+            : configured.contains("/") ? [URL(fileURLWithPath: configured)]
+            : directories.map { URL(fileURLWithPath: $0).appendingPathComponent(configured) }
+        let python = candidates.first {
+            FileManager.default.isExecutableFile(atPath: $0.path) && !Toolchains.isShim($0)
+        }
+        return GuiTasks.bundledWork(for: objective, python: python, count: orbitBatch)
+    }
+
+    private var usesBundledWork: Bool { bundledWork != nil && !useCustomSolver }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Label("Work on this Mac", systemImage: "cpu").font(.headline)
-            Text("""
-                Each round, this Mac takes its slice of the objective's search and runs your \
-                solver on it: the slice arrives as one line of JSON on the solver's stdin, and \
-                every line of JSON it prints is a candidate answer. Cairn commits each one, \
-                reveals it after the epoch turns, and reports in so this Mac shows as \
-                *working now* on the challenge page. Only the objective's pinned checker \
-                decides what is paid; nothing a solver prints is graded here.
-                """)
+            Text("Choose an objective and the resources this Mac may use. Cairn assigns a new slice each round and keeps pending answers moving while paused or stopping. The objective's checker decides what is paid.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -54,15 +70,31 @@ struct WorkSheet: View {
 
             HStack {
                 if worker.isRunning {
-                    Button(worker.isDraining ? "Finishing pending answers…" : "Stop safely") {
-                        problem = worker.requestStop()
+                    if worker.isPaused {
+                        Button("Resume") { problem = worker.resume() }
+                            .disabled(worker.isDraining)
+                    } else {
+                        Button("Pause") { problem = worker.requestPause() }
+                            .disabled(worker.isDraining)
                     }
-                    .disabled(worker.isDraining)
+                    Button(worker.isDraining ? "Finishing pending answers…" : "Stop") {
+                        problem = worker.requestStop()
+                    }.disabled(worker.isDraining)
+                    Button("Exit task") {
+                        problem = node.exitWork()
+                        if problem == nil { objective = "" }
+                    }.disabled(worker.isLeaving)
                 } else {
                     Button("Start") { start() }
                         .keyboardShortcut(.defaultAction)
                         .disabled(startProblem != nil)
-                        .help(startProblem ?? "Start cairn work on this Mac")
+                        .help(startProblem ?? "Start this objective on this Mac")
+                    if worker.lastPlan != nil {
+                        Button("Exit task") {
+                            problem = node.exitWork()
+                            if problem == nil { objective = "" }
+                        }
+                    }
                 }
                 Button("Show Log") {
                     NSWorkspace.shared.open(node.workLogFile)
@@ -130,22 +162,78 @@ struct WorkSheet: View {
             GridRow {
                 Text("Solver").gridColumnAlignment(.trailing)
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack {
-                        TextField("A program on this Mac", text: $solver)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.body.monospaced())
-                            .disabled(worker.isRunning)
-                        Button("Choose…") { chooseSolver() }
-                            .disabled(worker.isRunning)
-                    }
-                    TextField("Its arguments, if any", text: $solverArguments)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.body.monospaced())
+                    if bundledWork != nil {
+                        Picker("Search program", selection: $useCustomSolver) {
+                            Text("Included orbit search").tag(false)
+                            Text("Choose another program").tag(true)
+                        }
+                        .labelsHidden()
                         .disabled(worker.isRunning)
-                    Text("Run once per round with the slice on stdin; prints candidate answers, one JSON object per line. Exit 0 with nothing printed means nothing this round.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if usesBundledWork {
+                        Stepper("\(orbitBatch) orbits per round", value: $orbitBatch, in: 1...16)
+                            .disabled(worker.isRunning)
+                        Text("Ready to run from this app. No program or checkout to choose.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        HStack {
+                            TextField("A program on this Mac", text: $solver)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.body.monospaced())
+                                .disabled(worker.isRunning)
+                            Button("Choose…") { chooseSolver() }
+                                .disabled(worker.isRunning)
+                        }
+                        DisclosureGroup("Advanced solver options", isExpanded: $showSolverOptions) {
+                            TextField("Options for this solver", text: $solverArguments)
+                                .textFieldStyle(.roundedBorder)
+                                .disabled(worker.isRunning)
+                        }
+                        Text("Choose the search program installed on this Mac. Cairn runs it for each assigned slice.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
+            }
+            GridRow {
+                Text("CPU cores").gridColumnAlignment(.trailing)
+                if usesBundledWork {
+                    Text("1 core for the included search").foregroundStyle(.secondary)
+                } else {
+                    Stepper("Offer \(threads) of \(ProcessInfo.processInfo.activeProcessorCount) CPU threads", value: $threads,
+                            in: 1...max(1, ProcessInfo.processInfo.activeProcessorCount))
+                        .disabled(worker.isRunning)
+                }
+            }
+            GridRow {
+                Text("GPU").gridColumnAlignment(.trailing)
+                if usesBundledWork {
+                    Text("CPU search; choose another program for GPU work")
+                        .foregroundStyle(.secondary)
+                } else {
+                    HStack {
+                        Toggle("Allow GPU use", isOn: $gpuEnabled)
+                            .disabled(worker.isRunning)
+                        if gpuEnabled {
+                            TextField("Device numbers, e.g. 0,1", text: $gpuNumbers)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 170)
+                                .disabled(worker.isRunning)
+                        }
+                    }
+                }
+            }
+            GridRow {
+                Text("Daily limit").gridColumnAlignment(.trailing)
+                Stepper(hoursPerDay == 24 ? "Run any time" : "Up to \(hoursPerDay) hours per UTC day",
+                        value: $hoursPerDay, in: 1...24)
+                    .disabled(worker.isRunning)
+            }
+            GridRow {
+                Text("")
+                Text("CPU and GPU choices are passed to the solver; the solver must honor them. The daily time limit is enforced between rounds.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -156,7 +244,7 @@ struct WorkSheet: View {
             EmptyView()
         case .running(let plan, let since):
             VStack(alignment: .leading, spacing: 6) {
-                Label("\(worker.isDraining ? "Finishing pending answers" : "Working") as \(plan.worker) since \(since.formatted(date: .omitted, time: .shortened)). Paid to this Mac's worker key.",
+                Label("\(worker.isDraining ? "Finishing pending answers" : worker.isPaused ? (worker.pauseAcknowledged ? "Paused" : "Pausing after this round") : "Working") as \(plan.worker) since \(since.formatted(date: .omitted, time: .shortened)). Paid to this Mac's worker key.",
                       systemImage: "circle.fill")
                     .font(.callout).foregroundStyle(.green)
                 log
@@ -185,13 +273,17 @@ struct WorkSheet: View {
     }
 
     private var plan: WorkPlan {
-        WorkPlan(
+        let included = usesBundledWork ? bundledWork : nil
+        return WorkPlan(
             node: address.trimmingCharacters(in: .whitespacesAndNewlines),
             objective: objective,
             worker: WorkPlan.cleanName(name.isEmpty ? WorkPlan.defaultName() : name),
             identity: node.settings.workerIdentity.path,
-            solver: solver.trimmingCharacters(in: .whitespacesAndNewlines),
-            solverArguments: WorkPlan.splitArguments(solverArguments)
+            solver: included?.solver ?? solver.trimmingCharacters(in: .whitespacesAndNewlines),
+            solverArguments: included?.arguments ?? WorkPlan.splitArguments(solverArguments),
+            threads: included == nil ? threads : 1,
+            gpus: included == nil && gpuEnabled ? gpuNumbers.trimmingCharacters(in: .whitespacesAndNewlines) : "",
+            hoursPerDay: hoursPerDay
         )
     }
 
@@ -205,6 +297,11 @@ struct WorkSheet: View {
             objective = plan.objective
             if name.isEmpty { name = plan.worker }
             if solver.isEmpty { solver = plan.solver }
+            threads = plan.threads ?? threads
+            gpuEnabled = !(plan.gpus ?? "").isEmpty
+            if let gpus = plan.gpus, !gpus.isEmpty { gpuNumbers = gpus }
+            hoursPerDay = plan.hoursPerDay ?? 24
+            if let included = bundledWork { useCustomSolver = plan.solverArguments.first != included.arguments.first }
             return
         }
         if address.isEmpty, let own = node.httpOrigin { address = own }

@@ -21,7 +21,10 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     var onOpen: (@MainActor (PageSheet, String?) -> String?)?
     var onWorkStatus: (@MainActor () -> [String: Any])?
     var onStartWork: (@MainActor (String) -> String?)?
+    var onPauseWork: (@MainActor () -> String?)?
+    var onResumeWork: (@MainActor () -> String?)?
     var onStopWork: (@MainActor () -> String?)?
+    var onExitWork: (@MainActor () -> String?)?
     let pageDictation = PageDictation()
     fileprivate var pageDictationActive = false
     private let bridge: PageBridge
@@ -165,11 +168,11 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
 
     fileprivate func confirmWork(_ action: String) -> Bool {
         let prompt = NSAlert()
-        prompt.messageText = action == "start" ? "Start working on this Mac?" : "Stop working on this Mac?"
-        prompt.informativeText = action == "start"
-            ? "Cairn will run the solver you chose on this Mac. It uses CPU or GPU power until you stop it."
-            : "Cairn will finish the current round, reveal any pending answers, then stop. This can take another epoch."
-        prompt.addButton(withTitle: action == "start" ? "Start Work" : "Stop Work")
+        prompt.messageText = action == "exit" ? "Exit this task?" : "Stop working on this Mac?"
+        prompt.informativeText = action == "exit"
+            ? "Cairn will finish the current round, reveal pending answers, and release this task. This can take another epoch."
+            : "Cairn will finish the current round and reveal pending answers before stopping. This can take another epoch."
+        prompt.addButton(withTitle: action == "exit" ? "Exit Task" : "Stop Work")
         prompt.addButton(withTitle: "Cancel")
         return prompt.runModal() == .alertFirstButtonReturn
     }
@@ -240,13 +243,25 @@ final class PageBridge: NSObject, WKScriptMessageHandlerWithReply {
             return (status(), nil)
         case .success(.startWork(let objective)):
             guard let start = browser.onStartWork else { return (nil, "Work cannot start here.") }
-            guard browser.confirmWork("start") else { return (nil, "Cancelled.") }
             if let refusal = start(objective) { return (nil, refusal) }
+            return (true, nil)
+        case .success(.pauseWork):
+            guard let pause = browser.onPauseWork else { return (nil, "Work cannot pause here.") }
+            if let refusal = pause() { return (nil, refusal) }
+            return (true, nil)
+        case .success(.resumeWork):
+            guard let resume = browser.onResumeWork else { return (nil, "Work cannot resume here.") }
+            if let refusal = resume() { return (nil, refusal) }
             return (true, nil)
         case .success(.stopWork):
             guard let stop = browser.onStopWork else { return (nil, "Work cannot stop here.") }
             guard browser.confirmWork("stop") else { return (nil, "Cancelled.") }
             if let refusal = stop() { return (nil, refusal) }
+            return (true, nil)
+        case .success(.exitWork):
+            guard let exit = browser.onExitWork else { return (nil, "This task cannot be exited here.") }
+            guard browser.confirmWork("exit") else { return (nil, "Cancelled.") }
+            if let refusal = exit() { return (nil, refusal) }
             return (true, nil)
         case .success(.startDictation):
             guard browser.isLocalChallengePage else {
