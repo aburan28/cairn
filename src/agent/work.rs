@@ -17,7 +17,8 @@
 //! Each round the solver is started once, with this round's assignment as one
 //! line of JSON on stdin and in `CAIRN_ASSIGNMENT`, plus `CAIRN_NODE`,
 //! `CAIRN_OBJECTIVE`, `CAIRN_WORKER`, `CAIRN_EPOCH` and
-//! `CAIRN_EPOCH_ENDS_IN` (seconds). It prints zero or more candidate
+//! `CAIRN_EPOCH_ENDS_IN` (seconds) and `CAIRN_ROUND` (zero-based, per process).
+//! It prints zero or more candidate
 //! artifacts on stdout, **one JSON object per line**, and exits. Exit 0 with
 //! no output means "nothing this round" and is not an error. Its stderr is
 //! passed through. A non-zero exit discards that round's output: a solver
@@ -50,7 +51,11 @@
 //! can see which machines are on it.
 
 use std::collections::BTreeMap;
+use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -120,6 +125,13 @@ cairn work — put this machine to work on one objective, with your own solver
 USAGE
     cairn work --node URL --objective ID --worker NAME [options] -- SOLVER [ARGS]...
     cairn work --fleet FILE --objective ID [--worker SUFFIX] [options] -- SOLVER [ARGS]...
+    cairn work start --name NAME [--state-dir DIR] <worker options> -- SOLVER [ARGS]...
+    cairn work status --name NAME [--state-dir DIR]
+    cairn work stop --name NAME [--state-dir DIR]
+
+    A named worker runs in the background. Stop finishes its current solver round
+    and reveals committed candidates before exiting; status shows when it is
+    draining. Its state and log are under ~/.cairn/work/NAME by default.
 
     --node URL           the node's HTTP address, e.g. http://192.168.1.20:8080
     --objective ID       the objective to work (sha256:…)
@@ -155,7 +167,7 @@ OFFERING COMPUTE
 THE SOLVER
     Started once per round. Gets the assignment as one line of JSON on stdin and in
     $CAIRN_ASSIGNMENT, plus $CAIRN_NODE $CAIRN_OBJECTIVE $CAIRN_WORKER $CAIRN_EPOCH
-    $CAIRN_EPOCH_ENDS_IN. Prints candidate artifacts on stdout, one JSON object per
+    $CAIRN_EPOCH_ENDS_IN $CAIRN_ROUND. Prints candidate artifacts on stdout, one JSON object per
     line, and exits 0. No output is fine. A non-zero exit discards the round.
 
     Every candidate is committed this epoch and revealed after the epoch turns; the
@@ -196,6 +208,15 @@ pub struct Options {
 
 /// Entry point: `cairn work ARGS…`. Returns the process exit code.
 pub fn main(args: Vec<String>) -> i32 {
+    if let Some((verb, tail)) = args.split_first() {
+        match verb.as_str() {
+            "start" => return managed_start(tail),
+            "status" => return managed_status(tail),
+            "stop" => return managed_stop(tail),
+            "__managed" => return managed_run(tail),
+            _ => {}
+        }
+    }
     let options = match parse(&args) {
         Ok(Some(options)) => options,
         Ok(None) => {
@@ -207,7 +228,26 @@ pub fn main(args: Vec<String>) -> i32 {
             return 2;
         }
     };
-    match Worker::new(options).and_then(|mut worker| worker.run()) {
+    run_options(options, None)
+}
+
+fn run_options(options: Options, control: Option<Control>) -> i32 {
+    let mut worker = match Worker::new(options) {
+        Ok(worker) => worker,
+        Err(error) => {
+            eprintln!("cairn work: {error:?}");
+            return 2;
+        }
+    };
+    worker.control = control;
+    let result = worker.run();
+    if let Some(control) = &worker.control {
+        let phase = if result.is_ok() { "done" } else { "failed" };
+        if let Err(error) = control.phase(phase) {
+            eprintln!("cairn work: could not update worker state: {error}");
+        }
+    }
+    match result {
         Ok(()) => 0,
         Err(WorkError::Solver(message)) => {
             eprintln!("cairn work: {message}");
@@ -222,6 +262,346 @@ pub fn main(args: Vec<String>) -> i32 {
             3
         }
     }
+}
+
+/// A named worker's files are local process control, never network records.
+/// The random token makes a delayed child or a stale stop request harmless
+/// after a worker with the same name has been restarted.
+struct Control {
+    dir: PathBuf,
+    token: String,
+}
+
+impl Control {
+    fn state_path(&self) -> PathBuf {
+        self.dir.join("state.json")
+    }
+
+    fn read(&self) -> Result<Value, String> {
+        let path = self.state_path();
+        let data = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Value::from_json(&data).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    fn phase(&self, phase: &str) -> Result<(), String> {
+        let mut state = self.read()?;
+        if state.get("token").and_then(Value::as_str) != Some(self.token.as_str()) {
+            return Err("worker control was replaced while this process was running".into());
+        }
+        let Value::Object(fields) = &mut state else {
+            return Err("worker state is not a JSON object".into());
+        };
+        fields.insert("phase".into(), Value::string(phase));
+        fields.insert("updated_at".into(), Value::string(timestamp()));
+        write_state(&self.state_path(), &state)
+    }
+
+    fn stopping(&self) -> bool {
+        fs::read_to_string(self.dir.join("stop")).is_ok_and(|token| token.trim() == self.token)
+    }
+}
+
+fn write_state(path: &Path, state: &Value) -> Result<(), String> {
+    let temporary = path.with_extension(format!("json.{}", std::process::id()));
+    fs::write(&temporary, state.canonical_string())
+        .and_then(|()| fs::rename(&temporary, path))
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn managed_args(args: &[String]) -> Result<(String, PathBuf, Vec<String>), String> {
+    let mut name = None;
+    let mut state_dir = None;
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let flag = &args[i];
+        if flag == "--" {
+            rest.extend_from_slice(&args[i..]);
+            break;
+        }
+        if flag == "--name" || flag == "--state-dir" {
+            let value = args
+                .get(i + 1)
+                .ok_or_else(|| format!("{flag} needs a value"))?;
+            if flag == "--name" {
+                name = Some(value.clone());
+            } else {
+                state_dir = Some(PathBuf::from(value));
+            }
+            i += 2;
+        } else {
+            rest.push(flag.clone());
+            i += 1;
+        }
+    }
+    let name: String = name.ok_or("--name is required")?;
+    if name.len() > 64
+        || name == "."
+        || name == ".."
+        || name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return Err("--name needs 1-64 letters, digits, dots, dashes or underscores".into());
+    }
+    let root = state_dir
+        .or_else(|| std::env::var_os("CAIRN_WORK_STATE_DIR").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cairn/work")))
+        .ok_or("set --state-dir or HOME for managed work")?;
+    Ok((name, root, rest))
+}
+
+fn control_error(error: String) -> i32 {
+    eprintln!("cairn work: {error}");
+    2
+}
+
+fn live_pid(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    Command::new("/bin/kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                // A sandboxed caller may not inspect another process even
+                // though it is alive. Treat that as busy: archiving its state
+                // and starting a second worker would be the harmful guess.
+                || String::from_utf8_lossy(&output.stderr).contains("Operation not permitted")
+        })
+}
+
+fn managed_start(args: &[String]) -> i32 {
+    let (name, root, worker_args) = match managed_args(args) {
+        Ok(parts) => parts,
+        Err(error) => return control_error(error),
+    };
+    let options = match parse(&worker_args) {
+        Ok(Some(options)) => options,
+        Ok(None) => {
+            print!("{USAGE}");
+            return 0;
+        }
+        Err(error) => return control_error(error),
+    };
+    if let Err(error) = DirBuilder::new().recursive(true).mode(0o700).create(&root) {
+        return control_error(format!("{}: {error}", root.display()));
+    }
+    let root = match root.canonicalize() {
+        Ok(root) => root,
+        Err(error) => return control_error(format!("{}: {error}", root.display())),
+    };
+    let dir = root.join(&name);
+    if dir.exists() {
+        let old = Control {
+            dir: dir.clone(),
+            token: String::new(),
+        };
+        let previous = match old.read() {
+            Ok(previous) => previous,
+            Err(error) => return control_error(format!("cannot reuse {name}: {error}")),
+        };
+        if previous
+            .get("pid")
+            .and_then(Value::as_u64)
+            .is_some_and(|pid| u32::try_from(pid).is_ok_and(live_pid))
+        {
+            return control_error(format!(
+                "{name} is already running; use `cairn work status --name {name}`"
+            ));
+        }
+        let archive = root.join(format!("{name}.old.{}", nonce()));
+        if let Err(error) = fs::rename(&dir, &archive) {
+            return control_error(format!("cannot archive previous {name} state: {error}"));
+        }
+    }
+    if let Err(error) = DirBuilder::new().mode(0o700).create(&dir) {
+        return control_error(format!("{}: {error}", dir.display()));
+    }
+    let log_path = dir.join("worker.log");
+    let log = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&log_path)
+    {
+        Ok(log) => log,
+        Err(error) => return control_error(format!("{}: {error}", log_path.display())),
+    };
+    let stderr = match log.try_clone() {
+        Ok(stderr) => stderr,
+        Err(error) => return control_error(format!("cannot open worker log: {error}")),
+    };
+    let token = nonce();
+    let binary = match std::env::current_exe() {
+        Ok(binary) => binary,
+        Err(error) => return control_error(format!("cannot locate cairn binary: {error}")),
+    };
+    let mut child = match Command::new(binary)
+        .arg("work")
+        .arg("__managed")
+        .arg(&name)
+        .arg(&root)
+        .arg(&token)
+        .args(&worker_args)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => return control_error(format!("cannot start worker: {error}")),
+    };
+    let control = Control { dir, token };
+    let state = Value::object([
+        ("name", Value::string(name.clone())),
+        ("token", Value::string(control.token.clone())),
+        ("pid", Value::Int(i128::from(child.id()))),
+        ("node", Value::string(options.node.as_str())),
+        ("objective", Value::string(options.objective)),
+        ("worker", Value::string(options.worker)),
+        ("phase", Value::string("starting")),
+        ("updated_at", Value::string(timestamp())),
+    ]);
+    if let Err(error) = write_state(&control.state_path(), &state) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return control_error(error);
+    }
+    println!(
+        "started {name} (pid {}, objective {}); log {}",
+        child.id(),
+        state
+            .get("objective")
+            .and_then(Value::as_str)
+            .unwrap_or("?"),
+        log_path.display()
+    );
+    0
+}
+
+fn managed_run(args: &[String]) -> i32 {
+    if args.len() < 4 {
+        return control_error("invalid managed worker invocation".into());
+    }
+    let control = Control {
+        dir: PathBuf::from(&args[1]).join(&args[0]),
+        token: args[2].clone(),
+    };
+    // The parent creates the state after spawning this child. Wait for it,
+    // and refuse a stale child if another start replaced its token or PID.
+    let mut valid = false;
+    for _ in 0..100 {
+        if let Ok(state) = control.read() {
+            valid = state.get("token").and_then(Value::as_str) == Some(control.token.as_str())
+                && state.get("pid").and_then(Value::as_u64) == Some(u64::from(std::process::id()));
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if !valid {
+        return control_error("managed worker state was not initialized by its parent".into());
+    }
+    let options = match parse(&args[3..]) {
+        Ok(Some(options)) => options,
+        Ok(None) => return control_error("managed worker needs solver options".into()),
+        Err(error) => return control_error(error),
+    };
+    if let Err(error) = control.phase("running") {
+        return control_error(error);
+    }
+    run_options(options, Some(control))
+}
+
+fn managed_status(args: &[String]) -> i32 {
+    let (name, root, rest) = match managed_args(args) {
+        Ok(parts) => parts,
+        Err(error) => return control_error(error),
+    };
+    if !rest.is_empty() {
+        return control_error("status takes only --name and --state-dir".into());
+    }
+    let dir = root.join(&name);
+    let control = Control {
+        dir,
+        token: String::new(),
+    };
+    let state = match control.read() {
+        Ok(state) => state,
+        Err(error) => return control_error(error),
+    };
+    let pid = state
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0);
+    let phase = state
+        .get("phase")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let token = state.get("token").and_then(Value::as_str).unwrap_or("");
+    let stopping = fs::read_to_string(control.dir.join("stop")).is_ok_and(|v| v.trim() == token);
+    let condition = if live_pid(pid) {
+        if stopping {
+            "stopping"
+        } else {
+            phase
+        }
+    } else if phase == "done" || phase == "failed" {
+        phase
+    } else {
+        "stale"
+    };
+    println!(
+        "{name}: {condition}; objective {}; worker {}; pid {pid}; log {}",
+        state
+            .get("objective")
+            .and_then(Value::as_str)
+            .unwrap_or("?"),
+        state.get("worker").and_then(Value::as_str).unwrap_or("?"),
+        control.dir.join("worker.log").display()
+    );
+    0
+}
+
+fn managed_stop(args: &[String]) -> i32 {
+    let (name, root, rest) = match managed_args(args) {
+        Ok(parts) => parts,
+        Err(error) => return control_error(error),
+    };
+    if !rest.is_empty() {
+        return control_error("stop takes only --name and --state-dir".into());
+    }
+    let control = Control {
+        dir: root.join(&name),
+        token: String::new(),
+    };
+    let state = match control.read() {
+        Ok(state) => state,
+        Err(error) => return control_error(error),
+    };
+    let pid = state
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0);
+    if !live_pid(pid) {
+        return control_error(format!(
+            "{name} is not running; inspect `cairn work status --name {name}`"
+        ));
+    }
+    let token = state.get("token").and_then(Value::as_str).unwrap_or("");
+    if token.is_empty() {
+        return control_error("worker state has no control token".into());
+    }
+    if let Err(error) = fs::write(control.dir.join("stop"), token) {
+        return control_error(format!("cannot stop {name}: {error}"));
+    }
+    println!("stopping {name}: finishing the current round and pending reveals; use `cairn work status --name {name}` to watch");
+    0
 }
 
 /// `Ok(None)` is `--help`.
@@ -504,6 +884,9 @@ struct Worker {
     budget: Option<Budget>,
     /// Whether the pause for a spent budget has been said already today.
     paused_said: bool,
+    /// Present only for a named background worker. Its stop request never
+    /// interrupts a commitment: the loop drains reveals before it exits.
+    control: Option<Control>,
 }
 
 impl Worker {
@@ -526,6 +909,7 @@ impl Worker {
             rounds: 0,
             budget: options.hours_per_day.map(Budget::hours),
             paused_said: false,
+            control: None,
             options,
         })
     }
@@ -556,7 +940,13 @@ impl Worker {
         loop {
             self.reveal_due()?;
             let more_rounds = self.options.rounds.is_none_or(|limit| self.rounds < limit);
-            if !more_rounds {
+            let stopping = self.control.as_ref().is_some_and(Control::stopping);
+            if !more_rounds || stopping {
+                if stopping {
+                    if let Some(control) = &self.control {
+                        control.phase("draining").map_err(WorkError::Solver)?;
+                    }
+                }
                 if self.pending.is_empty() {
                     say(&format!(
                         "done: {} round(s), {} committed, {} revealed",
@@ -583,7 +973,13 @@ impl Worker {
                     // reveal is due one epoch later, and an unrevealed
                     // commitment is never paid.
                     let wait = Budget::resumes_in(now).min(self.seconds_left() + 1);
-                    thread::sleep(Duration::from_secs(wait));
+                    // A managed worker must notice stop even when its daily
+                    // budget would otherwise leave it asleep until midnight.
+                    thread::sleep(Duration::from_secs(if self.control.is_some() {
+                        wait.min(1)
+                    } else {
+                        wait
+                    }));
                     continue;
                 }
                 if self.paused_said {
@@ -698,6 +1094,7 @@ impl Worker {
             .env("CAIRN_WORKER", &self.options.worker)
             .env("CAIRN_EPOCH", epoch.to_string())
             .env("CAIRN_EPOCH_ENDS_IN", ends_in.to_string())
+            .env("CAIRN_ROUND", self.rounds.to_string())
             .env("CAIRN_ASSIGNMENT", &line);
         for (name, value) in offer_environment(self.options.threads, self.options.gpus.as_deref()) {
             command.env(name, value);

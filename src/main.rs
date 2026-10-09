@@ -4099,6 +4099,11 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      slice, heartbeats, commits and reveals what the solver prints; any OS",
     );
+    say(out, "  work start|status|stop --name NAME ...");
+    say(
+        out,
+        "      manage a named background contribution on this machine",
+    );
     say(out, "  agent <command> ...");
     say(
         out,

@@ -138,4 +138,40 @@ for line in sys.stdin:
 fi
 echo "  garage was paid $PAID"
 
+rule "a managed worker stops after its current round and drains its commitment"
+# Begin just after an epoch opens so its four-second round commits before the
+# boundary. Stop while the solver is active, then require the reveal to land.
+sleep "$(python3 -c 'import os,time; n=int(os.environ["CAIRN_EPOCH_SECONDS"]); print(n - time.time() % n + 0.2)')"
+"$RUST" work start --name demo --state-dir "$WORK/managed" \
+  --node "$BASE" --objective "$OID" --worker managed-demo --heartbeat 1 \
+  -- "$WORK/solver.sh" >"$WORK/start.out"
+grep -q 'started demo' "$WORK/start.out" || fail "managed worker did not start"
+for _ in $(seq 1 40); do
+  STATUS_LINE=$("$RUST" work status --name demo --state-dir "$WORK/managed")
+  case "$STATUS_LINE" in *'demo: running;'*) break ;; esac
+  sleep 0.1
+done
+case "$STATUS_LINE" in *'demo: running;'*) ;; *) fail "managed worker did not report running" ;; esac
+LIVE=0
+for _ in $(seq 1 30); do
+  LIVE=$(curl -s "$BASE/progress/$OID" | python3 -c '
+import json,sys
+workers=json.load(sys.stdin)["reported"]["workers"]
+print(sum(1 for w in workers if w["worker"]=="managed-demo" and w["status"]=="live"))')
+  [ "$LIVE" = "1" ] && break
+  sleep 0.1
+done
+[ "$LIVE" = "1" ] || fail "managed worker never started its solver"
+"$RUST" work stop --name demo --state-dir "$WORK/managed" >"$WORK/stop.out"
+grep -q 'stopping demo' "$WORK/stop.out" || fail "managed worker did not accept stop"
+for _ in $(seq 1 400); do
+  STATUS_LINE=$("$RUST" work status --name demo --state-dir "$WORK/managed")
+  case "$STATUS_LINE" in *'demo: done;'*) break ;; esac
+  sleep 0.1
+done
+case "$STATUS_LINE" in *'demo: done;'*) ;; *) fail "managed worker did not stop" ;; esac
+grep -q 'committed a candidate' "$WORK/managed/demo/worker.log" || fail "managed worker lost its round"
+grep -q 'revealed the candidate' "$WORK/managed/demo/worker.log" || fail "managed stop stranded a commitment"
+echo "  $STATUS_LINE"
+
 printf '\n\033[32mok\033[0m: a worker that shares nothing with the node but its address took work, showed up, and was paid\n'
