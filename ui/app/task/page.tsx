@@ -360,7 +360,7 @@ function Dashboard({
         <Stat
           label="Live search rate"
           value={rate && rate > 0 ? formatRate(rate) : "—"}
-          from={rate && rate > 0 ? "Across workers reporting now" : "Waiting for a measured worker report"}
+          from={rate && rate > 0 ? "Live worker reports" : "Awaiting measured rate"}
         />
         <Stat
           label={piecework ? "Reward remaining" : "Objective reward"}
