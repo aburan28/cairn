@@ -8,11 +8,9 @@ import {
   type WorkerRow,
   NODE_URL,
   ObjectiveNotFound,
-  RouteMissing,
   amount,
   assignedBins,
   collisionOdds,
-  coverageFraction,
   denseHours,
   etaSeconds,
   fetchProgress,
@@ -30,10 +28,11 @@ import {
 import { type SearchJob, expectedSteps, expectedUnits, jobFor, stepsPerUnit } from "@/lib/jobs";
 import { fetchObjective } from "@/lib/frontier";
 import { resolveNode } from "@/lib/site";
+import { goalSlug } from "@/lib/title";
 import {
   Badge,
   Box,
-  CopyButton,
+  Disclosure,
   EmptyState,
   Hash,
   MemberBadge,
@@ -91,7 +90,6 @@ function Task() {
   const [base, setBase] = useState(NODE_URL);
   const [progress, setProgress] = useState<ProgressResponse | null>(null);
   const [verifier, setVerifier] = useState<Record<string, unknown> | null>(null);
-  const [statement, setStatement] = useState<string>("");
   const [funder, setFunder] = useState<string>("");
   const [reward, setReward] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
@@ -120,7 +118,6 @@ function Task() {
         setProgress(next);
         if (record) {
           setVerifier((record.record.verifier as Record<string, unknown>) ?? null);
-          setStatement(record.record.statement);
           setFunder(record.record.funder);
           setReward(record.record.reward);
         }
@@ -192,14 +189,7 @@ function Task() {
     );
   }
 
-  const picker = (
-    <>
-      <LiveStamp at={readAt} error={progress ? error : null} />
-      <Link href={`/coordination?id=${encodeURIComponent(id)}`} className="btn btn-sm">
-        Coordination
-      </Link>
-    </>
-  );
+  const picker = <LiveStamp at={readAt} error={progress ? error : null} />;
 
   if (notFound) {
     return (
@@ -263,15 +253,12 @@ function Task() {
       id={id}
       progress={progress}
       job={job}
-      statement={statement}
       funder={funder}
       reward={
         reward ||
         (progress.piecework?.paid_total ?? 0) + (progress.piecework?.pool_remaining ?? 0)
       }
       picker={picker}
-      readAt={readAt}
-      origin={base}
       stale={error}
     />
   );
@@ -281,23 +268,17 @@ function Dashboard({
   id,
   progress,
   job,
-  statement,
   funder,
   reward,
   picker,
-  readAt,
-  origin,
   stale,
 }: {
   id: string;
   progress: ProgressResponse;
   job: SearchJob | null;
-  statement: string;
   funder: string;
   reward: number;
   picker: React.ReactNode;
-  readAt: Date | null;
-  origin: string;
   /** The last quiet re-read failed; the numbers shown are from before it. */
   stale: string | null;
 }) {
@@ -320,328 +301,226 @@ function Dashboard({
   const unitWord = job?.version === 2 ? "orbit" : "unit";
   const hours = useMemo(() => denseHours(derived.hourly, HISTORY_HOURS, new Date()), [derived.hourly]);
 
+  const searchName = progress.goal
+    ? goalSlug(progress.goal).toUpperCase()
+    : job?.name.replace(/^cairn /, "") ?? short(id);
+
   return (
     <>
       <PageHeader
         crumb={{ href: "/objectives", label: "Objectives" }}
-        title={progress.goal || short(id)}
+        title={searchName + " progress"}
         subtitle={
-          job
-            ? `${job.name}: a distributed Pollard rho paid per ${unitWord}. What the log has settled, beside what the workers report.`
-            : progress.kind === "piecework"
-              ? "A divided search paid per unit. What the log has settled, beside what the workers report."
-              : "Not a divided search: this objective pays once, or along a ratchet. Its frontier is on the challenge page; what follows is whatever the log and the workers say about it."
+          progress.kind === "piecework"
+            ? "See verified results, current contributors, and rewards for this shared search."
+            : "See verified results and current contributor activity."
         }
-        meta={
+        meta={<StatusPill settled={progress.settled} />}
+        actions={
           <>
-            <StatusPill settled={progress.settled} />
-            <Badge tone="accent">{progress.kind}</Badge>
-            <LivePill live={reported.live} stale={reported.stale} />
-            {funder && (
-              <span>
-                funded by <span className="mono text-ink">{funder}</span>
-              </span>
+            {picker}
+            {!progress.settled && (
+              <Link
+                href={"/contribute?objective=" + encodeURIComponent(id) + "#compute"}
+                className="btn btn-primary btn-sm"
+              >
+                Contribute to this search
+              </Link>
             )}
-            <Hash value={id} chars={8} />
           </>
         }
-        actions={picker}
       />
 
-      <p className="mb-4 text-[12px] text-ink-3">
-        <span className="text-accent">Settled</span> figures are recomputed from the node&rsquo;s
-        log; <span className="text-warn">reported</span> ones are what workers posted and nobody
-        checked.
-        {stale && <span className="text-bad"> The last re-read failed: {stale}</span>}
-      </p>
+      {stale && (
+        <div className="mb-4">
+          <Note title="Could not refresh this page" tone="bad">
+            Showing the last successful read. {stale}
+          </Note>
+        </div>
+      )}
 
-      {/* -- the search ------------------------------------------------------ */}
-      <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat
-          label={`${capitalize(unitWord)}s paid`}
+          label={"Verified " + unitWord + "s"}
           value={amount(derived.units_paid)}
-          from={
-            unitsExpected
-              ? `of about ${formatMagnitude(unitsExpected)} ${unitWord}s the whole search needs`
-              : `${amount(derived.claims_paid)} paid claims, from the log`
-          }
-        />
-        <Stat
-          label="Group operations walked"
-          value={derived.steps > 0 ? formatLog2(derived.steps) : "0"}
-          from={
-            derived.steps > 0
-              ? `${formatMagnitude(derived.steps)}, summed from the paid witnesses`
-              : "from the paid witnesses"
-          }
-          hint={derived.steps_method}
+          from={amount(derived.claims_paid) + " paid claims in the log"}
           tone="accent"
         />
         <Stat
-          label="Share of expected work"
-          value={formatPercent(share)}
-          from={expected ? `expected ${formatLog2(expected)} ops for ${job?.name}` : "job unknown to this reader"}
-          tone="accent"
-        />
-        <Stat
-          label="Workers live"
+          label="Workers reporting now"
           value={String(reported.live)}
-          from={`${reported.stale} stale · ${reported.gone} gone · ${derived.workers.length} ever paid`}
-        />
-      </div>
-      <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Stat
-          label="Rate, reported"
-          value={formatRate(rate)}
-          from={
-            rate !== null
-              ? "sum over live workers; measured by the node where it could"
-              : "no live worker is reporting"
-          }
-          tone="warn"
+          from="Self-reported · last 3 min"
         />
         <Stat
-          label="To the expected cost"
-          value={eta !== null ? formatDuration(eta) : "—"}
-          from={
-            eta === null
-              ? expected
-                ? "needs a live reported rate"
-                : "needs a known job"
-              : eta < 0
-                ? "past it; a collision is a coin flip, not a certainty"
-                : "at the reported rate, if it holds"
-          }
-          tone="warn"
+          label={piecework ? "Reward remaining" : "Objective reward"}
+          value={piecework ? amount(piecework.pool_remaining) : amount(reward)}
+          from={piecework ? amount(piecework.unit_price) + " per verified " + unitWord : "Objective reward"}
         />
         <Stat
-          label="Odds a collision happened"
-          value={formatPercent(odds)}
-          from={odds !== null ? "birthday bound on the settled work" : "needs a known job"}
-          tone="accent"
-        />
-        <Stat
-          label="Pool"
-          value={piecework ? amount(piecework.pool_remaining) : "—"}
-          from={
-            piecework
-              ? `left of ${amount(reward)}; ${amount(piecework.unit_price)} per ${unitWord}`
-              : "not piecework"
-          }
+          label="Awaiting reveal"
+          value={amount(derived.in_flight)}
+          from="Committed, not yet verified"
         />
       </div>
 
       <div className="mb-5 grid gap-4 lg:grid-cols-2">
-        <Box title="Progress against the expected cost">
+        <Box title="Search progress">
           {share !== null ? (
             <div className="flex flex-col gap-3">
-              <Progress value={Math.min(1, share)} label="settled work, as a share of the expected cost" />
-              <p className="text-[12.5px] text-ink-2">
-                Pollard rho has no finish line, only an expectation: about{" "}
-                <span className="mono">{formatLog2(expected!)}</span> group operations here, with
-                even odds of a collision by 94% of that and nine in ten by 171%. The bar is the
-                settled share; the odds tile is what that share is worth.
-                {perUnit && (
-                  <>
-                    {" "}
-                    One {unitWord} is about <span className="mono">{formatLog2(perUnit)}</span>{" "}
-                    steps, so the step total is read off the paid witnesses rather than
-                    estimated.
-                  </>
-                )}
+              <Progress value={share} label="Verified work compared with the expected search effort" />
+              <p className="text-[12.5px] leading-relaxed text-ink-2">
+                Based on verified work. A collision may arrive earlier or later than this estimate.
               </p>
             </div>
           ) : (
             <p className="text-[12.5px] text-ink-2">
-              This reader does not know the job this objective&rsquo;s checker pins, so it cannot
-              say how far along the search is. The paid units and steps above are still exact;
-              only the denominator is missing. Known jobs are listed in{" "}
-              <span className="mono">ui/lib/jobs.ts</span>
-              .
+              The expected search effort is unavailable for this objective. Verified results are still shown above.
             </p>
           )}
         </Box>
-        <Box title="Pool">
-          <div className="flex flex-col gap-3">
-            {poolSpent !== null ? (
-              <Progress value={poolSpent} label="of the funded pool paid out" tone="warn" />
-            ) : (
-              <p className="text-[12.5px] text-ink-3">No pool to draw on.</p>
-            )}
-            <dl className="kv">
-              <dt>paid out</dt>
-              <dd className="mono">{amount(piecework?.paid_total ?? derived.reward)}</dd>
-              <dt>paid claims</dt>
-              <dd className="mono">{amount(derived.claims_paid)}</dd>
-              <dt>last hour</dt>
-              <dd className="mono">
-                {amount(derived.last_hour.units_paid)} {unitWord}s in {amount(derived.last_hour.claims_paid)}{" "}
-                claims
-              </dd>
-              <dt>last day</dt>
-              <dd className="mono">
-                {amount(derived.last_day.units_paid)} {unitWord}s · {unitsPerHour.toFixed(1)} an hour
-              </dd>
-              <dt>in flight</dt>
-              <dd className="mono">
-                {amount(derived.in_flight)} commitments not yet revealed
-                {derived.rejected > 0 && <> · {amount(derived.rejected)} rejected</>}
-              </dd>
-            </dl>
-          </div>
+        <Box title="Reward pool">
+          {poolSpent !== null ? (
+            <div className="flex flex-col gap-3">
+              <Progress value={poolSpent} label="Paid from the funded pool" />
+              <p className="text-[12.5px] text-ink-2">
+                {amount(piecework?.paid_total ?? 0)} paid of {amount(reward)} funded.
+                {derived.last_day.units_paid > 0
+                  ? " " + amount(derived.last_day.units_paid) + " " + unitWord + "s paid in the last day."
+                  : " No work was paid in the last day."}
+              </p>
+            </div>
+          ) : (
+            <p className="text-[12.5px] text-ink-2">This objective has no per-unit reward pool.</p>
+          )}
         </Box>
       </div>
 
-      {/* -- workers ------------------------------------------------------- */}
-      <SectionHeading
-        count={rows.length}
-        aside={
-          <span className="text-[11px] text-ink-3">
-            live within {reported.live_within_seconds} s · stale within {reported.stale_within_seconds} s
-          </span>
-        }
-      >
-        Workers
-      </SectionHeading>
+      <SectionHeading count={rows.length}>Contributors</SectionHeading>
       {rows.length === 0 ? (
-        <EmptyState title="Nobody has worked this objective yet">
-          No settlement names a submitter and no worker has posted a heartbeat.
-          A worker connected to this node will appear here after its first report.
+        <EmptyState
+          title="No contributors to show yet"
+          action={
+            !progress.settled ? (
+              <Link href={"/contribute?objective=" + encodeURIComponent(id) + "#compute"} className="btn btn-primary btn-sm">
+                Start contributing
+              </Link>
+            ) : undefined
+          }
+        >
+          This node has no paid contributor or recent worker report for this search.
         </EmptyState>
       ) : (
         <div className="box mb-5 overflow-x-auto">
-          <table className="w-full min-w-[64rem] border-collapse text-left text-[12.5px]">
+          <table className="w-full min-w-[40rem] border-collapse text-left text-[12.5px]">
             <thead>
               <tr className="border-b border-edge text-[11px] text-ink-3">
-                <th className="px-4 py-2 font-medium">Worker</th>
-                <th className="px-3 py-2 font-medium">Status</th>
-                <th className="px-3 py-2 text-right font-medium">
-                  <span className="text-accent">{capitalize(unitWord)}s paid</span>
-                </th>
-                <th className="px-3 py-2 font-medium">Share of paid</th>
-                <th className="px-3 py-2 text-right font-medium">
-                  <span className="text-accent">Steps paid</span>
-                </th>
-                <th className="px-3 py-2 text-right font-medium">
-                  <span className="text-warn">Rate</span>
-                </th>
-                <th className="px-3 py-2 text-right font-medium">
-                  <span className="text-warn">Pending</span>
-                </th>
-                <th className="px-3 py-2 font-medium">
-                  <span className="text-warn">Assignment</span>
-                </th>
-                <th className="px-3 py-2 font-medium">Last paid</th>
-                <th className="px-4 py-2 font-medium">
-                  <span className="text-warn">Last seen</span>
-                </th>
+                <th className="px-4 py-2 font-medium">Contributor</th>
+                <th className="px-3 py-2 font-medium">Activity</th>
+                <th className="px-3 py-2 text-right font-medium">Verified {unitWord}s</th>
+                <th className="px-3 py-2 text-right font-medium">Reported rate</th>
+                <th className="px-3 py-2 font-medium">Last seen</th>
               </tr>
             </thead>
             <tbody className="divide-edge-y">
               {rows.map((row) => (
-                <WorkerLine key={row.name} row={row} total={derived.units_paid} />
+                <WorkerLine key={row.name} row={row} />
               ))}
             </tbody>
           </table>
         </div>
       )}
 
-      {/* -- the unit space and the history -------------------------------- */}
-      <div className="mb-5 grid gap-4 lg:grid-cols-2">
-        <Box
-          title="Unit space"
-          aside={
-            derived.coverage ? (
-              <span className="text-[11px] font-normal text-ink-3">
-                {amount(derived.coverage.units_touched)} of {amount(derived.coverage.units)} units
-                touched · {formatPercent(coverageFraction(derived.coverage))} of bins
-              </span>
-            ) : undefined
-          }
-        >
-          {derived.coverage ? (
-            <CoverageStrip
-              counts={derived.coverage.counts}
-              assigned={assignedBins(reported.workers, derived.coverage.units, derived.coverage.bins)}
-            />
-          ) : (
-            <p className="text-[12.5px] text-ink-3">
-              The unit each paid seed came from needs the job&rsquo;s seed layout, which no
-              worker has declared yet and this reader does not know for this checker.
+      <Disclosure summary="Search details and history">
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Box title="Search estimate">
+            <dl className="kv">
+              <dt>Verified steps</dt>
+              <dd className="mono" title={derived.steps_method}>
+                {derived.steps > 0 ? formatLog2(derived.steps) : "0"}
+              </dd>
+              <dt>Expected effort</dt>
+              <dd className="mono">{expected ? formatLog2(expected) : "—"}</dd>
+              <dt>Estimated collision chance</dt>
+              <dd className="mono">{formatPercent(odds)}</dd>
+              <dt>Reported worker rate</dt>
+              <dd className="mono">{formatRate(rate)}</dd>
+              <dt>Time at reported rate</dt>
+              <dd className="mono">{eta !== null ? formatDuration(eta) : "—"}</dd>
+            </dl>
+            <p className="mt-3 text-[12px] text-ink-3">
+              {job ? "The estimate uses this search's known parameters." : "Search parameters are unavailable."}
+              {unitsExpected && perUnit
+                ? " About " + formatMagnitude(unitsExpected) + " " + unitWord + "s are expected across the search."
+                : ""}
             </p>
-          )}
-        </Box>
-        <Box title={`${capitalize(unitWord)}s settled per hour, last ${HISTORY_HOURS} h`}>
-          <HourlyBars hours={hours} />
-        </Box>
-      </div>
-
-      {/* -- the words ----------------------------------------------------- */}
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
-        {statement && (
+          </Box>
+          <Box title="Recent activity">
+            <dl className="kv">
+              <dt>Last hour</dt>
+              <dd className="mono">{amount(derived.last_hour.units_paid)} {unitWord}s paid</dd>
+              <dt>Last day</dt>
+              <dd className="mono">{amount(derived.last_day.units_paid)} {unitWord}s paid</dd>
+              <dt>Average, last day</dt>
+              <dd className="mono">{unitsPerHour.toFixed(1)} per hour</dd>
+              <dt>Workers no longer live</dt>
+              <dd className="mono">{reported.stale} stale · {reported.gone} gone</dd>
+              <dt>Rejected claims</dt>
+              <dd className="mono">{amount(derived.rejected)}</dd>
+            </dl>
+          </Box>
           <Box
-            title="Statement"
+            title="Where verified work came from"
             aside={
-              <span className="text-[11px] font-normal text-warn">
-                written by the funder, not checked
-              </span>
+              derived.coverage ? (
+                <span className="text-[11px] font-normal text-ink-3">
+                  {amount(derived.coverage.units_touched)} of {amount(derived.coverage.units)} units touched
+                </span>
+              ) : undefined
             }
           >
-            <p className="text-[13.5px] leading-relaxed text-ink [overflow-wrap:anywhere]">{statement}</p>
+            {derived.coverage ? (
+              <CoverageStrip
+                counts={derived.coverage.counts}
+                assigned={assignedBins(reported.workers, derived.coverage.units, derived.coverage.bins)}
+              />
+            ) : (
+              <p className="text-[12.5px] text-ink-3">No unit coverage is available yet.</p>
+            )}
           </Box>
-        )}
-        <div className="flex min-w-0 flex-col gap-4">
-          <Note title="Two kinds of number">
-            {derived.note} {reported.note}
-          </Note>
-          <Box title="Elsewhere">
-            <ul className="flex flex-col gap-1.5 text-[13px]">
-              <li>
-                <Link href={`/challenge?id=${encodeURIComponent(id)}`} className="text-accent hover:underline">
-                  The objective: statement, checker, how to submit →
-                </Link>
-              </li>
-              <li>
-                <Link href="/log" className="text-accent hover:underline">
-                  Every record this page was derived from →
-                </Link>
-              </li>
-              {job && (
-                <li className="text-ink-2">
-                  The job document: <span className="mono">{job.path}</span> in a checkout.
-                </li>
-              )}
-            </ul>
-            <p className="mt-3 text-[12.5px] text-ink-2">
-              Run a worker against this node, from a checkout:
-            </p>
-            <div className="relative mt-1.5">
-              <pre className="code pr-9 text-[11.5px]">{workerCommand(origin, id, job)}</pre>
-              <div className="absolute top-2 right-2">
-                <CopyButton value={workerCommand(origin, id, job)} />
-              </div>
-            </div>
+          <Box title={"Verified " + unitWord + "s by hour · last " + HISTORY_HOURS + " hours"}>
+            <HourlyBars hours={hours} />
           </Box>
         </div>
+      </Disclosure>
+
+      <div className="mt-5 border-t border-edge pt-4 text-[12.5px] text-ink-2">
+        <p>
+          Verified results and payouts come from the node&rsquo;s log. Worker activity is self-reported
+          and may be incomplete.
+        </p>
+        <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1">
+          <Link href={"/challenge?id=" + encodeURIComponent(id)} className="text-accent hover:underline">
+            Challenge details →
+          </Link>
+          <Link href={"/coordination?id=" + encodeURIComponent(id)} className="text-accent hover:underline">
+            Coordination →
+          </Link>
+          <Link href="/network" className="text-accent hover:underline">Network →</Link>
+          <Link href="/log" className="text-accent hover:underline">Verified records →</Link>
+        </div>
+        <Disclosure summary="Record identity and funding">
+          <div className="flex flex-wrap items-center gap-2 text-[12px]">
+            {funder && <span>Funded by <span className="mono">{funder}</span></span>}
+            <Hash value={id} chars={8} />
+          </div>
+        </Disclosure>
       </div>
     </>
   );
 }
 
-function LivePill({ live, stale }: { live: number; stale: number }) {
-  if (live === 0 && stale === 0) {
-    return <span className="pill pill-settled">no workers reporting</span>;
-  }
-  return (
-    <span className={`pill ${live > 0 ? "pill-open" : "pill-settled"}`}>
-      {live} live{stale > 0 && <>, {stale} stale</>}
-    </span>
-  );
-}
-
-function WorkerLine({ row, total }: { row: WorkerRow; total: number }) {
+function WorkerLine({ row }: { row: WorkerRow }) {
   const paid = row.derived?.units_paid ?? 0;
-  const share = total > 0 ? paid / total : 0;
   const rate = workerRate(row.reported);
   const tone =
     row.status === "live" ? "accent" : row.status === "stale" ? "warn" : row.status === "gone" ? "bad" : "neutral";
@@ -656,42 +535,12 @@ function WorkerLine({ row, total }: { row: WorkerRow; total: number }) {
       </td>
       <td className="px-3 py-2.5">
         <Badge tone={tone} title={row.status === "settled" ? "known from settlements only; no heartbeat" : undefined}>
-          {row.status === "settled" ? "no heartbeat" : row.status}
+          {row.status === "settled" ? "not reporting" : row.status}
         </Badge>
       </td>
       <td className="mono px-3 py-2.5 text-right text-ink">{amount(paid)}</td>
-      <td className="px-3 py-2.5">
-        <div className="w-28">
-          <Progress value={share} />
-        </div>
-      </td>
-      <td className="mono px-3 py-2.5 text-right text-ink-2" title={row.derived ? String(row.derived.steps) : undefined}>
-        {row.derived && row.derived.steps > 0 ? formatLog2(row.derived.steps) : "—"}
-      </td>
       <td className="mono px-3 py-2.5 text-right text-ink-2">{formatRate(rate)}</td>
-      <td className="mono px-3 py-2.5 text-right text-ink-2">
-        {row.reported ? amount(row.reported.units_pending) : "—"}
-        {row.derived && row.derived.in_flight > 0 && (
-          <span className="text-ink-3" title="commitments not yet revealed">
-            {" "}
-            +{row.derived.in_flight}
-          </span>
-        )}
-      </td>
-      <td className="mono px-3 py-2.5 text-ink-2">
-        {row.reported?.units ? (
-          <>
-            [{amount(row.reported.units.first)}, {amount(row.reported.units.end)})
-            {row.reported.unit !== null && <span className="text-ink-3"> at {amount(row.reported.unit)}</span>}
-          </>
-        ) : (
-          "—"
-        )}
-      </td>
-      <td className="mono px-3 py-2.5 text-[12px] text-ink-3" title={row.derived?.last_paid_at ?? undefined}>
-        {row.derived?.last_paid_at ? row.derived.last_paid_at.slice(0, 16).replace("T", " ") : "—"}
-      </td>
-      <td className="mono px-4 py-2.5 text-[12px] text-ink-3" title={row.reported?.received_at}>
+      <td className="mono px-3 py-2.5 text-ink-3" title={row.reported?.received_at}>
         {row.reported ? formatAge(row.reported.age_seconds) : "—"}
       </td>
     </tr>
@@ -732,7 +581,7 @@ function CoverageStrip({
         {assigned.map((range, i) => (
           <div
             key={`${range.name}-${i}`}
-            className="absolute top-0 h-full rounded-sm bg-warn/70"
+            className="absolute top-0 h-full rounded-sm bg-ink-3/55"
             style={{
               left: `${(range.from / bins) * 100}%`,
               width: `${Math.max(0.5, ((range.to - range.from + 1) / bins) * 100)}%`,
@@ -793,24 +642,4 @@ function HourlyBars({ hours }: { hours: { hour: string; units_paid: number }[] }
       </p>
     </div>
   );
-}
-
-/**
- * The command that works this objective from a checkout, with this node and
- * this objective filled in. The reference worker and the job document are
- * named by path rather than linked: this page links nowhere off the node it
- * was served from.
- */
-function workerCommand(origin: string, id: string, job: SearchJob | null | undefined): string {
-  return [
-    "python3 examples/certicom-ecdlp/tools/orbit_worker.py",
-    `--node ${origin}`,
-    `--job ${job?.path ?? "<job document>"}`,
-    `--objective ${id}`,
-    "--worker <your name>",
-  ].join(" \\\n  ");
-}
-
-function capitalize(word: string): string {
-  return word.charAt(0).toUpperCase() + word.slice(1);
 }

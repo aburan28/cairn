@@ -51,6 +51,7 @@ export default function Page() {
   const [origin, setOrigin] = useState("");
   const [bridge, setBridge] = useState<Bridge | null>(null);
   const [open, setOpen] = useState<RoleId | null>(null);
+  const [requestedObjective, setRequestedObjective] = useState<string | null>(null);
   /** The change the app is restarting the node for, until the page reloads. */
   const [restarting, setRestarting] = useState<{ role: AppRole; on: boolean } | null>(null);
   const [appError, setAppError] = useState<string | null>(null);
@@ -58,6 +59,7 @@ export default function Page() {
   useEffect(() => {
     setOrigin(window.location.origin);
     setBridge(appBridge());
+    setRequestedObjective(new URLSearchParams(window.location.search).get("objective"));
     // `#compute` and friends open their panel, so "Offer compute →" on the
     // Network page lands on the form rather than on a card to find.
     const fromHash = window.location.hash.replace("#", "");
@@ -161,11 +163,6 @@ export default function Page() {
         ))}
       </section>
 
-      <p className="mt-5 text-[12px] text-ink-3">
-        Why checking answers and relaying are not paid yet, and what would change that:{" "}
-        <span className="mono">docs/design/roles-and-rewards.md</span>.
-      </p>
-
       {active && (
         <Sheet
           title={active.title}
@@ -178,6 +175,7 @@ export default function Page() {
             <OfferCompute
               network={network}
               objectives={objectives}
+              requestedObjective={requestedObjective}
               underserved={underserved}
               origin={base || origin}
               bridge={bridge}
@@ -264,6 +262,7 @@ const GPU_CHOICES = [0, 1, 2, 3, 4, 5, 6, 7] as const;
 function OfferCompute({
   network,
   objectives,
+  requestedObjective,
   underserved,
   origin,
   bridge,
@@ -273,6 +272,7 @@ function OfferCompute({
 }: {
   network: NetworkResponse | null;
   objectives: Objective[];
+  requestedObjective: string | null;
   underserved: Underserved[];
   origin: string;
   bridge: Bridge | null;
@@ -291,13 +291,17 @@ function OfferCompute({
   const [solver, setSolver] = useState("");
   const [url, setUrl] = useState("");
 
-  // The default is where one more machine matters most: the richest open
-  // objective on the angle with the most open reward per live worker.
+  // Follow an objective-specific Contribute link when possible. Otherwise
+  // default to the richest open angle with the fewest live workers.
   useEffect(() => {
     if (objective || objectives.length === 0) return;
+    if (requestedObjective && objectives.some((o) => o.id === requestedObjective)) {
+      setObjective(requestedObjective);
+      return;
+    }
     const scarce = underserved.flatMap((row) => row.objectives).find((id) => objectives.some((o) => o.id === id));
     setObjective(scarce ?? objectives[0].id);
-  }, [objectives, underserved, objective]);
+  }, [objectives, underserved, objective, requestedObjective]);
 
   const lan = lanState(network?.node.reach, origin);
   const urls = useMemo(() => (lan.state === "lan" ? lan.urls : []), [lan]);
