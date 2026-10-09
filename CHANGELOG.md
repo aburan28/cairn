@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.2](https://github.com/aburan28/cairn/compare/v2.2.1...v2.2.2) (2026-10-09)
+
+
+### Fixes
+
+* **progress:** distinguish unavailable checks from rejections ([fdb6e09](https://github.com/aburan28/cairn/commit/fdb6e091b0ac99edc99d02fa8d7ea793ca8155ba))
+
 ## [2.2.1](https://github.com/aburan28/cairn/compare/v2.2.0...v2.2.1) (2026-10-09)
 
 
