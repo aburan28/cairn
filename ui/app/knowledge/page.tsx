@@ -293,6 +293,9 @@ function ResultRow({ row, title, now }: { row: KnowledgeRow; title: string | und
           )}
           <div className="mt-3 flex flex-wrap items-center gap-3 text-[12px]">
             <Hash value={row.claim_id} label="result" chars={10} />
+            <Link href={`/knowledge/claim?id=${encodeURIComponent(row.claim_id)}`} className="text-accent hover:underline">
+              View relations and bonded checks →
+            </Link>
             <Link href={`/challenge?id=${encodeURIComponent(row.objective_id)}`} className="text-accent hover:underline">
               Open the challenge →
             </Link>

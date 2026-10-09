@@ -68,6 +68,37 @@ export type KnowledgeIndex = {
 
 export type Policy = "default" | "demanding";
 
+export type KnowledgeClaim = {
+  claim_id: string;
+  objective_id: string;
+  submitter: string;
+  state: Omit<KnowledgeRow, "claim_id" | "objective_id" | "submitter" | "created_at" | "attestations"> & {
+    assertions: { by: string; relation: string; grounded: boolean; class: number }[];
+  };
+  attestations: {
+    accept: number;
+    reject: number;
+    slashed: number;
+    bond_each: number;
+    attestations: { attestation_id: string; attestor: string; status: string; slashed: boolean }[];
+  };
+  policy: { name: string; parameters: Record<string, number> };
+  note: string;
+};
+
+/** Read the evidence behind one result, including relations and bonded checks. */
+export async function fetchKnowledgeClaim(base: string, id: string, policy: Policy): Promise<KnowledgeClaim> {
+  if (!/^sha256:[0-9a-f]{64}$/.test(id)) throw new Error("Invalid claim id");
+  const query = policy === "default" ? "" : `?policy=${policy}`;
+  const response = await fetch(`${base}/knowledge/${id}${query}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`This node answered ${response.status} for that result`);
+  return expectFields<KnowledgeClaim>(
+    await response.json(),
+    ["claim_id", "objective_id", "submitter", "state", "attestations", "policy"],
+    `${base || "this node"}/knowledge/${id}`,
+  );
+}
+
 /** `GET /knowledge`, or `null` from a node older than the route. */
 export async function fetchKnowledge(base: string, policy: Policy = "default"): Promise<KnowledgeIndex | null> {
   const query = policy === "default" ? "" : `?policy=${policy}`;
