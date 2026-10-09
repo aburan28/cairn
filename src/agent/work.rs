@@ -1016,6 +1016,12 @@ impl Worker {
                     self.rounds += 1;
                     if artifacts.is_empty() {
                         say(&format!("round {}: nothing", self.rounds));
+                    } else {
+                        say(&format!(
+                            "round {}: {} candidate(s)",
+                            self.rounds,
+                            artifacts.len()
+                        ));
                     }
                     for artifact in artifacts {
                         self.commit(artifact)?;

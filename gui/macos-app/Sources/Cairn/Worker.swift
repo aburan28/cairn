@@ -170,6 +170,7 @@ final class Worker: ObservableObject {
     private var process: Process?
     private var sink: Stderr?
     private var stopping = false
+    private var roundSamples: [(at: Date, completed: Int)] = []
 
     var isRunning: Bool {
         if case .running = state { return true }
@@ -196,12 +197,42 @@ final class Worker: ObservableObject {
                     "activity": activity ?? "The worker stopped."]
         case .running(let plan, let since):
             let cpu = process.map { Self.cpuUsage(root: $0.processIdentifier) }
+            let completed = Self.completedRounds(in: lines)
+            let roundRate = roundsPerMinute(now: Date(), completed: completed)
             return ["state": isDraining ? "stopping" : "running", "objective": plan.objective,
                     "worker": plan.worker,
                     "started_at": ISO8601DateFormatter().string(from: since),
                     "cpu_percent": cpu.map { $0 as Any } ?? NSNull(),
+                    "rounds_completed": completed,
+                    "rounds_per_minute": roundRate.map { $0 as Any } ?? NSNull(),
                     "activity": activity ?? "Waiting for the first work round."]
         }
+    }
+
+    /// The worker writes a round line for every completed solver run. Its
+    /// timestamp is fixed by `say` in `cairn work`.
+    private static func completedRounds(in lines: [String]) -> Int {
+        for line in lines.reversed() {
+            let body = line.dropFirst(9)
+            guard body.hasPrefix("round ") else { continue }
+            let number = body.dropFirst("round ".count)
+            let digits = number.prefix(while: { $0.isNumber })
+            if number.dropFirst(digits.count).first == ":", let count = Int(digits) {
+                return count
+            }
+        }
+        return 0
+    }
+
+    /// A rolling completed-round rate remains available for solvers that do
+    /// not count their own search steps. It is labelled separately in the UI.
+    private func roundsPerMinute(now: Date, completed: Int) -> Double? {
+        if let last = roundSamples.last, completed < last.completed { roundSamples = [] }
+        roundSamples.removeAll { now.timeIntervalSince($0.at) > 60 }
+        roundSamples.append((now, completed))
+        guard let base = roundSamples.first,
+              now.timeIntervalSince(base.at) >= 10 else { return nil }
+        return Double(completed - base.completed) * 60 / now.timeIntervalSince(base.at)
     }
 
     private var activity: String? {
@@ -286,6 +317,7 @@ final class Worker: ObservableObject {
         stopping = false
         isDraining = false
         lines = []
+        roundSamples = []
         do {
             try p.run()
         } catch {
@@ -335,6 +367,7 @@ final class Worker: ObservableObject {
         sink = nil
         if let path = lastPlan?.stopFile { try? FileManager.default.removeItem(atPath: path) }
         isDraining = false
+        roundSamples = []
         state = .idle
     }
 
@@ -347,6 +380,7 @@ final class Worker: ObservableObject {
         sink = nil
         if let path = plan?.stopFile { try? FileManager.default.removeItem(atPath: path) }
         isDraining = false
+        roundSamples = []
         if let plan { state = .exited(plan, status: p.terminationStatus) } else { state = .idle }
     }
 

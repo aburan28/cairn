@@ -6,6 +6,8 @@ export type WorkStatus = {
   worker?: string;
   started_at?: string;
   cpu_percent?: number | null;
+  rounds_completed?: number;
+  rounds_per_minute?: number | null;
   exit_code?: number;
   activity?: string;
 };

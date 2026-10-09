@@ -68,6 +68,7 @@ export function WorkPanel({ objective, base }: { objective: string; base: string
   const running = status?.state === "running" || draining;
   const onThisGoal = running && status.objective === objective;
   const rate = worker?.status === "live" ? workerRate(worker) : null;
+  const roundRate = status?.rounds_per_minute;
 
   return (
     <section className="box mb-5 p-4" aria-label="My work on this Mac">
@@ -100,7 +101,13 @@ export function WorkPanel({ objective, base }: { objective: string; base: string
       {running && (
         <div className="mt-4 grid grid-cols-2 gap-3 border-t border-edge pt-4 sm:grid-cols-4">
           <Metric label="CPU used now" value={status.cpu_percent == null ? "Reading…" : `${Math.round(status.cpu_percent)}%`} help="100% is one busy CPU core; includes the solver." />
-          <Metric label="Search rate" value={rate && rate > 0 ? formatRate(rate) : "Not reported"} help="From this worker's recent node report, when its solver measures steps." />
+          <Metric
+            label={rate && rate > 0 ? "Search rate" : "Round rate"}
+            value={rate && rate > 0 ? formatRate(rate) : roundRate == null ? "Measuring…" : `${roundRate.toFixed(1)} rounds/min`}
+            help={rate && rate > 0
+              ? "From this worker's recent node report, when its solver measures steps."
+              : `${status.rounds_completed ?? 0} solver rounds complete. Each round can take a different amount of work.`}
+          />
           <Metric label="Last report" value={worker ? formatAge(worker.age_seconds) : "Waiting…"} help="Workers report to the node while a solver runs." />
           <Metric label="Work started" value={status.started_at ? new Date(status.started_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "—"} help="Local process start time." />
         </div>
@@ -109,7 +116,7 @@ export function WorkPanel({ objective, base }: { objective: string; base: string
       {status?.state === "exited" && status.activity && <p className="mt-3 text-[12px] text-ink-2">Last activity: {status.activity}</p>}
       {error && <p className="mt-3 text-[12px] text-warn" role="alert">{error}</p>}
       {!bridge && <Link href="/contribute#compute" className="mt-3 inline-block text-[12.5px] text-accent hover:underline">See ways to contribute →</Link>}
-      {running && !rate && <p className="mt-2 text-[11.5px] text-ink-3">CPU shows the machine is active; the search rate appears only when the solver reports measured steps.</p>}
+      {running && !rate && <p className="mt-2 text-[11.5px] text-ink-3">Round rate counts completed solver runs. Search steps appear when the solver measures them.</p>}
     </section>
   );
 }
