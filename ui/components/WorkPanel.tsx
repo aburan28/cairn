@@ -16,7 +16,6 @@ export function WorkPanel({ objective, base }: { objective: string; base: string
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [supported, setSupported] = useState(true);
-  const [setupOpen, setSetupOpen] = useState(false);
 
   useEffect(() => setBridge(appBridge()), []);
 
@@ -26,7 +25,6 @@ export function WorkPanel({ objective, base }: { objective: string; base: string
       const next = await readWorkStatus(bridge);
       setSupported(true);
       setStatus(next);
-      if (next.state === "running" || next.state === "pausing" || next.state === "paused" || next.state === "stopping") setSetupOpen(false);
       if ((next.state === "running" || next.state === "pausing" || next.state === "paused" || next.state === "stopping") && next.objective && next.worker) {
         const progress = await fetchProgress(next.objective, base);
         setWorker(progress.reported.workers.find((row) => row.worker === next.worker) ?? null);
@@ -55,7 +53,7 @@ export function WorkPanel({ objective, base }: { objective: string; base: string
     setBusy(true);
     setError(null);
     try {
-      if (action === "start") { await startWork(bridge, objective); setSetupOpen(true); }
+      if (action === "start") await startWork(bridge, objective);
       else if (action === "pause") await pauseWork(bridge);
       else if (action === "resume") await resumeWork(bridge);
       else if (action === "exit") await exitWork(bridge);
@@ -96,7 +94,7 @@ export function WorkPanel({ objective, base }: { objective: string; base: string
                   ? "Paused after this round. Pending answers are still revealed; Resume continues the same task."
                 : running
                   ? onThisGoal ? `Working as ${status.worker}.` : `This Mac is working on another goal as ${status.worker}.`
-                : setupOpen ? "Finish resource setup in the Cairn.app window, then press Start there." : status?.state === "exited" ? "Stopped. Start again with your saved settings, or exit this task." : "Choose resources and start this goal on this Mac."}
+                : status?.state === "exited" ? "Stopped. Start again with your saved settings, or exit this task." : "Choose resources and start this goal on this Mac."}
           </p>
         </div>
         {bridge && (
