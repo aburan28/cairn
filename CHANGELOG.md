@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.1](https://github.com/aburan28/cairn/compare/v2.2.0...v2.2.1) (2026-10-09)
+
+
+### Fixes
+
+* **ui:** simplify objective progress and contribution flow ([d98ba9e](https://github.com/aburan28/cairn/commit/d98ba9e964ed34de40e0ccbc48848f825abbbead)), closes [#270](https://github.com/aburan28/cairn/issues/270)
+
 ## [2.2.0](https://github.com/aburan28/cairn/compare/v2.1.0...v2.2.0) (2026-10-09)
 
 ### Features
