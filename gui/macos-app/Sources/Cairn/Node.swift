@@ -170,6 +170,11 @@ final class Node: ObservableObject {
     /// made first if this Mac has none yet. Returns why not, or nil.
     func startWork(_ plan: WorkPlan) -> String? {
         guard let binary = binary ?? Self.locateBinary() else { return "No cairn command was found." }
+        do {
+            try Self.prepareScratch(settings)
+        } catch {
+            return "Could not prepare the worker's scratch directory: \(error.localizedDescription)"
+        }
         if let identity = plan.identity, !FileManager.default.fileExists(atPath: identity) {
             try? FileManager.default.createDirectory(
                 at: URL(fileURLWithPath: identity).deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -298,8 +303,9 @@ final class Node: ObservableObject {
         }
         do {
             try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+            try Self.prepareScratch(settings)
         } catch {
-            state = .failed("Could not create \(dataDir.path): \(error.localizedDescription)")
+            state = .failed("Could not prepare \(dataDir.path): \(error.localizedDescription)")
             return
         }
 
@@ -598,6 +604,10 @@ final class Node: ObservableObject {
             env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin",
         ].joined(separator: ":")
         env.merge(settings.environment) { _, chosen in chosen }
+        // Installer-launched apps can inherit a PKInstallSandbox TMPDIR that
+        // disappears while the node is still running. Every pinned verifier
+        // then becomes unavailable before its checker even starts.
+        env["TMPDIR"] = settings.dataFolder.appendingPathComponent("tmp", isDirectory: true).path
         // Lean, named the way the node's jail needs it: the toolchain's own
         // binary and its prefix (CAIRN_LEAN, CAIRN_LEAN_ROOT), since elan's
         // proxy and a home-directory toolchain both fail inside the jail.
@@ -607,6 +617,22 @@ final class Node: ObservableObject {
             env.merge(Toolchains.leanEnvironment(lean)) { current, _ in current }
         }
         return env
+    }
+
+    /// A stable private parent for verifier workdirs, under the node's data
+    /// folder. The child environment only names it; launch paths create it.
+    nonisolated static func prepareScratch(_ settings: NodeSettings) throws {
+        let dir = settings.dataFolder.appendingPathComponent("tmp", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: settings.dataFolder.path) {
+            // A chosen folder may be an unmounted disk. Only the default is
+            // safe to create on demand for a worker or background service.
+            guard settings.isDefaultFolder else { throw CocoaError(.fileNoSuchFile) }
+            try FileManager.default.createDirectory(at: settings.dataFolder,
+                                                    withIntermediateDirectories: true)
+        }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
     }
 
     /// `cairn identity --out`: an ed25519 keypair whose public half is the

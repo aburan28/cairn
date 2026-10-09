@@ -41,13 +41,28 @@ final class BackgroundServiceTests: XCTestCase {
         let env = BackgroundService.serviceEnvironment(settings(lead: true))
         XCTAssertNotNil(env["PATH"])
         XCTAssertNotNil(env["HOME"])
+        XCTAssertEqual(env["TMPDIR"], dir + "/tmp")
         XCTAssertEqual(env["CAIRN_SANDBOX_CPUS"], "4")
         XCTAssertEqual(env["CAIRN_SANDBOX_MEMORY_MB"], "4096")
         XCTAssertEqual(env["CAIRN_FLEET"], "10.0.0.0/8")
         for key in env.keys {
-            XCTAssertTrue(key == "PATH" || key == "HOME" || key.hasPrefix("CAIRN_"),
+            XCTAssertTrue(key == "PATH" || key == "HOME" || key == "TMPDIR" || key.hasPrefix("CAIRN_"),
                           "\(key) is this app's business, not the service's")
         }
+    }
+
+    func testVerifierScratchExistsAndIsPrivateBeforeTheNodeStarts() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cairn-scratch-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let local = NodeSettings(dataFolder: folder, cpus: 1, memoryMB: 1024, storageGB: 0,
+                                 p2pHost: "127.0.0.1", bootstrapFiles: [], attachURL: nil)
+        try Node.prepareScratch(local)
+        let scratch = folder.appendingPathComponent("tmp", isDirectory: true)
+        XCTAssertEqual(Node.childEnvironment(local)["TMPDIR"], scratch.path)
+        let attributes = try FileManager.default.attributesOfItem(atPath: scratch.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o700)
     }
 
     func testLeadingAFleetServesEveryInterfaceAndSignsWithTheLeaderIdentity() {

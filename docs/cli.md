@@ -334,7 +334,7 @@ Work one objective from this machine with a solver you supply. Each round
 takes this worker's slice from `GET /work_assignment`, starts the solver with
 the assignment as one line of JSON on stdin (and in `CAIRN_ASSIGNMENT`, beside
 `CAIRN_NODE`, `CAIRN_OBJECTIVE`, `CAIRN_WORKER`, `CAIRN_EPOCH` and
-`CAIRN_EPOCH_ENDS_IN`), heartbeats to `POST /progress` every `--heartbeat`
+`CAIRN_EPOCH_ENDS_IN` and zero-based `CAIRN_ROUND`), heartbeats to `POST /progress` every `--heartbeat`
 seconds while it runs, and commits each JSON object the solver prints on
 stdout. Commitments are revealed after their epoch turns, citing the
 objective's frontier when it has one. A solver that exits non-zero has its
@@ -345,6 +345,27 @@ leader's `signs_as` instead, unsigned, so the leader signs and is paid
 are always `--worker`'s.
 `--partitions N` (default 8), `--rounds N`, `--device TEXT` for the roster,
 `--margin SECONDS` (default 8) to stay clear of an epoch's end.
+
+To leave a contribution running after the shell exits, name it and use the
+managed commands:
+
+```sh
+cairn work start --name garage-search --node http://127.0.0.1:8080 \
+  --objective sha256:… --worker garage -- ./solver
+cairn work status --name garage-search
+cairn work stop --name garage-search
+```
+
+`start` writes a private state directory and worker log under
+`~/.cairn/work/garage-search` (or `--state-dir DIR` / `CAIRN_WORK_STATE_DIR`).
+`status` reports the objective, worker, process and phase. `stop` requests a
+graceful exit: the current solver round finishes, and any commitments already
+made are revealed in a later epoch before the process exits. This can take an
+epoch or longer; `status` says `stopping` while it drains. A second start with
+the same name is refused while the process is alive. A completed or crashed
+session is archived beside the new one when that name is restarted, preserving
+its log. The stop request is local to this machine and does not retract claims
+or affect workers on other machines.
 
 What a machine offers, which the reader's *Offer compute* panel writes:
 `--threads N` gives the solver `CAIRN_THREADS`, `OMP_NUM_THREADS` and
