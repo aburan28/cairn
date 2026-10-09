@@ -90,12 +90,14 @@
 //! and the failure looks like a client bug.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Map, Value as Json};
@@ -307,6 +309,7 @@ pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
     let mut identity_path: Option<PathBuf> = None;
     let mut key_file: Option<PathBuf> = globals.key_file;
     let mut max_spend: Option<u64> = None;
+    let mut http: Option<String> = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -330,6 +333,10 @@ pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
                 Some(Ok(units)) => max_spend = Some(units),
                 _ => fail("--max-spend needs a whole number of units"),
             },
+            "--http" => match args.next() {
+                Some(v) => http = Some(v),
+                None => fail("--http needs an address, e.g. 127.0.0.1:8001"),
+            },
             "--help" | "-h" => {
                 eprintln!(
                     "cairn mcp — MCP server over stdio, on a log of its own\n\n\
@@ -342,7 +349,10 @@ pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
                                  CLI's own, so a sealed log opens with no flag)\n\
                      --max-spend total reward agents may fund through post_objective\n\
                                  while this server runs (default 0: unfunded objectives\n\
-                                 only; also CAIRN_MCP_MAX_SPEND)\n\n\
+                                 only; also CAIRN_MCP_MAX_SPEND)\n\
+                     --http      serve Streamable HTTP MCP on this address instead of\n\
+                                 stdio, e.g. 127.0.0.1:8001. POST JSON-RPC to /mcp.\n\
+                                 Plain HTTP: bind loopback, or tunnel it.\n\n\
                      For an agent whose work should reach peers live, configure the\n\
                      client to launch `cairn run` instead: same protocol, one node.\n"
                 );
@@ -401,8 +411,718 @@ pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
         root.display()
     );
     report_identity(&server, "--identity");
+    if let Some(addr) = http {
+        return serve_http(server, &addr);
+    }
     serve_stdio(server);
     0
+}
+
+/// Start MCP over Streamable HTTP on a daemon's ledger, sharing the daemon's
+/// one rules engine rather than opening a second writer.
+///
+/// Unlike [`start_shared_stdio`] this returns no completion handle: stdio has
+/// one client whose departure ends the process's supervision, while HTTP
+/// clients come and go and the listener never finishes.
+pub(crate) fn start_shared_http(
+    state: Arc<Mutex<crate::daemon::State>>,
+    identity_path: Option<&Path>,
+    log: &Path,
+    key_path: &Path,
+    spend: Arc<Mutex<SpendCeiling>>,
+    addr: &str,
+) -> Result<(), String> {
+    let identity = identity_path.map(load_identity).transpose()?;
+    let cipher = pending_cipher(log, key_path)?;
+    let server = Server::new_shared(state, identity, cipher).with_shared_spend_ceiling(&spend);
+    let listener = bind_http(addr)?;
+    eprintln!(
+        "cairn mcp {SERVER_VERSION}: sharing daemon ledger {}, Streamable HTTP on {}",
+        log.display(),
+        listener
+            .local_addr()
+            .map_or_else(|_| addr.to_string(), |bound| bound.to_string())
+    );
+    report_identity(&server, "--mcp-identity");
+    let hub = Arc::new(Mutex::new(HttpHub::new(server)));
+    thread::Builder::new()
+        .name(String::from("cairn-mcp-http"))
+        .spawn(move || accept_loop(listener, hub))
+        .map_err(|error| format!("cannot start HTTP thread: {error}"))?;
+    Ok(())
+}
+
+// -- Streamable HTTP ----------------------------------------------------------
+//
+// The same protocol engine as stdio (`Server::handle_line`), behind the MCP
+// Streamable HTTP transport: one POST /mcp per JSON-RPC message, sessions
+// carried in the `Mcp-Session-Id` header. This is what a client that cannot
+// spawn a subprocess speaks -- a remote Claude Code, an agent on another
+// machine -- where stdio is only ever local.
+//
+// Deliberately POST-only: this server sends no server-initiated messages
+// (`tools.listChanged` is false and stays false), so there is nothing a GET
+// SSE stream would carry, and 405 is the spec's answer for not offering one.
+// Responses are single JSON documents rather than SSE streams, which the spec
+// allows and which keeps one request on one connection with no framing beyond
+// content-length.
+//
+// Plain HTTP/1.1, hand-rolled like `serve.rs` and for the same reason: no HTTP
+// crate enters this dependency tree. And plain HTTP, not HTTPS: `cipher_policy`
+// refuses TLS crates, so a remote client reaches this through an SSH tunnel
+// or a proxy that can reach the loopback listener. The listener itself refuses
+// a non-loopback bind and browser origins.
+
+/// Largest MCP request body read, in bytes.
+///
+/// `serve.rs` caps claims at 1 MiB; MCP carries the same artifacts plus
+/// base64-friendly room, and the check happens before anything is allocated.
+const MCP_MAX_BODY_BYTES: u64 = 8 << 20;
+
+/// Longest request line or header line, in bytes. See `serve.rs`: an
+/// unbounded `read_line` once aborted the whole process on allocation failure.
+const MCP_MAX_LINE_BYTES: u64 = 8 * 1024;
+
+/// Most header lines read before a request is refused.
+const MCP_MAX_HEADERS: usize = 100;
+
+/// How long a request may take to arrive. A slow-loris holding sockets is the
+/// cheapest attack on a thread-per-connection server; this is the cheapest
+/// answer. There is deliberately no *write* timeout: a tool call runs to
+/// completion however long its verifier takes, exactly as on stdio.
+const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Connections served at once; past this a connection is answered 503 rather
+/// than queued with no thread to serve it.
+const MCP_MAX_CONCURRENT: u64 = 64;
+
+/// Sessions held at once. Each is three small maps, but an `initialize` that
+/// always minted would let a stranger grow the map without bound.
+const MCP_MAX_SESSIONS: usize = 1024;
+
+/// One HTTP client's citation-provenance state: what this server showed *that*
+/// client through a structured field, and the capabilities proving it.
+///
+/// The hub swaps the caller's views into the shared [`Server`] before each
+/// request and back out after, so capabilities stay per-session the way
+/// stdio's single client gets them per-process. What is deliberately NOT here:
+/// the pending commitments, which are keyed by submitter and artifact and
+/// shared across sessions like a reconnect, and the spend ceiling, which is
+/// the operator's per-run budget and not per-client.
+#[derive(Default)]
+struct SessionViews {
+    offered: BTreeSet<String>,
+    citation_capabilities: BTreeMap<String, String>,
+    tainted: BTreeSet<String>,
+}
+
+impl Server {
+    fn take_views(&mut self) -> SessionViews {
+        SessionViews {
+            offered: std::mem::take(&mut self.offered),
+            citation_capabilities: std::mem::take(&mut self.citation_capabilities),
+            tainted: std::mem::take(&mut self.tainted),
+        }
+    }
+
+    fn put_views(&mut self, views: SessionViews) {
+        self.offered = views.offered;
+        self.citation_capabilities = views.citation_capabilities;
+        self.tainted = views.tainted;
+    }
+}
+
+/// One [`Server`] behind a session table: the engine one HTTP listener serves,
+/// from any number of connection threads through one mutex.
+struct HttpHub {
+    server: Server,
+    sessions: BTreeMap<String, SessionViews>,
+}
+
+/// What one POST /mcp becomes: a status, an optional JSON-RPC frame, and the
+/// session id to answer with (the caller's, or a freshly minted one).
+struct HttpAnswer {
+    status: u16,
+    body: Option<String>,
+    session: Option<String>,
+}
+
+impl HttpHub {
+    fn new(server: Server) -> HttpHub {
+        HttpHub {
+            server,
+            sessions: BTreeMap::new(),
+        }
+    }
+
+    fn mint_session() -> String {
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// Run one POST /mcp body. `presented` is the `Mcp-Session-Id` header, if
+    /// the client sent one.
+    ///
+    /// `initialize` always opens a fresh session, even when the client
+    /// presented an id it already holds: re-initializing mid-session is a new
+    /// handshake, and the response carries the id to use from here on. The old
+    /// session lingers until the cap -- sessions are small maps, and refusing
+    /// a new handshake because an old one exists would be stranger.
+    fn handle(&mut self, presented: Option<&str>, body: &str) -> HttpAnswer {
+        let request: Json = match serde_json::from_str(body) {
+            Ok(request) => request,
+            Err(error) => {
+                return HttpAnswer {
+                    status: 400,
+                    body: Some(
+                        error_response(
+                            Json::Null,
+                            code::PARSE_ERROR,
+                            &format!("invalid JSON: {error}"),
+                        )
+                        .to_string(),
+                    ),
+                    session: presented.map(str::to_string),
+                };
+            }
+        };
+        let is_initialize = request.get("method").and_then(Json::as_str) == Some("initialize")
+            && request.get("id").is_some();
+        if is_initialize {
+            if self.sessions.len() >= MCP_MAX_SESSIONS {
+                return HttpAnswer {
+                    status: 503,
+                    body: Some(
+                        error_response(
+                            Json::Null,
+                            code::SERVER_FULL,
+                            "too many sessions, try again",
+                        )
+                        .to_string(),
+                    ),
+                    session: None,
+                };
+            }
+            let id = Self::mint_session();
+            self.server.put_views(SessionViews::default());
+            let out = self.server.handle_line(body);
+            let views = self.server.take_views();
+            self.sessions.insert(id.clone(), views);
+            return HttpAnswer {
+                status: 200,
+                body: out,
+                session: Some(id),
+            };
+        }
+        let Some(key) = presented else {
+            return HttpAnswer {
+                status: 400,
+                body: Some(
+                    error_response(
+                        Json::Null,
+                        code::NO_SESSION,
+                        "missing Mcp-Session-Id: POST initialize first",
+                    )
+                    .to_string(),
+                ),
+                session: None,
+            };
+        };
+        let Some(views) = self.sessions.remove(key) else {
+            return HttpAnswer {
+                status: 404,
+                body: Some(
+                    error_response(
+                        Json::Null,
+                        code::NO_SESSION,
+                        "unknown Mcp-Session-Id: POST initialize to open one",
+                    )
+                    .to_string(),
+                ),
+                session: None,
+            };
+        };
+        // Removed and reinserted rather than borrowed: the engine borrows the
+        // whole server mutably while it runs.
+        self.server.put_views(views);
+        let out = self.server.handle_line(body);
+        let views = self.server.take_views();
+        self.sessions.insert(key.to_string(), views);
+        match out {
+            // A notification gets no frame; 202 is what says it was heard.
+            None => HttpAnswer {
+                status: 202,
+                body: None,
+                session: Some(key.to_string()),
+            },
+            Some(frame) => HttpAnswer {
+                status: 200,
+                body: Some(frame),
+                session: Some(key.to_string()),
+            },
+        }
+    }
+
+    /// Forget a session. `false` is unknown-or-absent, which DELETE answers
+    /// 404: confirming only what the caller already holds would be an oracle,
+    /// but session ids are 256-bit random and there is nothing to enumerate.
+    fn terminate(&mut self, presented: Option<&str>) -> bool {
+        presented.is_some_and(|key| self.sessions.remove(key).is_some())
+    }
+
+    #[cfg(test)]
+    fn test_capability(&mut self, session: &str, claim_id: &str) -> Option<String> {
+        let views = self.sessions.remove(session)?;
+        self.server.put_views(views);
+        let capability = self.server.offer(claim_id);
+        let views = self.server.take_views();
+        self.sessions.insert(session.to_string(), views);
+        Some(capability)
+    }
+
+    #[cfg(test)]
+    fn test_has(&self, session: &str, claim_id: &str) -> bool {
+        self.sessions
+            .get(session)
+            .is_some_and(|views| views.citation_capabilities.contains_key(claim_id))
+    }
+}
+
+/// Serve Streamable HTTP MCP instead of stdio. Returns only on a startup
+/// failure the operator has to fix.
+fn serve_http(server: Server, addr: &str) -> i32 {
+    let listener = match bind_http(addr) {
+        Ok(listener) => listener,
+        Err(error) => fail(&error),
+    };
+    eprintln!(
+        "cairn mcp {SERVER_VERSION}: Streamable HTTP on {}, POST JSON-RPC to /mcp",
+        listener
+            .local_addr()
+            .map_or_else(|_| addr.to_string(), |bound| bound.to_string())
+    );
+    accept_loop(listener, Arc::new(Mutex::new(HttpHub::new(server))));
+    // The accept loop never returns; this is for the type, not the control flow.
+    0
+}
+
+fn bind_http(addr: &str) -> Result<TcpListener, String> {
+    let socket: SocketAddr = addr
+        .parse()
+        .map_err(|_| format!("--http {addr:?} is not a host:port address"))?;
+    // This endpoint acts as the operator's identity and can set secrets. A
+    // warning cannot protect a non-loopback plaintext bind from other hosts.
+    // Remote clients must tunnel to this loopback listener.
+    if !socket.ip().is_loopback() {
+        return Err(format!(
+            "--http {addr} must bind to loopback; tunnel remote MCP clients to 127.0.0.1"
+        ));
+    }
+    TcpListener::bind(socket).map_err(|error| format!("cannot listen on {addr}: {error}"))
+}
+
+fn accept_loop(listener: TcpListener, hub: Arc<Mutex<HttpHub>>) {
+    let live = Arc::new(Mutex::new(0u64));
+    for stream in listener.incoming() {
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            // One failed accept is not a reason to stop serving.
+            Err(_) => continue,
+        };
+        let admitted = match live.lock() {
+            Ok(mut live) if *live < MCP_MAX_CONCURRENT => {
+                *live += 1;
+                true
+            }
+            _ => false,
+        };
+        if !admitted {
+            let _ = http_respond(
+                &mut stream,
+                503,
+                "application/json",
+                br#"{"error":"busy"}"#,
+                &[],
+            );
+            continue;
+        }
+        let hub = Arc::clone(&hub);
+        let live = Arc::clone(&live);
+        thread::spawn(move || {
+            let _guard = ConnectionGuard { live };
+            let _ = handle_http_conn(&mut stream, &hub);
+            http_linger(&mut stream);
+        });
+    }
+}
+
+/// One admitted connection's hold on the concurrency count, released on drop
+/// so a handler that panics still frees its slot.
+struct ConnectionGuard {
+    live: Arc<Mutex<u64>>,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut live) = self.live.lock() {
+            *live = live.saturating_sub(1);
+        }
+    }
+}
+
+struct HttpRequest {
+    method: String,
+    path: String,
+    content_length: u64,
+    content_type: Option<String>,
+    session: Option<String>,
+    host: Option<String>,
+    origin: Option<String>,
+}
+
+fn handle_http_conn(stream: &mut TcpStream, hub: &Arc<Mutex<HttpHub>>) -> io::Result<()> {
+    stream.set_read_timeout(Some(MCP_REQUEST_TIMEOUT))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let request = match read_http_request(&mut reader) {
+        Ok(request) => request,
+        Err(message) => {
+            let frame = error_response(Json::Null, code::INVALID_REQUEST, &message).to_string();
+            http_respond(stream, 400, "application/json", frame.as_bytes(), &[])?;
+            return Ok(());
+        }
+    };
+    // A malicious webpage can reach a loopback socket through DNS rebinding
+    // or CORS. Native MCP clients and SSH tunnels send the loopback authority
+    // and no Origin; no browser origin is entrusted with the node's identity.
+    let local_port = stream.local_addr()?.port();
+    if !http_authority_allowed(
+        request.host.as_deref(),
+        request.origin.as_deref(),
+        local_port,
+    ) {
+        let frame =
+            error_response(Json::Null, code::INVALID_REQUEST, "untrusted HTTP origin").to_string();
+        http_respond(stream, 403, "application/json", frame.as_bytes(), &[])?;
+        return Ok(());
+    }
+    // One request per connection: like `serve.rs`, this answers once and
+    // closes, so there is no keep-alive state to get wrong.
+    match (request.method.as_str(), request.path.as_str()) {
+        ("OPTIONS", _) => {
+            http_respond(stream, 204, "application/json", b"", &[])?;
+        }
+        ("POST", "/mcp") => {
+            if request.content_type.as_deref() != Some("application/json") {
+                let frame = error_response(
+                    Json::Null,
+                    code::INVALID_REQUEST,
+                    "POST /mcp needs content-type application/json",
+                )
+                .to_string();
+                http_respond(stream, 415, "application/json", frame.as_bytes(), &[])?;
+                return Ok(());
+            }
+            let mut body = vec![0u8; request.content_length as usize];
+            reader.read_exact(&mut body).map_err(|_| {
+                io::Error::new(io::ErrorKind::UnexpectedEof, "could not read the body")
+            })?;
+            let text = match String::from_utf8(body) {
+                Ok(text) => text,
+                Err(_) => {
+                    let frame =
+                        error_response(Json::Null, code::PARSE_ERROR, "the body is not UTF-8")
+                            .to_string();
+                    http_respond(stream, 400, "application/json", frame.as_bytes(), &[])?;
+                    return Ok(());
+                }
+            };
+            if text.trim().is_empty() {
+                let frame =
+                    error_response(Json::Null, code::INVALID_REQUEST, "empty body").to_string();
+                http_respond(stream, 400, "application/json", frame.as_bytes(), &[])?;
+                return Ok(());
+            }
+            let answer = match hub.lock() {
+                Ok(mut hub) => hub.handle(request.session.as_deref(), &text),
+                Err(_) => HttpAnswer {
+                    status: 503,
+                    body: Some(error_response(Json::Null, code::SERVER_FULL, "busy").to_string()),
+                    session: None,
+                },
+            };
+            let session_header = answer.session.clone();
+            let extra: Vec<(&str, &str)> = match session_header.as_deref() {
+                Some(id) => vec![("Mcp-Session-Id", id)],
+                None => vec![],
+            };
+            http_respond(
+                stream,
+                answer.status,
+                "application/json",
+                answer.body.as_deref().unwrap_or("").as_bytes(),
+                &extra,
+            )?;
+        }
+        ("DELETE", "/mcp") => {
+            let gone = match hub.lock() {
+                Ok(mut hub) => hub.terminate(request.session.as_deref()),
+                Err(_) => false,
+            };
+            if gone {
+                http_respond(stream, 204, "application/json", b"", &[])?;
+            } else {
+                let frame = error_response(
+                    Json::Null,
+                    code::NO_SESSION,
+                    "unknown Mcp-Session-Id: nothing to close",
+                )
+                .to_string();
+                http_respond(stream, 404, "application/json", frame.as_bytes(), &[])?;
+            }
+        }
+        ("GET", "/mcp") => {
+            // 405, not an empty stream: hanging a GET open to send nothing
+            // would hold a thread per client for no protocol purpose.
+            let frame = error_response(
+                Json::Null,
+                code::METHOD_NOT_FOUND,
+                "this server answers POST /mcp only; it sends no server-initiated messages",
+            )
+            .to_string();
+            http_respond(
+                stream,
+                405,
+                "application/json",
+                frame.as_bytes(),
+                &[("Allow", "POST, DELETE, OPTIONS")],
+            )?;
+        }
+        ("GET", "/") => {
+            let info = json!({
+                "name": SERVER_NAME,
+                "version": SERVER_VERSION,
+                "transport": "streamable-http",
+                "mcp": "POST JSON-RPC to /mcp",
+            })
+            .to_string();
+            http_respond(stream, 200, "application/json", info.as_bytes(), &[])?;
+        }
+        _ => {
+            let frame = error_response(Json::Null, code::INVALID_REQUEST, "POST JSON-RPC to /mcp")
+                .to_string();
+            http_respond(stream, 404, "application/json", frame.as_bytes(), &[])?;
+        }
+    }
+    Ok(())
+}
+
+/// The request line and the headers that decide anything, over HTTP/1.1.
+///
+/// The same deliberately minimal subset as `serve.rs`: what a client library
+/// emits for a small POST, with chunked bodies refused rather than decoded.
+fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, String> {
+    let mut line = String::new();
+    read_http_line(reader, &mut line)
+        .map_err(|why| why.unwrap_or_else(|| "could not read the request line".to_string()))?;
+    let mut parts = line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| "empty request".to_string())?
+        .to_string();
+    let target = parts
+        .next()
+        .ok_or_else(|| "no request target".to_string())?;
+    // Absolute-form targets (`POST http://host/mcp`) arrive from proxies; the
+    // path is what routes.
+    let path = target
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/').map(|(_, path)| format!("/{path}")))
+        .unwrap_or_else(|| target.to_string());
+    let path = path.split_once('?').map_or(path.as_str(), |(head, _)| head);
+
+    let mut content_length = 0u64;
+    let mut content_type = None;
+    let mut session = None;
+    let mut host = None;
+    let mut origin = None;
+    let mut headers = 0usize;
+    loop {
+        let mut header = String::new();
+        let read = read_http_line(reader, &mut header)
+            .map_err(|why| why.unwrap_or_else(|| "could not read headers".to_string()))?;
+        if read == 0 || header.trim().is_empty() {
+            break;
+        }
+        headers += 1;
+        if headers > MCP_MAX_HEADERS {
+            return Err(format!("more than {MCP_MAX_HEADERS} header lines"));
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "content-length" => {
+                    content_length = value
+                        .trim()
+                        .parse::<u64>()
+                        .map_err(|_| "content-length is not a number".to_string())?;
+                    if content_length > MCP_MAX_BODY_BYTES {
+                        return Err(format!("body larger than {MCP_MAX_BODY_BYTES} bytes"));
+                    }
+                }
+                "content-type" => {
+                    content_type = Some(
+                        value
+                            .split(';')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_ascii_lowercase(),
+                    );
+                }
+                "mcp-session-id" => {
+                    session = Some(value.trim().to_string());
+                }
+                "host" => {
+                    if host.replace(value.trim().to_string()).is_some() {
+                        return Err("more than one Host header".to_string());
+                    }
+                }
+                "origin" => origin = Some(value.trim().to_string()),
+                "transfer-encoding" if value.to_ascii_lowercase().contains("chunked") => {
+                    return Err("chunked bodies are not supported; send content-length".to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    // GET, DELETE and OPTIONS carry no body; a length on one is a client bug,
+    // refused rather than read and ignored.
+    if method != "POST" && content_length > 0 {
+        return Err(format!("{method} takes no body"));
+    }
+
+    Ok(HttpRequest {
+        method,
+        path: path.to_string(),
+        content_length,
+        content_type,
+        session,
+        host,
+        origin,
+    })
+}
+
+fn http_authority_allowed(host: Option<&str>, origin: Option<&str>, port: u16) -> bool {
+    if origin.is_some() {
+        return false;
+    }
+    let Some(host) = host else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case(&format!("localhost:{port}")) {
+        return true;
+    }
+    host.parse::<SocketAddr>()
+        .is_ok_and(|address| address.ip().is_loopback() && address.port() == port)
+}
+
+/// One line of at most [`MCP_MAX_LINE_BYTES`]. `Err(Some(why))` names a line
+/// that was too long; `Err(None)` is an I/O failure for the caller to word.
+fn read_http_line(
+    reader: &mut BufReader<TcpStream>,
+    line: &mut String,
+) -> Result<usize, Option<String>> {
+    let mut bytes = 0u64;
+    loop {
+        let mut byte = [0u8; 1];
+        match reader.read(&mut byte) {
+            Ok(0) => return Ok(line.len()),
+            Ok(_) => {}
+            Err(error) => {
+                if line.is_empty() && bytes == 0 {
+                    return Err(None);
+                }
+                let _ = error;
+                return Err(None);
+            }
+        }
+        bytes += 1;
+        if bytes > MCP_MAX_LINE_BYTES {
+            return Err(Some(format!(
+                "a line longer than {MCP_MAX_LINE_BYTES} bytes"
+            )));
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        line.push(byte[0] as char);
+    }
+    if line.ends_with('\r') {
+        line.pop();
+    }
+    Ok(line.len())
+}
+
+fn http_respond(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    extra: &[(&str, &str)],
+) -> io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        202 => "Accepted",
+        204 => "No Content",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        415 => "Unsupported Media Type",
+        503 => "Service Unavailable",
+        _ => "Error",
+    };
+    // No CORS headers: a webpage must not turn this local operator identity
+    // into a cross-origin tool endpoint.
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\
+         connection: close\r\n",
+        body.len()
+    );
+    for (name, value) in extra {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
+/// Close an answered connection without destroying the answer: shut the write
+/// side first so the response and a FIN go out, then drain what the client is
+/// still sending. Closing with unread input sends RST, which can discard the
+/// response still queued. Same shape as `serve.rs`, smaller bounds: an MCP
+/// client that is still sending past 1 MiB is not one that will read.
+fn http_linger(stream: &mut TcpStream) {
+    if stream.shutdown(Shutdown::Write).is_err() {
+        return;
+    }
+    let until = Instant::now() + Duration::from_secs(2);
+    let mut scratch = [0u8; 8 * 1024];
+    let mut drained = 0usize;
+    while drained < 1024 * 1024 {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+            return;
+        }
+        match stream.read(&mut scratch) {
+            Ok(0) | Err(_) => return,
+            Ok(read) => drained += read,
+        }
+    }
 }
 
 /// Start MCP on a daemon's stdio, sharing the daemon's one rules engine and
@@ -412,7 +1132,7 @@ pub(crate) fn start_shared_stdio(
     identity_path: Option<&Path>,
     log: &Path,
     key_path: &Path,
-    spend: SpendCeiling,
+    spend: Arc<Mutex<SpendCeiling>>,
     presence: SharedPresence,
     journal: crate::journal::Shared,
 ) -> Result<Receiver<()>, String> {
@@ -423,10 +1143,13 @@ pub(crate) fn start_shared_stdio(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         shown.signs_as = identity.as_ref().map(Identity::submitter_id);
-        shown.spend_limit = spend.limit;
+        shown.spend_limit = spend
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .limit;
     }
     let server = Server::new_shared(state, identity, cipher)
-        .with_spend_ceiling(spend)
+        .with_shared_spend_ceiling(&spend)
         .attached(Attachment { presence, journal });
     eprintln!(
         "cairn mcp {SERVER_VERSION}: sharing daemon ledger {}, stdio ready",
@@ -459,7 +1182,7 @@ fn pending_cipher(
 }
 
 fn report_identity(server: &Server, flag: &str) {
-    match server.spend.limit {
+    match server.spend_limit() {
         0 => {
             eprintln!("post_objective: unfunded objectives only (no --max-spend / {MAX_SPEND_ENV})")
         }
@@ -861,8 +1584,11 @@ struct Server {
     /// `structuredContent` for the reason `call_tool` gives: a client may read
     /// the latter as the whole result, and these sit beside the text.
     meta: Option<Json>,
-    /// What `post_objective` may still commit. See [`SpendCeiling`].
-    spend: SpendCeiling,
+    /// What `post_objective` may still commit. Shared, not owned: one process
+    /// can serve stdio and HTTP at once (`cairn run --mcp-http`), and the
+    /// ceiling is the operator's per-run budget, not per-transport. Two
+    /// counters would let agents spend it twice.
+    spend: Arc<Mutex<SpendCeiling>>,
     /// The daemon's presence board and journal, when this session is the
     /// daemon's own. `None` for a standalone server and in every unit test,
     /// which therefore narrate to nobody.
@@ -885,8 +1611,21 @@ impl Server {
 
     /// The operator's ceiling on what agents may fund. See [`SpendCeiling`].
     fn with_spend_ceiling(mut self, spend: SpendCeiling) -> Server {
-        self.spend = spend;
+        self.spend = Arc::new(Mutex::new(spend));
         self
+    }
+
+    /// Share one ceiling between two servers over one process. See [`Server::spend`].
+    fn with_shared_spend_ceiling(mut self, spend: &Arc<Mutex<SpendCeiling>>) -> Server {
+        self.spend = Arc::clone(spend);
+        self
+    }
+
+    fn spend_limit(&self) -> u64 {
+        self.spend
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .limit
     }
 
     fn new_shared(
@@ -912,7 +1651,7 @@ impl Server {
             pending,
             identity,
             meta: None,
-            spend: SpendCeiling::new(0),
+            spend: Arc::new(Mutex::new(SpendCeiling::new(0))),
             attachment: None,
         }
     }
@@ -1127,6 +1866,12 @@ mod code {
     pub const INVALID_REQUEST: i64 = -32600;
     pub const METHOD_NOT_FOUND: i64 = -32601;
     pub const INVALID_PARAMS: i64 = -32602;
+    /// The HTTP hub is out of sessions, or momentarily cannot take the lock.
+    /// Only ever sent with an HTTP 503 beside it.
+    pub const SERVER_FULL: i64 = -32001;
+    /// A POST /mcp without a usable `Mcp-Session-Id`, answered 400 when the
+    /// header is missing and 404 when the session is unknown or closed.
+    pub const NO_SESSION: i64 = -32002;
 }
 
 impl Server {
@@ -2931,8 +3676,15 @@ impl Server {
             None => objective,
         };
         // Before the write, and spent only after it is admitted: a refused post
-        // must not use up the ceiling.
-        self.spend
+        // must not use up the ceiling. The guard is held across the admission,
+        // so two concurrent posts cannot both pass the check and spend the
+        // ceiling twice -- stdio never needed this (one client, one thread)
+        // and HTTP does.
+        let mut spend = self
+            .spend
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        spend
             .check(objective.reward)
             .map_err(|why| format!("post refused: {why}"))?;
         let id = self
@@ -2940,7 +3692,11 @@ impl Server {
             .write()
             .post_objective(&objective, &ts)
             .map_err(|violation| format!("post refused: {violation}. Nothing was recorded."))?;
-        self.spend.record(objective.reward);
+        spend.record(objective.reward);
+        // Released before anything else borrows the server: the admission is
+        // over, and holding the ceiling across the rendering below would
+        // serialize every post behind nothing.
+        drop(spend);
         // The statement is now prose this server has rendered back to an
         // agent, and any claim id planted in it must be refusable as a
         // citation -- the same rule `list_objectives` applies.
@@ -3680,6 +4436,121 @@ mod tests {
         let mut s = server();
         let line = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string();
         assert!(s.handle_line(&line).is_none());
+    }
+
+    fn http_init() -> String {
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2025-11-25" }
+        })
+        .to_string()
+    }
+
+    fn http_open(hub: &mut HttpHub) -> String {
+        let answer = hub.handle(None, &http_init());
+        assert_eq!(answer.status, 200);
+        let session = answer.session.expect("initialize mints a session");
+        assert_eq!(session.len(), 64, "a session id is 256 bits of hex");
+        let frame: Json = serde_json::from_str(&answer.body.unwrap()).unwrap();
+        assert_eq!(frame["result"]["protocolVersion"], json!("2025-11-25"));
+        session
+    }
+
+    #[test]
+    fn http_initialize_mints_a_fresh_session_per_handshake() {
+        let mut hub = HttpHub::new(server());
+        let first = http_open(&mut hub);
+        let second = http_open(&mut hub);
+        assert_ne!(first, second, "every handshake gets its own session");
+    }
+
+    #[test]
+    fn http_calls_need_a_session_first() {
+        let mut hub = HttpHub::new(server());
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }).to_string();
+        let missing = hub.handle(None, &list);
+        assert_eq!(missing.status, 400);
+        let unknown_id = "0".repeat(64);
+        let unknown = hub.handle(Some(&unknown_id), &list);
+        assert_eq!(unknown.status, 404);
+        let session = http_open(&mut hub);
+        let answer = hub.handle(Some(&session), &list);
+        assert_eq!(answer.status, 200);
+        assert_eq!(answer.session.as_deref(), Some(session.as_str()));
+        let frame: Json = serde_json::from_str(&answer.body.unwrap()).unwrap();
+        assert!(frame["result"]["tools"].as_array().unwrap().len() >= 15);
+    }
+
+    #[test]
+    fn http_notifications_are_accepted_not_answered() {
+        let mut hub = HttpHub::new(server());
+        let session = http_open(&mut hub);
+        let line = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string();
+        let answer = hub.handle(Some(&session), &line);
+        assert_eq!(answer.status, 202);
+        assert!(answer.body.is_none());
+    }
+
+    #[test]
+    fn http_sessions_do_not_share_citation_capabilities() {
+        // The capability is the citation's provenance: a client may only cite
+        // what this server showed *it* through a structured field. If two HTTP
+        // sessions shared the maps, a capability leaked from one transcript
+        // would authorize a citation in another.
+        let mut hub = HttpHub::new(server());
+        let a = http_open(&mut hub);
+        let b = http_open(&mut hub);
+        let claim = format!("sha256:{}", "c".repeat(64));
+        hub.test_capability(&a, &claim).expect("offer in A");
+        assert!(hub.test_has(&a, &claim));
+        assert!(!hub.test_has(&b, &claim));
+        // And interleaved calls on B do not disturb A's views on their way
+        // through the shared server.
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }).to_string();
+        assert_eq!(hub.handle(Some(&b), &list).status, 200);
+        assert!(hub.test_has(&a, &claim));
+        assert!(!hub.test_has(&b, &claim));
+    }
+
+    #[test]
+    fn http_terminate_forgets_the_session() {
+        let mut hub = HttpHub::new(server());
+        let session = http_open(&mut hub);
+        assert!(!hub.terminate(None));
+        assert!(!hub.terminate(Some(&"0".repeat(64))));
+        assert!(hub.terminate(Some(&session)));
+        assert!(!hub.terminate(Some(&session)));
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }).to_string();
+        assert_eq!(hub.handle(Some(&session), &list).status, 404);
+    }
+
+    #[test]
+    fn http_malformed_json_is_a_400_not_a_panic() {
+        let mut hub = HttpHub::new(server());
+        let answer = hub.handle(None, "{");
+        assert_eq!(answer.status, 400);
+        let frame: Json = serde_json::from_str(&answer.body.unwrap()).unwrap();
+        assert_eq!(frame["error"]["code"], json!(code::PARSE_ERROR));
+    }
+
+    #[test]
+    fn http_refuses_browser_origins_and_nonlocal_authorities() {
+        assert!(http_authority_allowed(Some("127.0.0.1:8001"), None, 8001));
+        assert!(http_authority_allowed(Some("localhost:8001"), None, 8001));
+        assert!(http_authority_allowed(Some("[::1]:8001"), None, 8001));
+        assert!(!http_authority_allowed(
+            Some("attacker.example:8001"),
+            None,
+            8001
+        ));
+        assert!(!http_authority_allowed(Some("127.0.0.1:8002"), None, 8001));
+        assert!(!http_authority_allowed(
+            Some("127.0.0.1:8001"),
+            Some("https://attacker.example"),
+            8001
+        ));
+        assert!(!http_authority_allowed(None, None, 8001));
+        assert!(bind_http("0.0.0.0:0").is_err());
     }
 
     #[test]

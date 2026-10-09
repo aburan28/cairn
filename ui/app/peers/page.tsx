@@ -69,7 +69,6 @@ export default function Page() {
       <PageHeader
         title="Peers"
         subtitle="Addresses announced in this node's log. For active connections and node types, open Network."
-        
       />
 
       {(chain || checkpoint?.kind === "signed") && (

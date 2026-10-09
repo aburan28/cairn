@@ -114,7 +114,6 @@ function FrontierPage() {
       <PageHeader crumb={{ href: "/objectives", label: "Objectives" }}
         title="Frontier"
         subtitle="The best verified result on this objective, and every result it displaced, in order."
-        
       />
 
 

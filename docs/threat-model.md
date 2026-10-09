@@ -6,6 +6,7 @@ for solved.
 
 | attack | mechanism | status |
 |---|---|---|
+| **browser or LAN client commandeers MCP HTTP** — an untrusted page uses cross-origin requests or DNS rebinding to call tools under the operator's key | The listener binds only loopback; HTTP requests with an `Origin` header or a non-loopback `Host` authority are refused, and no wildcard CORS headers are sent. Remote clients use an SSH tunnel to loopback. A local process with access to that port can still invoke tools, as it can with the local stdio configuration; the HTTP endpoint has no separate client authentication | partial |
 | **grinding** — flood cheap novel artifacts to inflate supply | demand-gated mint: no funded objective, no issuance. Duplicates verify and mint zero | handled |
 | **front-running the reveal** — copy an artifact out of the mempool and submit it first | commit–reveal binding `H(artifact ‖ submitter ‖ nonce)`; the submitter is inside the hash so a commitment cannot be replayed under another name. The frozen encoding uses `|` separators, so both implementations refuse a submitter containing `|` and prevent shifting bytes between submitter and nonce | handled |
 | **mid-bounty rule change** — edit the evaluator after work has been done | the verifier is part of the objective's content-addressed id, so an edit forks the objective instead of rescoring it. Unrepresentable rather than guarded | handled |
