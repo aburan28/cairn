@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.1.0](https://github.com/aburan28/cairn/compare/v2.0.0...v2.1.0) (2026-10-09)
+
+
+### Features
+
+* **deposit:** campaign key shape with commit markers, upload through grants ([#262](https://github.com/aburan28/cairn/issues/262)) ([60ffa67](https://github.com/aburan28/cairn/commit/60ffa67f755530f68a574969cc5f1180bb3586d7))
+* **ui:** show per-result knowledge evidence ([#263](https://github.com/aburan28/cairn/issues/263)) ([96e5936](https://github.com/aburan28/cairn/commit/96e593693d8dc29a0b718f750dea2bd317dc7f90))
+
 ## [2.0.0](https://github.com/aburan28/cairn/compare/v1.18.0...v2.0.0) (2026-10-07)
 
 
