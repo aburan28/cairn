@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.2.0](https://github.com/aburan28/cairn/compare/v2.1.0...v2.2.0) (2026-10-09)
+
+### Features
+
+* **work:** manage named contributions and keep verifiers runnable ([#267](https://github.com/aburan28/cairn/issues/267)) ([6d94d51](https://github.com/aburan28/cairn/commit/6d94d51155e9ffc83695c12d685a325133806cab))
+
 ## [2.1.0](https://github.com/aburan28/cairn/compare/v2.0.0...v2.1.0) (2026-10-09)
 
 
