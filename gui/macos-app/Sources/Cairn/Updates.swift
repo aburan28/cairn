@@ -26,15 +26,11 @@ import SwiftUI
 ///
 /// A build without both keys -- a checkout's, or a release cut before the
 /// key existed -- has nothing to verify an update against, so it never
-/// starts Sparkle, and Check for Updates… says so and names the installer.
-/// It used to open the releases page on GitHub instead: a link out of the
-/// app to a web UI, and a download nothing here would have checked.
+/// starts Sparkle. A person may open the official release page themselves;
+/// this app does not silently download or install an unverified update.
 @MainActor
 final class Updates: ObservableObject {
-    /// What to run instead, for a build that cannot check: the same line the
-    /// reader's front page prints.
-    static let installCommand =
-        "curl -fsSL https://github.com/aburan28/cairn/releases/latest/download/install.sh | sh"
+    static let releasesURL = URL(string: "https://github.com/aburan28/cairn/releases/latest")!
 
     private let controller: SPUStandardUpdaterController?
     /// Sparkle holds its delegate weakly; this is the strong reference.
@@ -83,17 +79,11 @@ final class Updates: ObservableObject {
         }
         let alert = NSAlert()
         alert.messageText = "This build cannot check for updates"
-        alert.informativeText = """
-            It was built without the update-signing keys, so there is nothing to \
-            verify a download against. Install the current release from a terminal:
-
-            \(Self.installCommand)
-            """
-        alert.addButton(withTitle: "Copy Command")
+        alert.informativeText = "This build has no update-signing keys. Cairn cannot verify or install an update from here. Open the official releases page to download the current installer yourself."
+        alert.addButton(withTitle: "Open Releases")
         alert.addButton(withTitle: "OK")
         if alert.runModal() == .alertFirstButtonReturn {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(Self.installCommand, forType: .string)
+            NSWorkspace.shared.open(Self.releasesURL)
         }
     }
 }
@@ -207,7 +197,7 @@ struct UpdatesSection: View {
 
     private var footer: String {
         guard updates.isEnabled else {
-            return "This build cannot verify updates, so it does not install them. Install the current release from a terminal: \(Updates.installCommand)"
+            return "This build cannot verify or install updates. Check Now opens the official releases page, where you can download the current installer."
         }
         var text = "An update is installed only if its post-quantum (ML-DSA-87) and Ed25519 signatures match this app's keys. It installs the cairn command and this app together, and asks for an administrator password."
         if let last = updates.lastCheck {

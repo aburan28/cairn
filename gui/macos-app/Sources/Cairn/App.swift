@@ -80,6 +80,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return node.open(fromPage: sheet, objective: objective)
         }
+        browser.onWorkStatus = { [node] in node.worker.pageStatus() }
+        browser.onStartWork = { [node] objective in node.startWorkFromPage(objective: objective) }
+        browser.onPauseWork = { [node] in node.worker.requestPause() }
+        browser.onResumeWork = { [node] in node.worker.resume() }
+        browser.onStopWork = { [node] in
+            node.worker.requestStop()
+        }
+        browser.onExitWork = { [node] in node.exitWork() }
         // A node the person asked to keep running is a launchd agent; make
         // sure it is loaded, then attach to it instead of spawning one.
         node.ensureBackgroundService()

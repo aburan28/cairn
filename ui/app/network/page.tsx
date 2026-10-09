@@ -297,8 +297,7 @@ function Dashboard({
         >
           {machines.length === 0 ? (
             <p className="px-4 py-6 text-center text-[13px] text-ink-3">
-              No machine is working with this node yet. One appears here within a minute of starting{" "}
-              <span className="mono">cairn work</span> against it.
+              No machine is working with this node yet. Choose a goal in Contribute to start one.
             </p>
           ) : (
             <div className="overflow-x-auto">
@@ -500,8 +499,7 @@ function PeersTable({ sessions, announced }: { sessions: SessionsResponse | null
   if (!sessions.available) {
     return (
       <p className="px-4 py-6 text-[13px] text-ink-3">
-        This node runs no peer-to-peer service, so it syncs with nobody. Start it with{" "}
-        <span className="mono">cairn run</span> to join the network.
+        This node is not connected to other nodes. Open Cairn.app&rsquo;s network settings to connect it.
       </p>
     );
   }

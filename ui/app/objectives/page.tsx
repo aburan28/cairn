@@ -246,8 +246,7 @@ export default function Page() {
             </Link>
           }
         >
-          Fund one from this page, or with{" "}
-          <code className="mono">cairn post &lt;objective.json&gt;</code>.
+          Post a challenge to give contributors a goal to work on.
         </EmptyState>
       )}
 

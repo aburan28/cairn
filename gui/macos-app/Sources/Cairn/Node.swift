@@ -168,14 +168,14 @@ final class Node: ObservableObject {
 
     /// Start `cairn work` as the sheet asked, with the key it is paid to
     /// made first if this Mac has none yet. Returns why not, or nil.
-    func startWork(_ plan: WorkPlan) -> String? {
+    func startWork(_ requested: WorkPlan) -> String? {
         guard let binary = binary ?? Self.locateBinary() else { return "No cairn command was found." }
         do {
             try Self.prepareScratch(settings)
         } catch {
             return "Could not prepare the worker's scratch directory: \(error.localizedDescription)"
         }
-        if let identity = plan.identity, !FileManager.default.fileExists(atPath: identity) {
+        if let identity = requested.identity, !FileManager.default.fileExists(atPath: identity) {
             try? FileManager.default.createDirectory(
                 at: URL(fileURLWithPath: identity).deletingLastPathComponent(), withIntermediateDirectories: true)
             let made = Self.runCairn(binary, ["identity", "--out", identity])
@@ -184,7 +184,26 @@ final class Node: ObservableObject {
                     + (made.err.isEmpty ? "cairn identity exited \(made.status)" : made.err)
             }
         }
+        var plan = requested
+        plan.stopFile = dataDir.appendingPathComponent("work-stop-\(UUID().uuidString)").path
+        plan.pauseFile = dataDir.appendingPathComponent("work-pause-\(UUID().uuidString)").path
         return worker.start(plan, binary: binary, environment: Self.childEnvironment(settings), logFile: workLogFile)
+    }
+
+    /// The page selects the objective; the native sheet lets the person review
+    /// resources and solver before the app launches anything.
+    func startWorkFromPage(objective: String) -> String? {
+        guard httpOrigin != nil else { return "The node is not running." }
+        guard !worker.isRunning else { return "This Mac is already working. Stop it before changing objectives." }
+        if sheetIsOpen { return "Close the open Cairn window first." }
+        work(on: objective)
+        return nil
+    }
+
+    func exitWork() -> String? {
+        if let problem = worker.requestExit() { return problem }
+        workObjective = nil
+        return nil
     }
 
     // MARK: finding the binary
@@ -630,8 +649,15 @@ final class Node: ObservableObject {
             try FileManager.default.createDirectory(at: settings.dataFolder,
                                                     withIntermediateDirectories: true)
         }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false,
-                                                attributes: [.posixPermissions: 0o700])
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory) {
+            guard isDirectory.boolValue,
+                  (try? FileManager.default.destinationOfSymbolicLink(atPath: dir.path)) == nil
+            else { throw CocoaError(.fileWriteFileExists) }
+        } else {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+        }
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
     }
 

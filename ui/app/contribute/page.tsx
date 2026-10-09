@@ -1,41 +1,34 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { type NetworkResponse, fetchNetwork, primaryRole } from "@/lib/network";
 import { type Objective, loadObjectives } from "@/lib/site";
 import { type Underserved, fetchGoals } from "@/lib/goals";
 import {
   type AppRole,
   type AppSheet,
-  type Offer,
   PAY_LABEL,
   ROLES,
   ROLE_TOGGLE,
   type RoleId,
   type RoleInfo,
-  describeOffer,
-  lanState,
   openSheet,
   setRole,
-  workCommand,
 } from "@/lib/contribute";
 import { type Bridge, appBridge } from "@/lib/draft";
 import { objectiveTitle } from "@/lib/title";
 import { AgentConnect } from "@/components/agents";
+import { WorkPanel } from "@/components/WorkPanel";
 import { useNode } from "@/components/hooks";
-import { Badge, Command, Note, PageHeader, Sheet } from "@/components/ui";
+import { Badge, Note, PageHeader, Sheet } from "@/components/ui";
 
 /**
  * Ways to take part, what each pays, and -- one click away -- doing it.
  *
  * Every role is a button. It opens a panel that asks what it needs to and
  * then does the thing: inside Cairn.app it flips the app's toggle or opens
- * its sheet; anywhere else it hands over the exact command, filled in from
- * this node. Offering compute is the one that asks the most -- which GPUs,
- * how many threads, how many hours a day, on what -- and `cairn work` honours
- * all of it (`src/agent/work.rs`): the solver is shown only the GPUs offered,
- * told its thread count, and paused when the day's hours are used.
+ * its sheet. A browser cannot control a process on the reader's machine.
  *
  * What an offer is not is proof. The roster shows what a machine says it
  * offers; only the answers a challenge's checker accepts are paid, so a
@@ -193,10 +186,7 @@ export default function Page() {
                 Checks are what lift a result to <i>backed by a bond</i> on the Knowledge page.
               </p>
               {!bridge && (
-                <>
-                  <p className="mt-3">Make a key, then start the node with it:</p>
-                  <Command className="mt-1.5" text={"cairn identity --out validator.identity.json\ncairn run --attest-identity validator.identity.json"} />
-                </>
+                <p className="mt-3">Open this node in Cairn.app and turn on checking in Settings.</p>
               )}
             </Toggled>
           )}
@@ -206,7 +196,7 @@ export default function Page() {
                 Your node accepts connections from other nodes and serves them the log, so the network stays connected
                 when others are behind routers. It costs bandwidth and opens a port to the internet.
               </p>
-              {!bridge && <Command className="mt-3" text="cairn run --listen 0.0.0.0:9000" />}
+              {!bridge && <p className="mt-3">Open this node in Cairn.app and turn on relaying in Settings.</p>}
               <p className="mt-3 text-ink-3">
                 Whether strangers can reach it is on the Network page, under <i>from outside</i>.
               </p>
@@ -257,8 +247,6 @@ function RoleCard({ role, on, onOpen }: { role: RoleInfo; on: boolean; onOpen: (
 
 // -- offer compute ---------------------------------------------------------------
 
-const GPU_CHOICES = [0, 1, 2, 3, 4, 5, 6, 7] as const;
-
 function OfferCompute({
   network,
   objectives,
@@ -280,195 +268,57 @@ function OfferCompute({
   onShare: () => void;
   onWork: (objective?: string) => void;
 }) {
-  const cpus = network?.node.hardware.cpus ?? 8;
-  const [where, setWhere] = useState<"here" | "other">("here");
-  const [gpus, setGpus] = useState<number[]>([]);
-  const [threads, setThreads] = useState(Math.max(1, Math.floor(cpus / 2)));
-  const [hours, setHours] = useState(8);
   const [objective, setObjective] = useState("");
-  const [worker, setWorker] = useState("");
-  const [device, setDevice] = useState("");
-  const [solver, setSolver] = useState("");
-  const [url, setUrl] = useState("");
 
-  // Follow an objective-specific Contribute link when possible. Otherwise
-  // default to the richest open angle with the fewest live workers.
   useEffect(() => {
     if (objective || objectives.length === 0) return;
-    if (requestedObjective && objectives.some((o) => o.id === requestedObjective)) {
+    if (requestedObjective && objectives.some((row) => row.id === requestedObjective)) {
       setObjective(requestedObjective);
       return;
     }
-    const scarce = underserved.flatMap((row) => row.objectives).find((id) => objectives.some((o) => o.id === id));
+    const scarce = underserved.flatMap((row) => row.objectives).find((id) => objectives.some((row) => row.id === id));
     setObjective(scarce ?? objectives[0].id);
   }, [objectives, underserved, objective, requestedObjective]);
 
-  const lan = lanState(network?.node.reach, origin);
-  const urls = useMemo(() => (lan.state === "lan" ? lan.urls : []), [lan]);
-  useEffect(() => {
-    if (!url) setUrl(where === "here" ? origin : (urls[0] ?? ""));
-  }, [where, urls, origin, url]);
-
-  const offer: Offer = { gpus, threads, hoursPerDay: hours, device: device || null };
-  const leader = network?.node.fleet?.signs_as ?? null;
-  const command = workCommand({ node: url, objective: objective || null, worker, solver, leader, offer });
-  const target = objectives.find((o) => o.id === objective);
-
   return (
-    <div className="flex flex-col gap-5 text-[13px]">
+    <div className="flex flex-col gap-4 text-[13px]">
       <p className="text-ink-2">
-        Put a machine to work on a challenge. It takes its own slice each epoch, runs a solver you supply, and is paid for
-        what the challenge&rsquo;s checker accepts.
+        Choose a goal, then start a worker on this Mac. The worker takes a slice of the search,
+        runs the solver you chose in Cairn.app, and sends its answers for verification.
       </p>
-
-      <div className="segmented self-start" role="group" aria-label="Which machine">
-        <button type="button" aria-pressed={where === "here"} onClick={() => { setWhere("here"); setUrl(""); }}>
-          This computer
+      <label className="flex flex-col gap-1 text-[12px] text-ink-3">
+        Goal to work on
+        <select className="field" value={objective} onChange={(event) => setObjective(event.target.value)} disabled={!objectives.length}>
+          {objectives.length === 0 && <option value="">No open goal on this node</option>}
+          {objectives.map((row) => <option key={row.id} value={row.id}>{objectiveTitle(row)}</option>)}
+        </select>
+      </label>
+      {objective && <WorkPanel objective={objective} base={origin} />}
+      {bridge && (
+        <button type="button" className="btn btn-sm self-start" disabled={busy || !objective} onClick={() => onWork(objective)}>
+          Choose or change solver…
         </button>
-        <button type="button" aria-pressed={where === "other"} onClick={() => { setWhere("other"); setUrl(""); }}>
-          Another machine
-        </button>
-      </div>
-
-      {where === "other" && lan.state === "local" && (
-        <Note title="Only this computer can reach this node" tone="warn">
-          Another machine cannot connect until the node listens on your network.
-          {bridge ? (
-            <div className="mt-2">
-              <button type="button" className="btn btn-primary btn-sm" onClick={onShare} disabled={busy}>
-                Share this node on my network
-              </button>
-            </div>
-          ) : (
-            <>
-              {" "}
-              Start it with <code className="mono">cairn run --serve 0.0.0.0:8080</code>. Anyone on that network can then
-              read the log and post answers; nobody can change what has settled.
-            </>
-          )}
-        </Note>
       )}
-
-      <fieldset className="flex flex-col gap-1.5">
-        <legend className="label">GPUs to offer</legend>
-        <div className="flex flex-wrap gap-1.5">
-          <button
-            type="button"
-            className={`btn btn-sm ${gpus.length === 0 ? "btn-primary" : ""}`}
-            onClick={() => setGpus([])}
-          >
-            None
-          </button>
-          {GPU_CHOICES.map((n) => (
-            <button
-              key={n}
-              type="button"
-              className={`btn btn-sm mono ${gpus.includes(n) ? "btn-primary" : ""}`}
-              onClick={() => setGpus(gpus.includes(n) ? gpus.filter((g) => g !== n) : [...gpus, n].sort((a, b) => a - b))}
-              aria-pressed={gpus.includes(n)}
-            >
-              GPU {n}
-            </button>
-          ))}
-        </div>
-        <span className="hint">
-          The solver sees only these, as <span className="mono">CUDA_VISIBLE_DEVICES</span> and{" "}
-          <span className="mono">HIP_VISIBLE_DEVICES</span>; the rest of the machine&rsquo;s GPUs stay yours.
-        </span>
-      </fieldset>
-
-      <label className="flex flex-col gap-1.5">
-        <span className="label mb-0 flex justify-between">
-          CPU threads <span className="mono text-ink">{threads}</span>
-        </span>
-        <input type="range" min={1} max={Math.max(cpus, 1)} value={threads} onChange={(e) => setThreads(Number(e.target.value))} />
-        <span className="hint">
-          Told to the solver as <span className="mono">OMP_NUM_THREADS</span> and{" "}
-          <span className="mono">CAIRN_THREADS</span>
-          {network?.node.hardware.cpus && where === "here" ? `; this computer has ${network.node.hardware.cpus}.` : "."}
-        </span>
-      </label>
-
-      <label className="flex flex-col gap-1.5">
-        <span className="label mb-0 flex justify-between">
-          Hours a day <span className="mono text-ink">{hours >= 24 ? "all day" : hours}</span>
-        </span>
-        <input type="range" min={1} max={24} value={hours} onChange={(e) => setHours(Number(e.target.value))} />
-        <span className="hint">
-          It pauses when today&rsquo;s hours are used and starts again at midnight UTC, still sending what it already
-          committed so nothing goes unpaid.
-        </span>
-      </label>
-
-      <div className="grid gap-3 sm:grid-cols-2">
-        <label className="flex flex-col gap-1 text-[12px] text-ink-3 sm:col-span-2">
-          Work on
-          <select className="field" value={objective} onChange={(e) => setObjective(e.target.value)} disabled={!objectives.length}>
-            {objectives.length === 0 && <option value="">no open challenge on this node</option>}
-            {objectives.map((o) => (
-              <option key={o.id} value={o.id}>
-                {objectiveTitle(o)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-[12px] text-ink-3">
-          Machine name
-          <input className="field" value={worker} placeholder="garage-gpu" onChange={(e) => setWorker(e.target.value)} spellCheck={false} />
-        </label>
-        <label className="flex flex-col gap-1 text-[12px] text-ink-3">
-          What it is
-          <input className="field" value={device} placeholder="RTX 4090" onChange={(e) => setDevice(e.target.value)} />
-        </label>
-        <label className="flex flex-col gap-1 text-[12px] text-ink-3 sm:col-span-2">
-          Solver command
-          <input className="field field-mono" value={solver} placeholder="./your-solver" onChange={(e) => setSolver(e.target.value)} spellCheck={false} />
-        </label>
-        {where === "other" && (
-          <label className="flex flex-col gap-1 text-[12px] text-ink-3 sm:col-span-2">
-            This node, as the other machine reaches it
-            <input className="field field-mono" value={url} placeholder="http://<this computer>:8080" onChange={(e) => setUrl(e.target.value)} spellCheck={false} />
-          </label>
-        )}
-      </div>
-
-      <div className="rounded-lg border border-accent-line bg-accent-soft px-3 py-2.5 text-[12.5px] text-ink">
-        Offering <b>{describeOffer(offer)}</b>
-        {target ? (
-          <>
-            {" "}
-            to <b>{objectiveTitle(target)}</b>.
-          </>
-        ) : (
-          "."
-        )}
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <div className="text-[12.5px] font-medium text-ink">
-          {where === "here" ? "Start it in a terminal on this computer" : "Start it on that machine"}
-        </div>
-        <Command text={command} />
-        {bridge && where === "here" && (
-          <div className="flex flex-wrap items-center gap-2">
-            <button type="button" className="btn btn-sm" onClick={() => onWork(objective || undefined)} disabled={busy}>
-              Or use Work on This Mac…
-            </button>
-            <span className="text-[11.5px] text-ink-3">Cairn.app&rsquo;s sheet runs the same worker, without the limits above.</span>
-          </div>
-        )}
-        <p className="hint">
-          Each round the solver gets its slice as JSON on stdin and prints answers, one JSON object per line. The machine
-          appears on the Network page within a minute, with what it offered.
+      {!bridge && (
+        <p className="text-ink-2">
+          Open this node in Cairn.app on the computer that will do the work. Choose a goal and
+          a solver there, then use the Start and Stop controls above.
         </p>
-      </div>
-
-      <div className="rounded-lg border border-edge bg-surface-2 px-3 py-2.5 text-[12px] leading-relaxed text-ink-2">
-        <b className="text-ink">How the work is proven.</b> An offer is what a machine says; nothing checks it, and nothing
-        pays for it. What pays is an answer the challenge&rsquo;s pinned checker accepts — committed, revealed an epoch
-        later, and recorded in the log — so the only proof of work that counts is the work.
-        {leader && " This node leads a fleet: it signs for the machines on its network and is paid for what they find."}
-      </div>
+      )}
+      {network?.node.reach && !network.node.reach.lan && (
+        <div className="rounded-lg border border-edge bg-surface-2 p-3 text-ink-2">
+          Other machines cannot reach this node yet.
+          {bridge && (
+            <button type="button" className="btn btn-sm mt-2 block" onClick={onShare} disabled={busy}>
+              Share this node on my network
+            </button>
+          )}
+        </div>
+      )}
+      <p className="text-[12px] text-ink-3">
+        CPU use is measured on this Mac. Search rate comes from worker reports and appears only when
+        its solver measures steps. Rewards count verified results in the log, never idle time.
+      </p>
     </div>
   );
 }
@@ -506,7 +356,7 @@ function Solve({ objectives, bridge }: { objectives: Objective[]; bridge: Bridge
       </div>
       <div>
         <div className="label">By hand</div>
-        <Command text="cairn try <challenge id> --submitter <you> --artifact answer.json" />
+        <p className="text-ink-2">Open a challenge to see its answer format and pinned checker, then connect an agent to score and submit your answer.</p>
       </div>
     </div>
   );

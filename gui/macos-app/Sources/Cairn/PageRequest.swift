@@ -44,12 +44,34 @@ enum PageRequest: Equatable {
     case setRole(PageRole, on: Bool)
     /// Open a sheet; `objective` is what Work on This Mac… starts on.
     case open(PageSheet, objective: String?)
+    /// Local process control stays in the app; the node never accepts it over HTTP.
+    case workStatus
+    case startWork(objective: String)
+    case pauseWork
+    case resumeWork
+    case stopWork
+    case exitWork
 
     static func parse(_ body: Any) -> Result<PageRequest, AIError> {
         guard let object = body as? [String: Any], let kind = object["kind"] as? String else {
             return .failure(AIError("The page sent something this app does not read."))
         }
         switch kind {
+        case "work-status":
+            return .success(.workStatus)
+        case "start-work":
+            guard let objective = object["objective"] as? String, Self.isObjectiveId(objective) else {
+                return .failure(AIError("Choose an objective to work on."))
+            }
+            return .success(.startWork(objective: objective))
+        case "stop-work":
+            return .success(.stopWork)
+        case "pause-work":
+            return .success(.pauseWork)
+        case "resume-work":
+            return .success(.resumeWork)
+        case "exit-work":
+            return .success(.exitWork)
         case "start-dictation":
             return .success(.startDictation)
         case "stop-dictation":
