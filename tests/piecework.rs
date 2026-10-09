@@ -394,10 +394,60 @@ fn a_rejected_answer_does_not_consume_the_unit() {
     let wrong = submit(&mut node, &objective, "mallory", unit(7, 5000));
     assert_eq!(wrong.verdict.status, Status::Reject);
     assert!(!wrong.settled);
+    let piecework = cairn::piecework::Piecework::from_value(objective.piecework.as_ref().unwrap())
+        .expect("valid block");
+    let progress = cairn::progress::settled(
+        &node,
+        &objective.id(),
+        Some(&piecework),
+        None,
+        16,
+        BASE as u64,
+    );
+    assert_eq!(progress.get("rejected"), Some(&Value::Int(1)));
+    assert_eq!(progress.get("unavailable"), Some(&Value::Int(0)));
 
     // The unit is still open for the honest answer.
     assert_paid(&submit(&mut node, &objective, "alice", unit(7, 1)), 100);
     assert_clean(&node.audit(true));
+}
+
+#[test]
+fn an_unavailable_checker_does_not_count_as_a_rejected_answer() {
+    let dir = TempDir::new("unavailable-progress");
+    let sha = write_pinned(&dir, "c.py", UNIT_CHECKER);
+    let ledger = Ledger::open(dir.file("log.jsonl")).expect("empty log");
+    let registry = VerifierRegistry::new(&dir.path)
+        .with_python_binary("cairn-piecework-definitely-no-such-python-binary");
+    let mut node = Node::with_registry(ledger, registry);
+    let objective = piecework_objective(
+        &sha,
+        "answer the units",
+        1000,
+        piecework_block(100, Some(64), Some("unit")),
+    );
+    node.post_objective(&objective, TS).expect("post");
+
+    let result = submit(&mut node, &objective, "alice", unit(7, 1));
+    assert_eq!(result.verdict.status, Status::Unavailable);
+    let piecework = cairn::piecework::Piecework::from_value(objective.piecework.as_ref().unwrap())
+        .expect("valid block");
+    let progress = cairn::progress::settled(
+        &node,
+        &objective.id(),
+        Some(&piecework),
+        None,
+        16,
+        BASE as u64,
+    );
+    assert_eq!(progress.get("rejected"), Some(&Value::Int(0)));
+    assert_eq!(progress.get("unavailable"), Some(&Value::Int(1)));
+    let workers = progress.get("workers").unwrap().as_array().unwrap();
+    assert_eq!(
+        workers[0].get("submitter").and_then(Value::as_str),
+        Some("alice")
+    );
+    assert_eq!(workers[0].get("unavailable"), Some(&Value::Int(1)));
 }
 
 // ---------------------------------------------------------------------------

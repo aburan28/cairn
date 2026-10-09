@@ -466,6 +466,18 @@ function Dashboard({
               <dd className="mono">{reported.stale} stale · {reported.gone} gone</dd>
               <dt>Rejected claims</dt>
               <dd className="mono">{amount(derived.rejected)}</dd>
+              {(derived.unavailable ?? 0) > 0 && (
+                <>
+                  <dt>Checks unavailable</dt>
+                  <dd className="mono">{amount(derived.unavailable ?? 0)}</dd>
+                </>
+              )}
+              {(derived.invalid_spec ?? 0) > 0 && (
+                <>
+                  <dt>Verifier setup errors</dt>
+                  <dd className="mono">{amount(derived.invalid_spec ?? 0)}</dd>
+                </>
+              )}
             </dl>
           </Box>
           <Box
