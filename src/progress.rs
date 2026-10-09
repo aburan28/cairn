@@ -44,6 +44,7 @@ use crate::canonical::Value;
 use crate::node::Node;
 use crate::piecework::Piecework;
 use crate::time::{format_iso8601_utc, parse_rfc3339};
+use crate::verifiers::Status;
 
 /// A worker whose last heartbeat is at most this old is **live**. Three
 /// missed minute-heartbeats, the same lease the campaign's control plane uses.
@@ -662,8 +663,12 @@ struct Tally {
     last_paid_at: Option<u64>,
     /// Claims revealed, whatever their verdict.
     claims: u64,
-    /// Claims whose last verdict was not an acceptance.
+    /// Claims whose last verdict actually rejected the artifact.
     rejected: u64,
+    /// Claims the node could not check; neither rejects nor settles them.
+    unavailable: u64,
+    /// Claims whose pinned verifier specification could not be used.
+    invalid_spec: u64,
     /// Commitments this submitter made that no claim has opened yet: work in
     /// flight, by count. A commitment is opened by a claim from the same
     /// submitter, so the difference is an approximation that is exact when
@@ -677,6 +682,8 @@ impl Tally {
             ("claims_paid", Value::Int(i128::from(self.claims_paid))),
             ("claims", Value::Int(i128::from(self.claims))),
             ("rejected", Value::Int(i128::from(self.rejected))),
+            ("unavailable", Value::Int(i128::from(self.unavailable))),
+            ("invalid_spec", Value::Int(i128::from(self.invalid_spec))),
             ("in_flight", Value::Int(i128::from(self.in_flight))),
             ("elements", Value::Int(i128::from(self.elements))),
             ("units_paid", Value::Int(i128::from(self.units_paid))),
@@ -776,8 +783,9 @@ pub fn settled(
         tally.in_flight = tally.in_flight.saturating_sub(tally.claims);
     }
 
-    // Rejections: the last verdict on each claim.
-    let mut last_verdict: BTreeMap<&str, bool> = BTreeMap::new();
+    // Count only the last recorded verdict. A verifier failure says nothing
+    // about the artifact, so it must never be displayed as a rejection.
+    let mut last_verdict: BTreeMap<&str, Option<Status>> = BTreeMap::new();
     for entry in ledger.entries_of_kind("verdict") {
         let Some(claim_id) = entry.payload.get("claim_id").and_then(Value::as_str) else {
             continue;
@@ -785,21 +793,22 @@ pub fn settled(
         if !claim_submitter.contains_key(claim_id) {
             continue;
         }
-        let accepted = entry
+        let status = entry
             .payload
             .get("verdict")
             .and_then(|v| v.get("status"))
             .and_then(Value::as_str)
-            == Some("accept");
-        last_verdict.insert(claim_id, accepted);
+            .and_then(Status::from_wire);
+        last_verdict.insert(claim_id, status);
     }
-    for (claim_id, accepted) in &last_verdict {
-        if !accepted {
-            if let Some(submitter) = claim_submitter.get(claim_id) {
-                by_submitter
-                    .entry((*submitter).to_string())
-                    .or_default()
-                    .rejected += 1;
+    for (claim_id, status) in &last_verdict {
+        if let Some(submitter) = claim_submitter.get(claim_id) {
+            let tally = by_submitter.entry((*submitter).to_string()).or_default();
+            match status {
+                Some(Status::Reject) => tally.rejected += 1,
+                Some(Status::Unavailable) => tally.unavailable += 1,
+                Some(Status::InvalidSpec) => tally.invalid_spec += 1,
+                Some(Status::Accept) | None => {}
             }
         }
     }
@@ -902,6 +911,8 @@ pub fn settled(
     }
     total.claims = by_submitter.values().map(|t| t.claims).sum();
     total.rejected = by_submitter.values().map(|t| t.rejected).sum();
+    total.unavailable = by_submitter.values().map(|t| t.unavailable).sum();
+    total.invalid_spec = by_submitter.values().map(|t| t.invalid_spec).sum();
     total.in_flight = by_submitter.values().map(|t| t.in_flight).sum();
 
     let window = |(claims, units, steps): (u64, u64, u128)| {
