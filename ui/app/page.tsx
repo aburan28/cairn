@@ -7,7 +7,6 @@ import {
   type CheckpointFacts,
   type Feed,
   type Sourced,
-  REPO,
   SNAPSHOT,
   loadChain,
   loadCheckpoint,
@@ -28,7 +27,6 @@ import {
   Badge,
   Box,
   Card,
-  CopyButton,
   Hash,
   Note,
   PageHeader,
@@ -140,18 +138,9 @@ export default function Page() {
             Browse objectives
           </Link>
         </div>
-        <div className="relative mt-5 max-w-[46rem]">
-          <pre className="code pr-9">
-            {`curl -fsSL ${REPO}/releases/latest/download/install.sh | sh`}
-          </pre>
-          <div className="absolute top-2 right-2">
-            <CopyButton value={`curl -fsSL ${REPO}/releases/latest/download/install.sh | sh`} />
-          </div>
-        </div>
         <p className="hint max-w-[46rem]">
-          Linux and macOS, amd64 and arm64. The download&rsquo;s sha256 only catches
-          corruption; the check that means something is re-deriving the log, below.
-          On a phone, Add to Home Screen or use the native reader.
+          Open a node in Cairn.app to run a worker and see its activity. On a phone,
+          Add to Home Screen to read the network.
         </p>
       </section>
 
@@ -306,10 +295,7 @@ export default function Page() {
 
       <section className="site-only mt-10">
         <SectionHeading>Three ways in</SectionHeading>
-        {/* The three roles the protocol actually has, with the one command each
-            starts from. Anything longer belongs on /how-it-works or in the
-            repository — a landing page that tries to be the manual stops being
-            readable and starts going stale. */}
+        {/* The three roles the protocol actually has. */}
         <ul className="grid gap-3 lg:grid-cols-3">
           <Card as="li" className="card-pad flex flex-col gap-2">
             <h3 className="text-[14px] font-semibold">Fund a question</h3>
@@ -319,11 +305,7 @@ export default function Page() {
               posts a <i>different</i> objective, and claims against the original stop
               resolving.
             </p>
-            <pre className="code mt-auto">cairn scaffold my-challenge --kind certificate</pre>
-            <p className="hint">
-              Or <Link href="/submit" className="text-accent hover:underline">post one from
-              this page</Link>, signed by a wallet.
-            </p>
+            <Link href="/submit" className="mt-auto text-[12.5px] text-accent hover:underline">Post a challenge →</Link>
           </Card>
           <Card as="li" className="card-pad flex flex-col gap-2">
             <h3 className="text-[14px] font-semibold">Solve one</h3>
@@ -333,11 +315,7 @@ export default function Page() {
               is free and runs the same pinned verifier that decides payment, so every
               objective is an eval with a ground-truth reward signal.
             </p>
-            <pre className="code mt-auto">cairn run</pre>
-            <p className="hint">
-              One stdio MCP server, live on the network. Agent setup is available
-              in the project's developer documentation.
-            </p>
+            <Link href="/contribute#agent" className="mt-auto text-[12.5px] text-accent hover:underline">Start solving →</Link>
           </Card>
           <Card as="li" className="card-pad flex flex-col gap-2">
             <h3 className="text-[14px] font-semibold">Run a node</h3>
@@ -347,10 +325,7 @@ export default function Page() {
               the write lock. Readers fetch the log and re-derive everything themselves,
               which is the point: they need not trust the server that served it.
             </p>
-            <pre className="code mt-auto">cairn run</pre>
-            <p className="hint">
-              Loopback by default; add a peer to join the network.
-            </p>
+            <Link href="/network" className="mt-auto text-[12.5px] text-accent hover:underline">See the network →</Link>
           </Card>
         </ul>
       </section>

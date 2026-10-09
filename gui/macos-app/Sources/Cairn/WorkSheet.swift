@@ -54,7 +54,10 @@ struct WorkSheet: View {
 
             HStack {
                 if worker.isRunning {
-                    Button("Stop") { worker.stop() }
+                    Button(worker.isDraining ? "Finishing pending answers…" : "Stop safely") {
+                        problem = worker.requestStop()
+                    }
+                    .disabled(worker.isDraining)
                 } else {
                     Button("Start") { start() }
                         .keyboardShortcut(.defaultAction)
@@ -153,7 +156,7 @@ struct WorkSheet: View {
             EmptyView()
         case .running(let plan, let since):
             VStack(alignment: .leading, spacing: 6) {
-                Label("Working as \(plan.worker) since \(since.formatted(date: .omitted, time: .shortened)). Paid to the key in worker.identity.json.",
+                Label("\(worker.isDraining ? "Finishing pending answers" : "Working") as \(plan.worker) since \(since.formatted(date: .omitted, time: .shortened)). Paid to this Mac's worker key.",
                       systemImage: "circle.fill")
                     .font(.callout).foregroundStyle(.green)
                 log

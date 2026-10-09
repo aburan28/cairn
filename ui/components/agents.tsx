@@ -12,11 +12,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import {
-  AGENT_CLIENTS,
-  type AgentClient,
   type McpPresence,
-  agentStanza,
-  claudeAdd,
   describePresence,
   slashCommand,
 } from "@/lib/agents";
@@ -24,16 +20,14 @@ import { type Bridge } from "@/lib/draft";
 import { openSheet } from "@/lib/contribute";
 import { type NodeEvent } from "@/lib/journal";
 import { ago } from "@/lib/events";
-import { Badge, Command, Hash } from "@/components/ui";
+import { Badge, Hash } from "@/components/ui";
 
-/** How to attach an agent: Cairn.app's sheet when there is one, else the stanza. */
+/** Connect through the app, which knows the local node and key paths. */
 export function AgentConnect({ bridge }: { bridge: Bridge | null }) {
-  const [client, setClient] = useState<AgentClient>("claude-code");
   const [error, setError] = useState<string | null>(null);
-  const info = AGENT_CLIENTS.find((c) => c.id === client) ?? AGENT_CLIENTS[0];
   return (
     <div className="flex flex-col gap-3">
-      {bridge && (
+      {bridge ? (
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -51,23 +45,8 @@ export function AgentConnect({ bridge }: { bridge: Bridge | null }) {
           </span>
           {error && <span className="text-[12px] text-bad">{error}</span>}
         </div>
-      )}
-      <div>
-        <div className="segmented mb-2" role="group" aria-label="Agent">
-          {AGENT_CLIENTS.map((c) => (
-            <button key={c.id} type="button" aria-pressed={c.id === client} onClick={() => setClient(c.id)}>
-              {c.title}
-            </button>
-          ))}
-        </div>
-        {client === "claude-code" && <Command text={claudeAdd()} className="mb-2" />}
-        <Command text={agentStanza(client)} />
-        <p className="hint">
-          In {info.file}. The agent then starts this node itself and talks to it over MCP, and this
-          page keeps working at the same address. Every tool an agent has is listed by the agent
-          once it connects; what pays is decided by each challenge&rsquo;s checker, never the agent.
-        </p>
-      </div>
+      ) : <p className="text-[12.5px] text-ink-2">Open this node in Cairn.app to connect an agent. The app sets up the connection for this computer.</p>}
+      <p className="hint">The challenge&rsquo;s checker decides what is accepted and paid.</p>
     </div>
   );
 }

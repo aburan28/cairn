@@ -29,6 +29,7 @@ import { type SearchJob, expectedSteps, expectedUnits, jobFor, stepsPerUnit } fr
 import { fetchObjective } from "@/lib/frontier";
 import { resolveNode } from "@/lib/site";
 import { goalSlug } from "@/lib/title";
+import { WorkPanel } from "@/components/WorkPanel";
 import {
   Badge,
   Box,
@@ -251,6 +252,7 @@ function Task() {
   return (
     <Dashboard
       id={id}
+      base={base}
       progress={progress}
       job={job}
       funder={funder}
@@ -266,6 +268,7 @@ function Task() {
 
 function Dashboard({
   id,
+  base,
   progress,
   job,
   funder,
@@ -274,6 +277,7 @@ function Dashboard({
   stale,
 }: {
   id: string;
+  base: string;
   progress: ProgressResponse;
   job: SearchJob | null;
   funder: string;
@@ -339,7 +343,9 @@ function Dashboard({
         </div>
       )}
 
-      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+      {!progress.settled && <WorkPanel objective={id} base={base} />}
+
+      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
         <Stat
           label={"Verified " + unitWord + "s"}
           value={amount(derived.units_paid)}
@@ -350,6 +356,11 @@ function Dashboard({
           label="Workers reporting now"
           value={String(reported.live)}
           from="Self-reported · last 3 min"
+        />
+        <Stat
+          label="Live search rate"
+          value={rate && rate > 0 ? formatRate(rate) : "—"}
+          from={rate && rate > 0 ? "Across workers reporting now" : "Waiting for a measured worker report"}
         />
         <Stat
           label={piecework ? "Reward remaining" : "Objective reward"}

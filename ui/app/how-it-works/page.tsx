@@ -97,7 +97,7 @@ export default function Page() {
                 <b>Machines</b>
               </td>
               <td>
-                Computers running <code>cairn work</code>: each takes its own slice of a search, runs a solver, and is
+                Working computers: each takes its own slice of a search, runs a solver, and is
                 paid for what the checker accepts.
               </td>
               <td>
@@ -280,8 +280,7 @@ export default function Page() {
         Every settled result is re-derivable from the log alone — and not only by running this code. A second
         implementation that shares no code with the first re-derives the same ids and the same Merkle roots, and{" "}
         <b>448 frozen conformance vectors</b>, produced by a Python implementation that no longer exists, pin the byte
-        encoding both must agree on. Checking one entry needs no log at all: <code>cairn prove</code> emits a Merkle
-        inclusion proof and <code>cairn check</code> verifies it against a signed checkpoint.
+        encoding both must agree on. An inclusion proof and a signed checkpoint let a reader check one entry on its own.
       </p>
 
       <h2>What this is not</h2>

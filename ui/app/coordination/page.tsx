@@ -9,7 +9,6 @@ import {
   type PartitionCell,
   ObjectiveNotFound,
   RouteMissing,
-  claimCommand,
   coverageSummary,
   epochProgress,
   fetchAssignment,
@@ -40,7 +39,6 @@ import { useEvery, useNode } from "@/components/hooks";
 import {
   Badge,
   Box,
-  Command,
   CopyButton,
   Disclosure,
   EmptyState,
@@ -506,7 +504,6 @@ function Search({ id }: { id: string }) {
       partitions={partitions}
       setPartitions={setPartitions}
       readAt={readAt}
-      origin={base || (typeof window === "undefined" ? "" : window.location.origin)}
       stale={error}
     />
   );
@@ -521,7 +518,6 @@ function Dashboard({
   partitions,
   setPartitions,
   readAt,
-  origin,
   stale,
 }: {
   id: string;
@@ -532,7 +528,6 @@ function Dashboard({
   partitions: number;
   setPartitions: (n: number) => void;
   readAt: Date | null;
-  origin: string;
   stale: string | null;
 }) {
   const { reported, derived } = progress;
@@ -736,9 +731,8 @@ function Dashboard({
         </Box>
       )}
 
-      <Disclosure summary="How the work is split, and the commands behind it">
-        <div className="grid gap-4 lg:grid-cols-2">
-          <div className="text-[12.5px] leading-relaxed text-ink-2">
+      <Disclosure summary="How work is split">
+        <div className="text-[12.5px] leading-relaxed text-ink-2">
             <p>
               Nobody hands out the slices. Every machine computes its own from public inputs —{" "}
               <span className="mono text-[11.5px]">H(beacon(epoch) ‖ machine ‖ challenge) mod {partitions}</span> — and
@@ -751,15 +745,6 @@ function Dashboard({
             ) : leases ? (
               <p className="mt-2 text-ink-3">{leases.note}</p>
             ) : null}
-          </div>
-          <div className="flex flex-col gap-2 text-[12.5px] text-ink-2">
-            <div>A machine&rsquo;s slice for this epoch:</div>
-            <Command
-              text={`curl -s '${origin}/work_assignment?objective_id=${id}&node_id=<machine name>&partitions=${partitions}'`}
-            />
-            <div>Taking a task, so the next machine picks another:</div>
-            <Command text={claimCommand(origin, id, units)} />
-          </div>
         </div>
       </Disclosure>
     </>

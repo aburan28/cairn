@@ -168,14 +168,14 @@ final class Node: ObservableObject {
 
     /// Start `cairn work` as the sheet asked, with the key it is paid to
     /// made first if this Mac has none yet. Returns why not, or nil.
-    func startWork(_ plan: WorkPlan) -> String? {
+    func startWork(_ requested: WorkPlan) -> String? {
         guard let binary = binary ?? Self.locateBinary() else { return "No cairn command was found." }
         do {
             try Self.prepareScratch(settings)
         } catch {
             return "Could not prepare the worker's scratch directory: \(error.localizedDescription)"
         }
-        if let identity = plan.identity, !FileManager.default.fileExists(atPath: identity) {
+        if let identity = requested.identity, !FileManager.default.fileExists(atPath: identity) {
             try? FileManager.default.createDirectory(
                 at: URL(fileURLWithPath: identity).deletingLastPathComponent(), withIntermediateDirectories: true)
             let made = Self.runCairn(binary, ["identity", "--out", identity])
@@ -184,7 +184,31 @@ final class Node: ObservableObject {
                     + (made.err.isEmpty ? "cairn identity exited \(made.status)" : made.err)
             }
         }
+        var plan = requested
+        plan.stopFile = dataDir.appendingPathComponent("work-stop-\(UUID().uuidString)").path
         return worker.start(plan, binary: binary, environment: Self.childEnvironment(settings), logFile: workLogFile)
+    }
+
+    /// The reader can select an objective, but only the native app chooses
+    /// the saved executable and arguments. A page never supplies a command.
+    func startWorkFromPage(objective: String) -> String? {
+        guard let origin = httpOrigin else { return "The node is not running." }
+        guard !worker.isRunning else { return "This Mac is already working. Stop it before changing objectives." }
+        let defaults = UserDefaults.standard
+        let solver = defaults.string(forKey: "workSolver") ?? ""
+        if solver.isEmpty {
+            if sheetIsOpen { return "Close the open Cairn window first, then choose a solver." }
+            work(on: objective)
+            return "Choose a solver in the Work on this Mac window, then press Start."
+        }
+        let savedName = WorkPlan.cleanName(defaults.string(forKey: "workName") ?? "")
+        let plan = WorkPlan(
+            node: origin, objective: objective,
+            worker: savedName.isEmpty ? WorkPlan.defaultName() : savedName,
+            identity: settings.workerIdentity.path, solver: solver,
+            solverArguments: WorkPlan.splitArguments(defaults.string(forKey: "workSolverArguments") ?? "")
+        )
+        return startWork(plan)
     }
 
     // MARK: finding the binary

@@ -22,6 +22,9 @@ struct WorkPlan: Equatable {
     /// The solver's path and its own arguments.
     var solver: String
     var solverArguments: [String] = []
+    /// This app's per-run request marker. The worker drains committed answers
+    /// when it appears; the path changes for every start.
+    var stopFile: String? = nil
 
     /// `cairn work …`, as argv after the binary.
     ///
@@ -31,8 +34,10 @@ struct WorkPlan: Equatable {
     /// does not trust (`CAIRN_FLEET=enrolled`), and would be refused every
     /// round. A worker here is paid to its own key.
     var arguments: [String] {
-        var args = ["work", "--node", node, "--objective", objective, "--worker", worker]
+        var args = ["work", "--node", node, "--objective", objective,
+                    "--worker", worker, "--heartbeat", "5"]
         if let identity { args += ["--identity", identity] }
+        if let stopFile { args += ["--stop-file", stopFile] }
         return args + ["--", solver] + solverArguments
     }
 
@@ -160,6 +165,7 @@ final class Worker: ObservableObject {
 
     @Published private(set) var state: State = .idle
     @Published private(set) var lines: [String] = []
+    @Published private(set) var isDraining = false
 
     private var process: Process?
     private var sink: Stderr?
@@ -176,6 +182,70 @@ final class Worker: ObservableObject {
         case .idle: return nil
         case .running(let plan, _), .exited(let plan, _): return plan
         }
+    }
+
+    /// A small, local-only snapshot for the reader. The rate and payment
+    /// still come from the node: this reports only what this app runs.
+    func pageStatus() -> [String: Any] {
+        switch state {
+        case .idle:
+            return ["state": "idle"]
+        case .exited(let plan, let code):
+            return ["state": "exited", "objective": plan.objective,
+                    "worker": plan.worker, "exit_code": Int(code),
+                    "activity": activity ?? "The worker stopped."]
+        case .running(let plan, let since):
+            let cpu = process.map { Self.cpuUsage(root: $0.processIdentifier) }
+            return ["state": isDraining ? "stopping" : "running", "objective": plan.objective,
+                    "worker": plan.worker,
+                    "started_at": ISO8601DateFormatter().string(from: since),
+                    "cpu_percent": cpu.map { $0 as Any } ?? NSNull(),
+                    "activity": activity ?? "Waiting for the first work round."]
+        }
+    }
+
+    private var activity: String? {
+        lines.reversed().first { line in
+            line.contains("committed a candidate") || line.contains("revealed the candidate")
+                || line.contains("round ") || line.contains("done:")
+        }?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// macOS reports %CPU per process, with 100 meaning one busy core. Add
+    /// the worker's descendants because the search runs in its solver child.
+    private static func cpuUsage(root: Int32) -> Double? {
+        let command = Process()
+        command.executableURL = URL(fileURLWithPath: "/bin/ps")
+        command.arguments = ["-axo", "pid=,ppid=,%cpu="]
+        let output = Pipe()
+        command.standardOutput = output
+        command.standardError = FileHandle.nullDevice
+        do { try command.run() } catch { return nil }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        command.waitUntilExit()
+        guard command.terminationStatus == 0,
+              let text = String(data: data, encoding: .utf8) else { return nil }
+        return cpuUsage(root: root, ps: text)
+    }
+
+    static func cpuUsage(root: Int32, ps: String) -> Double? {
+        struct Row { let parent: Int32; let cpu: Double }
+        var rows: [Int32: Row] = [:]
+        for line in ps.split(separator: "\n") {
+            let parts = line.split(whereSeparator: \.isWhitespace)
+            guard parts.count == 3, let pid = Int32(parts[0]),
+                  let parent = Int32(parts[1]), let cpu = Double(parts[2]),
+                  cpu.isFinite, cpu >= 0 else { continue }
+            rows[pid] = Row(parent: parent, cpu: cpu)
+        }
+        guard rows[root] != nil else { return nil }
+        var family: Set<Int32> = [root]
+        var previous = -1
+        while family.count != previous {
+            previous = family.count
+            for (pid, row) in rows where family.contains(row.parent) { family.insert(pid) }
+        }
+        return family.reduce(0) { $0 + (rows[$1]?.cpu ?? 0) }
     }
 
     /// Start `cairn work` with `plan`, or say why not. One at a time: a
@@ -214,6 +284,7 @@ final class Worker: ObservableObject {
             Task { @MainActor in self?.exited(proc) }
         }
         stopping = false
+        isDraining = false
         lines = []
         do {
             try p.run()
@@ -226,9 +297,27 @@ final class Worker: ObservableObject {
         return nil
     }
 
-    /// Stop the worker and wait, briefly, for it to go. `cairn work` has no
-    /// stop of its own beyond the signal a terminal's Ctrl-C sends, so that
-    /// is what this sends, then harder. Safe at quit: the wait is bounded.
+    /// Request a stop after this round and after all committed answers are
+    /// revealed. The process remains alive while it waits for the next epoch.
+    func requestStop() -> String? {
+        guard case .running(let plan, _) = state, process != nil else {
+            return "This Mac is not working right now."
+        }
+        guard let path = plan.stopFile else {
+            return "This worker predates safe stopping. Stop it from the native window."
+        }
+        if isDraining { return nil }
+        do {
+            try "stop".write(toFile: path, atomically: true, encoding: .utf8)
+            isDraining = true
+            return nil
+        } catch {
+            return "Could not request a safe stop: \(error.localizedDescription)"
+        }
+    }
+
+    /// Force the worker down at app quit. The visible Stop button uses
+    /// `requestStop()` so pending answers can be revealed first.
     func stop() {
         guard let p = process else { return }
         stopping = true
@@ -244,6 +333,8 @@ final class Worker: ObservableObject {
         refresh()
         process = nil
         sink = nil
+        if let path = lastPlan?.stopFile { try? FileManager.default.removeItem(atPath: path) }
+        isDraining = false
         state = .idle
     }
 
@@ -254,6 +345,8 @@ final class Worker: ObservableObject {
         let plan = lastPlan
         process = nil
         sink = nil
+        if let path = plan?.stopFile { try? FileManager.default.removeItem(atPath: path) }
+        isDraining = false
         if let plan { state = .exited(plan, status: p.terminationStatus) } else { state = .idle }
     }
 

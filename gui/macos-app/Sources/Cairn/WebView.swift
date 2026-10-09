@@ -19,6 +19,9 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     var onSetRole: (@MainActor (PageRole, Bool) -> String?)?
     /// A page opening one of the app's sheets, on an objective or not.
     var onOpen: (@MainActor (PageSheet, String?) -> String?)?
+    var onWorkStatus: (@MainActor () -> [String: Any])?
+    var onStartWork: (@MainActor (String) -> String?)?
+    var onStopWork: (@MainActor () -> String?)?
     let pageDictation = PageDictation()
     fileprivate var pageDictationActive = false
     private let bridge: PageBridge
@@ -160,6 +163,17 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
         return prompt.runModal() == .alertFirstButtonReturn
     }
 
+    fileprivate func confirmWork(_ action: String) -> Bool {
+        let prompt = NSAlert()
+        prompt.messageText = action == "start" ? "Start working on this Mac?" : "Stop working on this Mac?"
+        prompt.informativeText = action == "start"
+            ? "Cairn will run the solver you chose on this Mac. It uses CPU or GPU power until you stop it."
+            : "Cairn will finish the current round, reveal any pending answers, then stop. This can take another epoch."
+        prompt.addButton(withTitle: action == "start" ? "Start Work" : "Stop Work")
+        prompt.addButton(withTitle: "Cancel")
+        return prompt.runModal() == .alertFirstButtonReturn
+    }
+
     private func isNode(_ url: URL) -> Bool {
         guard let scheme = url.scheme, scheme == "http" || scheme == "https" else {
             return url.scheme == "about" || url.scheme == "blob" || url.scheme == "data"
@@ -220,6 +234,19 @@ final class PageBridge: NSObject, WKScriptMessageHandlerWithReply {
         case .success(.open(let sheet, let objective)):
             guard let open = browser.onOpen else { return (nil, "That is not available here.") }
             if let refusal = open(sheet, objective) { return (nil, refusal) }
+            return (true, nil)
+        case .success(.workStatus):
+            guard let status = browser.onWorkStatus else { return (nil, "Work status is unavailable.") }
+            return (status(), nil)
+        case .success(.startWork(let objective)):
+            guard let start = browser.onStartWork else { return (nil, "Work cannot start here.") }
+            guard browser.confirmWork("start") else { return (nil, "Cancelled.") }
+            if let refusal = start(objective) { return (nil, refusal) }
+            return (true, nil)
+        case .success(.stopWork):
+            guard let stop = browser.onStopWork else { return (nil, "Work cannot stop here.") }
+            guard browser.confirmWork("stop") else { return (nil, "Cancelled.") }
+            if let refusal = stop() { return (nil, refusal) }
             return (true, nil)
         case .success(.startDictation):
             guard browser.isLocalChallengePage else {

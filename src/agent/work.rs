@@ -151,6 +151,8 @@ USAGE
     --partitions N       how many ways the search is split (default 8)
     --rounds N           stop after N solver runs (default: run until stopped)
     --heartbeat SECONDS  how often to report in while the solver runs (default 30)
+    --stop-file PATH     finish the current round and reveal pending answers when
+                         this local file appears; for a supervising app
     --device TEXT        what this machine is, for the roster
     --margin SECONDS     post nothing this close to an epoch's end (default 8)
 
@@ -194,6 +196,9 @@ pub struct Options {
     pub partitions: u64,
     pub rounds: Option<u64>,
     pub heartbeat: Duration,
+    /// A local supervisor's graceful stop request. Unique per run so an old
+    /// request cannot stop a new worker with the same name.
+    pub stop_file: Option<PathBuf>,
     pub device: Option<String>,
     pub margin: u64,
     /// Threads the solver is given, through the environment variables the
@@ -620,6 +625,7 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
     let mut partitions = 8u64;
     let mut rounds = None;
     let mut heartbeat = 30u64;
+    let mut stop_file = None;
     let mut device = None;
     let mut margin = DEFAULT_MARGIN_SECONDS;
     let mut threads = None;
@@ -651,6 +657,7 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
             "--partitions" => partitions = number(value()?)?,
             "--rounds" => rounds = Some(number(value()?)?),
             "--heartbeat" => heartbeat = number(value()?)?,
+            "--stop-file" => stop_file = Some(PathBuf::from(value()?.as_str())),
             "--device" => device = Some(value()?.clone()),
             "--margin" => margin = number(value()?)?,
             "--threads" => threads = Some(number(value()?)?),
@@ -747,6 +754,7 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
         partitions,
         rounds,
         heartbeat: Duration::from_secs(heartbeat),
+        stop_file,
         device,
         margin,
         threads,
@@ -940,7 +948,7 @@ impl Worker {
         loop {
             self.reveal_due()?;
             let more_rounds = self.options.rounds.is_none_or(|limit| self.rounds < limit);
-            let stopping = self.control.as_ref().is_some_and(Control::stopping);
+            let stopping = self.stopping_requested();
             if !more_rounds || stopping {
                 if stopping {
                     if let Some(control) = &self.control {
@@ -975,11 +983,13 @@ impl Worker {
                     let wait = Budget::resumes_in(now).min(self.seconds_left() + 1);
                     // A managed worker must notice stop even when its daily
                     // budget would otherwise leave it asleep until midnight.
-                    thread::sleep(Duration::from_secs(if self.control.is_some() {
-                        wait.min(1)
-                    } else {
-                        wait
-                    }));
+                    thread::sleep(Duration::from_secs(
+                        if self.control.is_some() || self.options.stop_file.is_some() {
+                            wait.min(1)
+                        } else {
+                            wait
+                        },
+                    ));
                     continue;
                 }
                 if self.paused_said {
@@ -1073,6 +1083,15 @@ impl Worker {
 
     fn sleep_to_next_epoch(&self) {
         thread::sleep(Duration::from_secs(self.seconds_left() + 1));
+    }
+
+    fn stopping_requested(&self) -> bool {
+        self.control.as_ref().is_some_and(Control::stopping)
+            || self
+                .options
+                .stop_file
+                .as_ref()
+                .is_some_and(|path| path.exists())
     }
 
     /// Run the solver once over `assignment`, heartbeating while it runs.
@@ -1470,6 +1489,22 @@ mod tests {
         assert_eq!(options.solver, vec!["./solve", "--fast"]);
         assert_eq!(options.node.port, 8080);
         assert_eq!(options.partitions, 8);
+    }
+
+    #[test]
+    fn a_local_stop_request_is_separate_from_a_worker_restart() {
+        let marker = std::env::temp_dir().join(format!("cairn-work-stop-{}", nonce()));
+        let options = parse(&args(&format!(
+            "--node http://h:1 --objective sha256:ab --worker w --stop-file {} -- ./solve",
+            marker.display()
+        )))
+        .unwrap()
+        .unwrap();
+        let worker = Worker::new(options).unwrap();
+        assert!(!worker.stopping_requested());
+        fs::write(&marker, b"stop").unwrap();
+        assert!(worker.stopping_requested());
+        fs::remove_file(&marker).unwrap();
     }
 
     #[test]

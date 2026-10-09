@@ -12,13 +12,20 @@ final class WorkTests: XCTestCase {
                             identity: "/Users/x/Library/Application Support/Cairn/worker.identity.json",
                             solver: "/Users/x/solver", solverArguments: ["--threads", "8"])
         XCTAssertEqual(plan.arguments, [
-            "work", "--node", "http://127.0.0.1:8080", "--objective", objective, "--worker", "garage-gpu",
+            "work", "--node", "http://127.0.0.1:8080", "--objective", objective,
+            "--worker", "garage-gpu", "--heartbeat", "5",
             "--identity", "/Users/x/Library/Application Support/Cairn/worker.identity.json",
             "--", "/Users/x/solver", "--threads", "8",
         ])
         XCTAssertFalse(plan.arguments.contains("--submitter"), "a worker on the leader's own Mac is paid to its own key")
+        var safelyStopped = plan
+        safelyStopped.stopFile = "/tmp/cairn-stop-unique"
+        let flag = safelyStopped.arguments.firstIndex(of: "--stop-file")
+        XCTAssertNotNil(flag)
+        if let flag { XCTAssertEqual(safelyStopped.arguments[flag + 1], "/tmp/cairn-stop-unique") }
         let unsigned = WorkPlan(node: "http://h:1", objective: objective, worker: "w", identity: nil, solver: "/s")
-        XCTAssertEqual(unsigned.arguments, ["work", "--node", "http://h:1", "--objective", objective, "--worker", "w", "--", "/s"])
+        XCTAssertEqual(unsigned.arguments, ["work", "--node", "http://h:1", "--objective", objective,
+                                          "--worker", "w", "--heartbeat", "5", "--", "/s"])
     }
 
     func testThePlanRefusesWhatCairnWorkWouldRefuse() throws {
@@ -103,5 +110,26 @@ final class WorkTests: XCTestCase {
         // The objective reaches a command line; only an id gets that far.
         XCTAssertTrue(refused(["kind": "open", "sheet": "work", "objective": "--rounds 1"]))
         XCTAssertTrue(refused(["kind": "open", "sheet": "work", "objective": "sha256:zz"]))
+    }
+
+    func testThePageCanOnlyControlASelectedObjectiveThroughTheApp() throws {
+        XCTAssertEqual(try PageRequest.parse(["kind": "work-status"]).get(), .workStatus)
+        XCTAssertEqual(try PageRequest.parse(["kind": "start-work", "objective": objective]).get(),
+                       .startWork(objective: objective))
+        XCTAssertEqual(try PageRequest.parse(["kind": "stop-work"]).get(), .stopWork)
+        if case .success = PageRequest.parse(["kind": "start-work", "objective": "--solver /tmp/x"]) {
+            XCTFail("a page must not choose an executable")
+        }
+    }
+
+    @MainActor func testWorkerCPUIncludesItsSolverTree() {
+        let ps = """
+          20   1  5.0
+          21  20 92.5
+          22  21 50.0
+          30   1 80.0
+          """
+        XCTAssertEqual(Worker.cpuUsage(root: 20, ps: ps), 147.5)
+        XCTAssertNil(Worker.cpuUsage(root: 99, ps: ps))
     }
 }

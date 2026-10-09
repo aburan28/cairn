@@ -29,7 +29,7 @@ import {
 } from "@/lib/wallet";
 import { type Bridge, appBridge, briefProblem, handOff } from "@/lib/draft";
 import { NODE_URL } from "@/lib/objectives";
-import { Badge, Card, CopyButton, Hash, Note, PageHeader, SectionHeading } from "@/components/ui";
+import { Badge, Card, Hash, Note, PageHeader, SectionHeading } from "@/components/ui";
 import { VoiceInput } from "@/components/VoiceInput";
 
 /**
@@ -283,11 +283,6 @@ export default function Page() {
   const kind = kindInfo(draft.verifierKind);
   const scored = isScored(draft.verifierKind);
 
-  const objectiveJson = record ? JSON.stringify(record, null, 2) : "";
-  const signedJson = record
-    ? JSON.stringify(signature ? { ...record, funding_signature: signature } : record, null, 2)
-    : "";
-
   return (
     <>
       <PageHeader
@@ -392,10 +387,8 @@ export default function Page() {
             accepts submissions same-origin only — a JSON <span className="mono">POST</span>{" "}
             is preflighted, and <span className="mono">OPTIONS</span> is deliberately
             unrouted so no page can make its visitors fill a stranger&rsquo;s queue.
-            Open this page from the node itself (<span className="mono">cairn run --serve
-            0.0.0.0:8080</span>, then <span className="mono">/ui/submit</span>), or use
-            the <span className="mono">cairn post</span> command in the panel on the
-            right. Everything else on this page still works.
+            Open this page from the node&rsquo;s own address in Cairn.app to submit.
+            You can still prepare the challenge here.
           </Note>
         </div>
       )}
@@ -427,10 +420,8 @@ export default function Page() {
               Start from a scaffold
             </SectionHeading>
             <p className="text-[12.5px] leading-relaxed text-ink-2">
-              <span className="mono">cairn scaffold my-challenge --kind {draft.verifierKind}</span>{" "}
-              writes an <span className="mono">objective.json</span> with the checker
-              already hashed. Load it here and only the bounty and the funder are left
-              to decide. Nothing leaves this page: the file is read in the browser.
+              If you already have a prepared challenge, load it here. The checker
+              details are read in your browser, and you can review the bounty and funder before posting.
             </p>
             {loadNote && (
               <div className="mt-3">
@@ -1161,29 +1152,6 @@ export default function Page() {
               </Card>
             )}
 
-            <Card className="card-pad">
-              <SectionHeading>Or post it from a terminal</SectionHeading>
-              <p className="mb-2 text-[12.5px] leading-relaxed text-ink-2">
-                For a key that lives in a file rather than a wallet, or from a page
-                that cannot write to the node. An agent can do the same over MCP with{" "}
-                <span className="mono">post_objective</span>.
-              </p>
-              <div className="relative">
-                <pre className="code max-h-64 overflow-auto text-[11.5px]">
-                  {objectiveJson || "// fill the form to see the record"}
-                </pre>
-                {objectiveJson && (
-                  <div className="absolute top-2 right-2">
-                    <CopyButton value={signedJson} />
-                  </div>
-                )}
-              </div>
-              <pre className="code mt-2 text-[11.5px]">
-                {`cairn post objective.json${
-                  needsSignature ? " --identity ~/.cairn/identity.json" : ""
-                }`}
-              </pre>
-            </Card>
           </div>
         </aside>
       </div>

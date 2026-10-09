@@ -374,8 +374,8 @@ function ChainSection({ chain, checkpoint }: { chain: Chain; checkpoint: Checkpo
             <p className="text-[12.5px] text-ink-3">Nobody has signed a checkpoint of this log.</p>
           )}
           <p className="mt-3 text-[11.5px] leading-relaxed text-ink-3">
-            Shown, not verified here: <code className="mono">cairn verify --from</code> checks the signature, and{" "}
-            <code className="mono">cairn audit</code> re-derives the whole chain.
+            This page displays the checkpoint. Signature verification and re-derivation of the chain
+            happen in a full audit of the log.
           </p>
         </Box>
       </div>

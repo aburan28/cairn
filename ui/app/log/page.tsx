@@ -160,8 +160,7 @@ export default function Page() {
             which hid every good line and the fact that one was bad. */}
         {problems.length > 0 && (
           <Note title={`${problems.length} line${problems.length === 1 ? "" : "s"} could not be read as a record`} tone="bad">
-            The rows below are the lines that could. <code className="mono">cairn audit</code> reads the same file;
-            run it to see what it makes of them.
+            The rows below are the records this reader could parse. The unreadable entries are listed here for review.
             <ul className="mt-1.5 flex flex-col gap-0.5">
               {problems.map((problem) => (
                 <li key={problem} className="mono text-[11.5px] text-ink-3">

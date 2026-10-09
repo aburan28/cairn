@@ -135,9 +135,8 @@ function FrontierPage() {
             title={`${problems.length} line${problems.length === 1 ? "" : "s"} of the log could not be read as a record`}
             tone="bad"
           >
-            The moves below were built from the lines that could; a move recorded on one
-            of these would be missing. <code className="mono">cairn audit</code> reads
-            the same file; run it to see what it makes of them.
+            The moves below use only records this reader could parse. A move in one of the
+            unreadable entries may be missing from this view.
             <ul className="mt-1.5 flex flex-col gap-0.5">
               {problems.map((problem) => (
                 <li key={problem} className="mono text-[11.5px] text-ink-3">
