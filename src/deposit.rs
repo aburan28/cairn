@@ -72,6 +72,9 @@ pub struct GrantRequest<'a> {
     pub size: Option<u64>,
     /// SHA-256 hex the object must have, when the contributor knows it.
     pub digest: Option<&'a str>,
+    /// Campaign slot the object belongs to. Required by [`KeyShape::Ecc2kDp`]
+    /// deposits, refused by all others.
+    pub slot: Option<u64>,
     /// The network address asking, for [`MAX_GRANTS_PER_ADDRESS`]. `None` from
     /// the CLI and MCP, which run as the operator.
     pub requester: Option<&'a str>,
@@ -99,6 +102,42 @@ impl Provider {
         match text {
             "file" => Some(Provider::File),
             "s3" => Some(Provider::S3),
+            _ => None,
+        }
+    }
+}
+
+/// The shape of keys a deposit mints. Keys are always minted, never chosen,
+/// so an uploader cannot overwrite or squat another object; the shape only
+/// decides what the minted key looks like.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeyShape {
+    /// `{prefix}{deposit}/{submitter}/{random-id}`. Opaque to everyone but
+    /// the node that minted it.
+    #[default]
+    Default,
+    /// `dp/slot-N/<stream>-<offset>-<sha>.bin`: the ECC2K-130 campaign's
+    /// content-keyed shape, as `dp_ingest.py`'s `ORBIT_KEY_RE` defines it.
+    /// The stream id is minted random per grant and the sha-256 is the
+    /// body's own, so the key stays unguessable while telling the ingester
+    /// which slot produced it and what bytes to expect. Grants against this
+    /// shape require a slot and a digest, and redemption writes the
+    /// `.bin.json` commit marker beside the body.
+    Ecc2kDp,
+}
+
+impl KeyShape {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KeyShape::Default => "default",
+            KeyShape::Ecc2kDp => "ecc2k-dp",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<KeyShape> {
+        match text {
+            "default" => Some(KeyShape::Default),
+            "ecc2k-dp" => Some(KeyShape::Ecc2kDp),
             _ => None,
         }
     }
@@ -155,6 +194,8 @@ pub struct DepositSpec {
     pub max_bytes: u64,
     /// Default grant lifetime.
     pub ttl_secs: u64,
+    /// The shape of keys grants mint. See [`KeyShape`].
+    pub key_shape: KeyShape,
 }
 
 impl DepositSpec {
@@ -172,6 +213,7 @@ impl DepositSpec {
             session_token_secret: None,
             max_bytes: DEFAULT_MAX_BYTES,
             ttl_secs: DEFAULT_TTL_SECS,
+            key_shape: KeyShape::Default,
         }
     }
 
@@ -194,6 +236,7 @@ impl DepositSpec {
             session_token_secret: None,
             max_bytes: DEFAULT_MAX_BYTES,
             ttl_secs: DEFAULT_TTL_SECS,
+            key_shape: KeyShape::Default,
         }
     }
 
@@ -241,6 +284,12 @@ impl DepositSpec {
             "ttl_secs".into(),
             serde_json::Value::Number(self.ttl_secs.into()),
         );
+        // Always written, so a config says what it mints. Read back leniently:
+        // configs written before shapes existed mean the default one.
+        obj.insert(
+            "key_shape".into(),
+            serde_json::Value::String(self.key_shape.as_str().into()),
+        );
         serde_json::Value::Object(obj).to_string()
     }
 
@@ -274,6 +323,14 @@ impl DepositSpec {
         let session_token_secret = optional_string(obj, "session_token_secret");
         let max_bytes = optional_u64(obj, "max_bytes")?.unwrap_or(DEFAULT_MAX_BYTES);
         let ttl_secs = optional_u64(obj, "ttl_secs")?.unwrap_or(DEFAULT_TTL_SECS);
+        let key_shape = match optional_string(obj, "key_shape") {
+            None => KeyShape::Default,
+            Some(text) => KeyShape::parse(&text).ok_or_else(|| {
+                DepositError::Invalid(format!(
+                    "unknown key_shape {text:?}; expected default or ecc2k-dp"
+                ))
+            })?,
+        };
         let spec = DepositSpec {
             name,
             provider,
@@ -286,6 +343,7 @@ impl DepositSpec {
             session_token_secret,
             max_bytes,
             ttl_secs,
+            key_shape,
         };
         spec.validate()?;
         Ok(spec)
@@ -326,6 +384,14 @@ impl DepositSpec {
                 "ttl_secs must be positive",
             )));
         }
+        if self.key_shape == KeyShape::Ecc2kDp && self.prefix.as_deref().unwrap_or("").is_empty() {
+            // The ingester lists `dp/`; keys minted outside it would land in
+            // the bucket and never be read. Refused here, where the fix is a
+            // flag, rather than discovered as objects the campaign ignores.
+            return Err(DepositError::Invalid(String::from(
+                "an ecc2k-dp deposit needs a key prefix (the campaign lists dp/)",
+            )));
+        }
         Ok(())
     }
 
@@ -333,7 +399,7 @@ impl DepositSpec {
     pub fn public_summary(&self) -> String {
         match self.provider {
             Provider::File => format!(
-                "{}\n  provider: file\n  root: {}\n  max_bytes: {}\n  ttl_secs: {}",
+                "{}\n  provider: file\n  root: {}\n  max_bytes: {}\n  ttl_secs: {}\n  key_shape: {}",
                 self.name,
                 self.root
                     .as_ref()
@@ -341,10 +407,12 @@ impl DepositSpec {
                     .unwrap_or_default(),
                 self.max_bytes,
                 self.ttl_secs,
+                self.key_shape.as_str(),
             ),
             Provider::S3 => format!(
                 "{}\n  provider: s3\n  bucket: {}\n  prefix: {}\n  region: {}\n  \
-                 access_key_secret: {}\n  secret_key_secret: {}\n  max_bytes: {}\n  ttl_secs: {}",
+                 access_key_secret: {}\n  secret_key_secret: {}\n  max_bytes: {}\n  ttl_secs: {}\n  \
+                 key_shape: {}",
                 self.name,
                 self.bucket.as_deref().unwrap_or(""),
                 self.prefix.as_deref().unwrap_or(""),
@@ -353,6 +421,7 @@ impl DepositSpec {
                 self.secret_key_secret,
                 self.max_bytes,
                 self.ttl_secs,
+                self.key_shape.as_str(),
             ),
         }
     }
@@ -380,6 +449,12 @@ pub struct Grant {
     /// For [`UploadMode::Presigned`], the signed URL. Absent for proxy grants —
     /// the contributor PUTs to the node's `/deposit/upload/{id}` instead.
     pub put_url: Option<String>,
+    /// For presigned grants against [`KeyShape::Ecc2kDp`], the signed URL for
+    /// the `.bin.json` commit marker the contributor PUTs after the body, and
+    /// the marker bytes it must carry. Absent otherwise: proxy redemptions
+    /// write the marker themselves, and other shapes have no marker.
+    pub marker_put_url: Option<String>,
+    pub marker: Option<String>,
 }
 
 impl Grant {
@@ -422,6 +497,15 @@ impl Grant {
         );
         if let Some(url) = &self.put_url {
             obj.insert("put_url".into(), serde_json::Value::String(url.clone()));
+        }
+        if let Some(url) = &self.marker_put_url {
+            obj.insert(
+                "marker_put_url".into(),
+                serde_json::Value::String(url.clone()),
+            );
+        }
+        if let Some(marker) = &self.marker {
+            obj.insert("marker".into(), serde_json::Value::String(marker.clone()));
         }
         serde_json::Value::Object(obj).to_string()
     }
@@ -481,6 +565,27 @@ impl Grant {
             }
             obj.insert("headers".into(), serde_json::Value::Object(headers));
         }
+        // The commit marker the ingester reads beside a campaign body: what to
+        // PUT, where, and with which signed headers. Additive: older readers
+        // ignore fields they do not know.
+        if let (Some(url), Some(marker)) = (&self.marker_put_url, &self.marker) {
+            obj.insert(
+                "marker_put_url".into(),
+                serde_json::Value::String(url.clone()),
+            );
+            obj.insert("marker".into(), serde_json::Value::String(marker.clone()));
+            let mut headers = serde_json::Map::new();
+            headers.insert(
+                "Content-Length".into(),
+                serde_json::Value::String(marker.len().to_string()),
+            );
+            if let Some(checksum) =
+                checksum_header(&hex::encode(&Sha256::digest(marker.as_bytes())))
+            {
+                headers.insert(CHECKSUM_HEADER.into(), serde_json::Value::String(checksum));
+            }
+            obj.insert("marker_headers".into(), serde_json::Value::Object(headers));
+        }
         serde_json::Value::Object(obj)
     }
 
@@ -514,6 +619,8 @@ impl Grant {
                 .unwrap_or(false),
             mode,
             put_url: optional_string(obj, "put_url"),
+            marker_put_url: optional_string(obj, "marker_put_url"),
+            marker: optional_string(obj, "marker"),
         })
     }
 }
@@ -713,6 +820,66 @@ impl DepositDir {
     }
 }
 
+/// Bytes of one campaign distinguished-point record. A campaign body must be
+/// a whole number of these; the ingester silently truncates a tail that is
+/// not, so anything short of exact is refused before it is stored.
+const ECC2K_DP_RECORD_BYTES: u64 = 32;
+
+fn campaign_record_count(body: &[u8]) -> Result<u64, DepositError> {
+    if body.starts_with(b"ECC2KDT3") {
+        let header_valid = body.len() >= 16
+            && body[8..12] == 3u32.to_le_bytes()
+            && body[12..16] == 32u32.to_le_bytes();
+        if !header_valid || !(body.len() - 16).is_multiple_of(ECC2K_DP_RECORD_BYTES as usize) {
+            return Err(DepositError::Invalid(String::from(
+                "an ecc2k-dp v3 body needs a version-3, stride-32 header and whole records",
+            )));
+        }
+        let records = (body.len() - 16) / ECC2K_DP_RECORD_BYTES as usize;
+        if records == 0 {
+            return Err(DepositError::Invalid(String::from(
+                "an ecc2k-dp body must carry at least one record",
+            )));
+        }
+        return Ok(records as u64);
+    }
+    if body.is_empty() || !body.len().is_multiple_of(ECC2K_DP_RECORD_BYTES as usize) {
+        return Err(DepositError::Invalid(format!(
+            "an ecc2k-dp body must be a non-empty whole number of 32-byte records; this one is {} bytes",
+            body.len()
+        )));
+    }
+    Ok((body.len() / ECC2K_DP_RECORD_BYTES as usize) as u64)
+}
+
+/// The `.bin.json` commit marker the campaign ingester reads beside a body:
+/// the producer's own sha-256, record count, clock, and format label. Written
+/// after the body, so its presence means the object is complete; a body that
+/// does not match its marker is refused, never stored.
+fn commit_marker(digest: &str, records: u64, produced_at: u64) -> String {
+    serde_json::json!({
+        "sha256": digest,
+        "records": records,
+        "producedAt": produced_at,
+        "format": "ecc2k130-gpu-packed32",
+    })
+    .to_string()
+}
+
+/// Mint an ECC2K-130 campaign key: `dp/slot-N/<stream>-0-<sha>.bin`, the
+/// shape `dp_ingest.py`'s `ORBIT_KEY_RE` recognises. The stream id is minted
+/// random per grant and the sha-256 is the body's own, so the key is as
+/// unguessable as the default random one while telling the ingester which
+/// slot produced it. Offset 0: one grant is one self-contained stream.
+fn campaign_key(prefix: &str, slot: u64, digest: &str) -> String {
+    let mut stream = [0u8; 16];
+    OsRng.fill_bytes(&mut stream);
+    format!(
+        "{prefix}slot-{slot:05}/{stream}-0-{digest}.bin",
+        stream = hex::encode(&stream),
+    )
+}
+
 /// Issue a grant against a configured deposit.
 ///
 /// `proxy_base` is the public origin of this node (e.g. `http://host:8080`)
@@ -765,6 +932,40 @@ pub fn issue_grant(
             )));
         }
     }
+    if spec.key_shape == KeyShape::Ecc2kDp {
+        if request.slot.is_none() {
+            return Err(DepositError::Invalid(String::from(
+                "an ecc2k-dp grant needs a slot: the key names which slot produced it",
+            )));
+        }
+        match request.digest {
+            Some(digest) if digest == digest.to_ascii_lowercase() => {}
+            Some(_) => {
+                return Err(DepositError::Invalid(String::from(
+                    "digest must be 64 lowercase hex characters (sha-256)",
+                )));
+            }
+            None => {
+                return Err(DepositError::Invalid(String::from(
+                    "an ecc2k-dp grant needs a digest: the key names the body's sha-256",
+                )));
+            }
+        }
+        // Checked again at redeem against the actual body; refusing the size
+        // here as well is what stops a presigned contributor PUTting bytes
+        // the ingester would truncate.
+        if let Some(size) = request.size {
+            if !size.is_multiple_of(ECC2K_DP_RECORD_BYTES) {
+                return Err(DepositError::Invalid(format!(
+                    "an ecc2k-dp body must be a whole number of {ECC2K_DP_RECORD_BYTES}-byte records"
+                )));
+            }
+        }
+    } else if request.slot.is_some() {
+        return Err(DepositError::Invalid(String::from(
+            "slot is only for ecc2k-dp deposits",
+        )));
+    }
 
     // `POST /deposit/grant` is open to anyone who can reach the node, and
     // each grant is a file. Expired grants are deleted here, and past a
@@ -787,9 +988,20 @@ pub fn issue_grant(
     let mut id_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut id_bytes);
     let id = hex::encode(&id_bytes);
-    let submitter_short = short_submitter(submitter);
     let prefix = spec.prefix.as_deref().unwrap_or("");
-    let key = format!("{prefix}{}/{}/{id}", spec.name, submitter_short,);
+    let key = match spec.key_shape {
+        KeyShape::Default => {
+            let submitter_short = short_submitter(submitter);
+            format!("{prefix}{}/{}/{id}", spec.name, submitter_short,)
+        }
+        // Validated above: an ecc2k-dp request carries a slot and a lowercase
+        // digest, or issue has already returned.
+        KeyShape::Ecc2kDp => campaign_key(
+            prefix,
+            request.slot.expect("slot validated above"),
+            request.digest.expect("digest validated above"),
+        ),
+    };
 
     let expires_at = now_secs().saturating_add(spec.ttl_secs);
     let (mode, put_url) = match spec.provider {
@@ -809,6 +1021,26 @@ pub fn issue_grant(
         },
     };
 
+    // A campaign grant's marker, signed alongside the body when the body is
+    // presigned: the contributor PUTs the body, then PUTs this at the marker
+    // URL. Proxy redemptions write it themselves in `redeem_grant`.
+    let (marker_put_url, marker) = match (spec.key_shape, request.size, request.digest, &put_url) {
+        (KeyShape::Ecc2kDp, Some(size), Some(digest), Some(_)) => {
+            let marker = commit_marker(digest, size / ECC2K_DP_RECORD_BYTES, now_secs());
+            let marker_digest = hex::encode(&Sha256::digest(marker.as_bytes()));
+            let url = presign_s3_put(
+                &spec,
+                &format!("{key}.json"),
+                marker.len() as u64,
+                &marker_digest,
+                expires_at,
+                secrets_dir,
+            )?;
+            (Some(url), Some(marker))
+        }
+        _ => (None, None),
+    };
+
     let grant = Grant {
         id,
         deposit: spec.name.clone(),
@@ -822,6 +1054,8 @@ pub fn issue_grant(
         consumed: false,
         mode,
         put_url,
+        marker_put_url,
+        marker,
     };
     deposits.save_grant(&grant)?;
     // Rebuild with proxy put_url filled for the caller convenience; disk keeps
@@ -924,6 +1158,13 @@ pub fn redeem_grant(
     }
 
     let spec = deposits.load(&grant.deposit)?;
+    // Validate before writing the body or its marker. The ingester strips a
+    // v3 header, but silently truncates a partial record tail.
+    let campaign_records = if spec.key_shape == KeyShape::Ecc2kDp {
+        Some(campaign_record_count(body)?)
+    } else {
+        None
+    };
     match spec.provider {
         Provider::File => {
             let root = spec
@@ -931,6 +1172,14 @@ pub fn redeem_grant(
                 .as_ref()
                 .ok_or_else(|| DepositError::Invalid(String::from("file deposit missing root")))?;
             put_file(root, &grant.key, body)?;
+            if spec.key_shape == KeyShape::Ecc2kDp {
+                put_file(
+                    root,
+                    &format!("{}.json", grant.key),
+                    commit_marker(&digest, campaign_records.expect("campaign records"), now)
+                        .as_bytes(),
+                )?;
+            }
         }
         Provider::S3 => {
             // Signed for exactly these bytes, whatever the grant was issued
@@ -945,6 +1194,24 @@ pub fn redeem_grant(
                 secrets_dir,
             )?;
             curl_put(&url, body, &digest)?;
+            // After the body, so the marker's presence means the object is
+            // complete. A failed marker leaves the grant unconsumed: the same
+            // bytes re-PUT to the same key are a no-op, so retrying is safe
+            // and reissuing (a new key, a duplicate body) is not needed.
+            if spec.key_shape == KeyShape::Ecc2kDp {
+                let marker =
+                    commit_marker(&digest, campaign_records.expect("campaign records"), now);
+                let marker_digest = hex::encode(&Sha256::digest(marker.as_bytes()));
+                let marker_url = presign_s3_put(
+                    &spec,
+                    &format!("{}.json", grant.key),
+                    marker.len() as u64,
+                    &marker_digest,
+                    grant.expires_at,
+                    secrets_dir,
+                )?;
+                curl_put(&marker_url, marker.as_bytes(), &marker_digest)?;
+            }
         }
     }
 
@@ -1224,7 +1491,8 @@ fn short_submitter(submitter: &str) -> String {
     }
 }
 
-fn normalize_prefix(prefix: &str) -> String {
+/// Normalize a key prefix: no leading slash, trailing slash unless empty.
+pub fn normalize_prefix(prefix: &str) -> String {
     let trimmed = prefix.trim_start_matches('/');
     if trimmed.is_empty() {
         String::new()
@@ -1686,6 +1954,7 @@ mod tests {
                 max_bytes: Some(1024),
                 size: Some(body.len() as u64),
                 digest: Some(&digest),
+                slot: None,
                 requester: None,
             },
             None,
@@ -1844,6 +2113,288 @@ mod tests {
         let json = spec.to_json();
         assert!(json.contains("access_key_secret"));
         assert!(!json.contains("wJalr"));
+    }
+
+    fn campaign_dir(name: &str) -> (DepositDir, PathBuf) {
+        let root = scratch(name);
+        let dir = DepositDir::at(scratch(&format!("{name}-cfg")));
+        let secrets = scratch(&format!("{name}-secrets"));
+        secrets::prepare(&secrets).unwrap();
+        let mut spec = DepositSpec::file("camp", &root);
+        spec.prefix = Some(String::from("dp/"));
+        spec.key_shape = KeyShape::Ecc2kDp;
+        dir.add(&spec).unwrap();
+        (dir, secrets)
+    }
+
+    /// The minted key against `dp_ingest.py`'s `ORBIT_KEY_RE`, by hand: this
+    /// crate has no regex dependency and will not grow one for a test.
+    fn assert_orbit_key(key: &str, slot: &str, digest: &str) {
+        let head = format!("dp/slot-{slot}/");
+        assert!(key.starts_with(&head), "{key}");
+        let tail = key.strip_prefix(&head).unwrap();
+        assert!(tail.ends_with(".bin"), "{key}");
+        let parts: Vec<&str> = tail.strip_suffix(".bin").unwrap().split('-').collect();
+        assert_eq!(parts.len(), 3, "{key}");
+        assert_eq!(parts[0].len(), 32, "{key}");
+        assert!(parts[0].bytes().all(|b| b.is_ascii_hexdigit()), "{key}");
+        assert_eq!(parts[1], "0", "{key}");
+        assert_eq!(parts[2], digest, "{key}");
+    }
+
+    #[test]
+    fn campaign_grants_mint_ingester_shaped_keys() {
+        let (dir, secrets) = campaign_dir("orbit-keys");
+        let body = vec![7u8; 64];
+        let digest = hex::encode(&Sha256::digest(&body));
+        let ask = |slot: Option<u64>, digest: Option<&str>, size: Option<u64>| {
+            issue_grant(
+                &dir,
+                &GrantRequest {
+                    deposit: "camp",
+                    submitter: "slot-7-worker",
+                    max_bytes: None,
+                    size,
+                    digest,
+                    slot,
+                    requester: None,
+                },
+                None,
+                &secrets,
+            )
+        };
+        // No slot, no digest, or a digest the key could not spell: all refused
+        // before anything is minted.
+        assert!(ask(None, Some(&digest), None).is_err());
+        assert!(ask(Some(7), None, None).is_err());
+        assert!(ask(Some(7), Some(&digest.to_ascii_uppercase()), None).is_err());
+        assert!(ask(Some(7), Some(&digest), Some(33)).is_err());
+        let first = ask(Some(7), Some(&digest), Some(64)).unwrap();
+        assert_orbit_key(&first.key, "00007", &digest);
+        // The stream id is minted per grant: two grants for the same body are
+        // two objects, never one key written twice.
+        let second = ask(Some(7), Some(&digest), Some(64)).unwrap();
+        assert_orbit_key(&second.key, "00007", &digest);
+        assert_ne!(first.key, second.key);
+        let _ = fs::remove_dir_all(dir.path());
+        let _ = fs::remove_dir_all(secrets);
+    }
+
+    #[test]
+    fn campaign_redeem_writes_body_and_marker() {
+        let (dir, secrets) = campaign_dir("orbit-put");
+        let body = vec![9u8; 64];
+        let digest = hex::encode(&Sha256::digest(&body));
+        let grant = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "camp",
+                submitter: "slot-3-worker",
+                max_bytes: None,
+                size: Some(64),
+                digest: Some(&digest),
+                slot: Some(3),
+                requester: None,
+            },
+            None,
+            &secrets,
+        )
+        .unwrap();
+        let receipt = redeem_grant(&dir, &grant.id, &body, &secrets).unwrap();
+        assert_eq!(receipt.key, grant.key);
+        assert_eq!(receipt.digest, digest);
+        let root = dir.load("camp").unwrap().root.unwrap();
+        assert_eq!(fs::read(root.join(&grant.key)).unwrap(), body);
+        let marker: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(root.join(format!("{}.json", grant.key))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker["sha256"], digest);
+        assert_eq!(marker["records"], 2);
+        assert_eq!(marker["format"], "ecc2k130-gpu-packed32");
+        assert!(marker["producedAt"].as_u64().unwrap() > 0);
+
+        // A body the ingester would truncate is refused before anything lands.
+        let bad = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "camp",
+                submitter: "slot-3-worker",
+                max_bytes: None,
+                size: None,
+                digest: Some(&hex::encode(&Sha256::digest([0u8; 33]))),
+                slot: Some(3),
+                requester: None,
+            },
+            None,
+            &secrets,
+        )
+        .unwrap();
+        assert!(redeem_grant(&dir, &bad.id, &[0u8; 33], &secrets).is_err());
+        assert!(redeem_grant(&dir, &bad.id, &[], &secrets).is_err());
+        // ... and the refusal consumed nothing: the grant is still redeemable.
+        let good_body = vec![1u8; 32];
+        let good = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "camp",
+                submitter: "slot-3-worker",
+                max_bytes: None,
+                size: Some(32),
+                digest: Some(&hex::encode(&Sha256::digest(&good_body))),
+                slot: Some(3),
+                requester: None,
+            },
+            None,
+            &secrets,
+        )
+        .unwrap();
+        redeem_grant(&dir, &good.id, &good_body, &secrets).unwrap();
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(dir.path());
+        let _ = fs::remove_dir_all(secrets);
+    }
+
+    #[test]
+    fn campaign_v3_proxy_upload_validates_header_and_counts_records() {
+        let (dir, secrets) = campaign_dir("orbit-v3-put");
+        let mut body = b"ECC2KDT3".to_vec();
+        body.extend_from_slice(&3u32.to_le_bytes());
+        body.extend_from_slice(&32u32.to_le_bytes());
+        body.extend_from_slice(&[7u8; 64]);
+        let digest = hex::encode(&Sha256::digest(&body));
+        let grant = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "camp",
+                submitter: "cpu-worker",
+                digest: Some(&digest),
+                slot: Some(9),
+                ..GrantRequest::default()
+            },
+            None,
+            &secrets,
+        )
+        .unwrap();
+        let receipt = redeem_grant(&dir, &grant.id, &body, &secrets).unwrap();
+        let root = dir.load("camp").unwrap().root.unwrap();
+        let marker: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(root.join(format!("{}.json", receipt.key))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker["sha256"], digest);
+        assert_eq!(marker["records"], 2);
+        assert_eq!(fs::read(root.join(receipt.key)).unwrap(), body);
+        body[8] = 4;
+        assert!(campaign_record_count(&body).is_err());
+        body[8] = 3;
+        body.pop();
+        assert!(campaign_record_count(&body).is_err());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(dir.path());
+        let _ = fs::remove_dir_all(secrets);
+    }
+
+    #[test]
+    fn campaign_presigned_grant_carries_a_signed_marker() {
+        let dir = DepositDir::at(scratch("orbit-presign-cfg"));
+        let secrets = scratch("orbit-presign-secrets");
+        secrets::prepare(&secrets).unwrap();
+        secrets::set(&secrets, "AWS_ACCESS_KEY_ID", "AKIAEXAMPLEKEY00000").unwrap();
+        secrets::set(
+            &secrets,
+            "AWS_SECRET_ACCESS_KEY",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        )
+        .unwrap();
+        let mut spec = DepositSpec::s3("camp", "ecc2k130-example", "dp/", "us-west-2");
+        spec.key_shape = KeyShape::Ecc2kDp;
+        dir.add(&spec).unwrap();
+
+        let body = vec![3u8; 96];
+        let digest = hex::encode(&Sha256::digest(&body));
+        let grant = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "camp",
+                submitter: "fleet-gpu",
+                max_bytes: None,
+                size: Some(96),
+                digest: Some(&digest),
+                slot: Some(140),
+                requester: None,
+            },
+            None,
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(grant.mode, UploadMode::Presigned);
+        assert_orbit_key(&grant.key, "00140", &digest);
+        // The contributor PUTs the body, then PUTs the marker: both URLs are
+        // signed, and the marker bytes are the node's, not theirs to invent.
+        let marker_url = grant.marker_put_url.as_deref().unwrap();
+        assert!(marker_url.contains("X-Amz-Signature="));
+        assert!(marker_url.contains(".json?"));
+        let marker: serde_json::Value =
+            serde_json::from_str(grant.marker.as_deref().unwrap()).unwrap();
+        assert_eq!(marker["sha256"], digest);
+        assert_eq!(marker["records"], 3);
+        let public = grant.public_response(None);
+        assert_eq!(public["marker_put_url"], marker_url);
+        assert!(public["marker_headers"]["Content-Length"]
+            .as_str()
+            .unwrap()
+            .parse::<usize>()
+            .is_ok());
+        let _ = fs::remove_dir_all(dir.path());
+        let _ = fs::remove_dir_all(secrets);
+    }
+
+    #[test]
+    fn slot_is_refused_outside_campaign_deposits() {
+        let root = scratch("slot-root");
+        let dir = DepositDir::at(scratch("slot-cfg"));
+        let secrets = scratch("slot-secrets");
+        secrets::prepare(&secrets).unwrap();
+        dir.add(&DepositSpec::file("demo", &root)).unwrap();
+        let err = issue_grant(
+            &dir,
+            &GrantRequest {
+                deposit: "demo",
+                submitter: "alice",
+                max_bytes: None,
+                digest: None,
+                size: None,
+                slot: Some(1),
+                requester: None,
+            },
+            None,
+            &secrets,
+        )
+        .unwrap_err();
+        assert!(matches!(err, DepositError::Invalid(_)), "{err}");
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(dir.path());
+        let _ = fs::remove_dir_all(secrets);
+    }
+
+    #[test]
+    fn campaign_deposits_need_a_prefix_and_old_configs_stay_default() {
+        let mut spec = DepositSpec::s3("camp", "b", "", "us-west-2");
+        spec.key_shape = KeyShape::Ecc2kDp;
+        assert!(spec.validate().is_err());
+        // ... while the default shape never cared about prefixes.
+        let plain = DepositSpec::s3("camp", "b", "", "us-west-2");
+        assert!(plain.validate().is_ok());
+        // Configs written before shapes existed carry no key_shape and still
+        // load, as the default one.
+        let json = r#"{"name":"d","provider":"file","root":"/tmp/x"}"#;
+        assert_eq!(
+            DepositSpec::from_json(json).unwrap().key_shape,
+            KeyShape::Default
+        );
+        let json = r#"{"name":"d","provider":"file","root":"/tmp/x","key_shape":"ecc2k"}"#;
+        assert!(DepositSpec::from_json(json).is_err());
     }
 
     #[test]

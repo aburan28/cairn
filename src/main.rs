@@ -1290,6 +1290,7 @@ enum DepositAction {
         region: Option<String>,
         max_bytes: Option<u64>,
         ttl_secs: Option<u64>,
+        key_shape: Option<String>,
     },
     /// Names only.
     List,
@@ -1304,6 +1305,8 @@ enum DepositAction {
         /// for exactly those bytes; without both, it goes through the node.
         size: Option<u64>,
         digest: Option<String>,
+        /// Campaign slot. Required by `ecc2k-dp` deposits, refused by others.
+        slot: Option<u64>,
     },
     /// Redeem a grant by uploading a file through this node.
     Put { grant: String, file: String },
@@ -3263,6 +3266,7 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
             let mut region: Option<String> = None;
             let mut max_bytes: Option<u64> = None;
             let mut ttl_secs: Option<u64> = None;
+            let mut key_shape: Option<String> = None;
             while let Some(token) = cursor.take() {
                 match token.as_str() {
                     "--name" => name = Some(cursor.value("--name")?),
@@ -3271,6 +3275,7 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
                     "--bucket" => bucket = Some(cursor.value("--bucket")?),
                     "--prefix" => prefix = Some(cursor.value("--prefix")?),
                     "--region" => region = Some(cursor.value("--region")?),
+                    "--key-shape" => key_shape = Some(cursor.value("--key-shape")?),
                     "--max-bytes" => {
                         let raw = cursor.value("--max-bytes")?;
                         max_bytes = Some(raw.parse::<u64>().map_err(|_| {
@@ -3313,6 +3318,7 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
                 region,
                 max_bytes,
                 ttl_secs,
+                key_shape,
             }
         }
         Some("grant") => {
@@ -3321,6 +3327,7 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
             let mut bytes: Option<u64> = None;
             let mut size: Option<u64> = None;
             let mut digest: Option<String> = None;
+            let mut slot: Option<u64> = None;
             while let Some(token) = cursor.take() {
                 match token.as_str() {
                     "--deposit" => deposit = Some(cursor.value("--deposit")?),
@@ -3328,6 +3335,9 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
                         size = Some(parse_u64(&cursor.value("--size")?, "deposit grant --size")?)
                     }
                     "--submitter" => submitter = Some(cursor.value("--submitter")?),
+                    "--slot" => {
+                        slot = Some(parse_u64(&cursor.value("--slot")?, "deposit grant --slot")?)
+                    }
                     "--bytes" => {
                         let raw = cursor.value("--bytes")?;
                         bytes = Some(raw.parse::<u64>().map_err(|_| {
@@ -3359,6 +3369,7 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
                 bytes,
                 size,
                 digest,
+                slot,
             }
         }
         Some("put") => {
@@ -4415,6 +4426,10 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
+        "      [--key-shape default|ecc2k-dp] [--max-bytes N] [--ttl-secs N]",
+    );
+    say(
+        out,
         "      configure a mediated upload target; secret *names* only, values via `secret set`",
     );
     say(out, "  deposit list");
@@ -4423,11 +4438,15 @@ fn print_help(out: &mut dyn Write) {
     say(out, "      public location; never credential values");
     say(
         out,
-        "  deposit grant --deposit N --submitter S [--bytes N] [--size N] [--digest HEX]",
+        "  deposit grant --deposit N --submitter S [--bytes N] [--size N] [--digest HEX] [--slot N]",
     );
     say(
         out,
-        "      issue a short-lived single-use upload grant (JSON on stdout)",
+        "      issue a short-lived single-use upload grant (JSON on stdout); --slot is",
+    );
+    say(
+        out,
+        "      required by ecc2k-dp deposits and refused by all others",
     );
     say(out, "  deposit put --grant ID --file PATH");
     say(
@@ -8277,6 +8296,7 @@ fn cmd_deposit(
             region,
             max_bytes,
             ttl_secs,
+            key_shape,
         } => {
             let mut spec = match provider.as_str() {
                 "file" => {
@@ -8305,6 +8325,16 @@ fn cmd_deposit(
             }
             if let Some(n) = *ttl_secs {
                 spec.ttl_secs = n;
+            }
+            if let Some(prefix) = prefix {
+                spec.prefix = Some(deposit::normalize_prefix(prefix));
+            }
+            if let Some(shape) = key_shape {
+                spec.key_shape = deposit::KeyShape::parse(shape).ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "deposit add: unknown key_shape {shape:?}; expected default or ecc2k-dp"
+                    ))
+                })?;
             }
             let path = dir.add(&spec).map_err(CliError::Deposit)?;
             say(
@@ -8341,6 +8371,7 @@ fn cmd_deposit(
             bytes,
             size,
             digest,
+            slot,
         } => {
             let request = deposit::GrantRequest {
                 deposit,
@@ -8348,6 +8379,7 @@ fn cmd_deposit(
                 max_bytes: *bytes,
                 size: *size,
                 digest: digest.as_deref(),
+                slot: *slot,
                 requester: None,
             };
             let grant = deposit::issue_grant(&dir, &request, None, &secrets_dir)
@@ -11655,6 +11687,7 @@ mod tests {
                     region: None,
                     max_bytes: None,
                     ttl_secs: None,
+                    key_shape: None,
                 }
             }
         );
@@ -11678,6 +11711,7 @@ mod tests {
                     bytes: Some(1024),
                     size: None,
                     digest: None,
+                    slot: None,
                 }
             }
         );
@@ -11738,6 +11772,7 @@ mod tests {
                     region: None,
                     max_bytes: Some(4096),
                     ttl_secs: None,
+                    key_shape: None,
                 }
             )
             .expect("add"),
@@ -11754,6 +11789,7 @@ mod tests {
                     bytes: Some(64),
                     size: None,
                     digest: None,
+                    slot: None,
                 }
             )
             .expect("grant"),

@@ -2544,7 +2544,9 @@ fn tool_definitions() -> Json {
                  PUT the bytes to put_url (or use cairn deposit put). Configure deposits with \
                  `cairn deposit add`; credentials stay in `cairn secret`. If this node cannot \
                  mint against the deposit it answers unavailable, the same way a missing \
-                 verifier does — that says nothing about your artifact.",
+                 verifier does — that says nothing about your artifact. Against an ecc2k-dp \
+                 deposit the key is a campaign object key and the response also carries the \
+                 commit marker to PUT after the body.",
             "inputSchema": {
                 "type": "object",
                 "required": ["deposit", "submitter"],
@@ -2572,6 +2574,12 @@ fn tool_definitions() -> Json {
                         "type": "string",
                         "description":
                             "Optional sha-256 hex of the body. When set, the PUT must match."
+                    },
+                    "slot": {
+                        "type": "integer",
+                        "description":
+                            "Campaign slot, required by ecc2k-dp deposits and refused by all \
+                             others: the minted key names which slot produced the object."
                     }
                 }
             }
@@ -3753,6 +3761,7 @@ impl Server {
         let submitter = string_arg(args, "submitter")?;
         let max_bytes = args.get("max_bytes").and_then(Json::as_u64);
         let digest = args.get("digest").and_then(Json::as_str);
+        let slot = args.get("slot").and_then(Json::as_u64);
         let ledger_path = self.node.read().ledger().path().to_path_buf();
         let deposits = DepositDir::under_store(
             ledger_path
@@ -3767,6 +3776,7 @@ impl Server {
             max_bytes,
             size: args.get("size").and_then(Json::as_u64),
             digest,
+            slot,
             requester: None,
         };
         let grant = deposit::issue_grant(&deposits, &request, None, &secrets_dir)

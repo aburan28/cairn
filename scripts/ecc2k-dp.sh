@@ -8,7 +8,7 @@
 # pipeline publishes aggregates to https://aburan28.github.io/crypto/status/ —
 # counts only, never the points themselves.
 #
-# End to end on a CPU-only machine, no AWS identity needed until `upload`:
+# End to end on a CPU-only machine, no AWS identity needed until upload:
 #
 #   ./scripts/ecc2k-dp.sh walk --seconds 120 --dp-file /tmp/dps.bin
 #   ./scripts/ecc2k-dp.sh verify-local --dp-file /tmp/dps.bin
@@ -21,11 +21,17 @@
 #
 #   cairn secret set AWS_ACCESS_KEY_ID --file …
 #   cairn secret set AWS_SECRET_ACCESS_KEY --file …
+#   cairn secret set ECC_BUCKET --value ecc2k130-<account>
 #   cairn secret set DATABASE_URL --file …          # optional; else Secrets Manager
 #   cairn secret set RHO_DB_HOST --value rho-dp.…   # when DATABASE_URL is unset
 #
-# The crypto checkout holds the CPU walker, the witness emitter, and
-# aws/dp_ingest.py + aws/ingest.sh. Point at one, or let `walk` clone it:
+# Uploads go through cairn deposit, never boto3: the node mints a
+# content-keyed object name the ingester recognises, signs the PUT, and writes
+# the commit marker beside the body. The deposit is created on first upload
+# (ECC_BUCKET names the bucket) and reused after.
+#
+# The crypto checkout holds the CPU walker, witness emitter, dp_ingest.py and
+# ingest.sh. Point at one, or let walk clone it:
 #
 #   export CAIRN_CRYPTO_ROOT=/path/to/aburan28/crypto
 #   # or pass --crypto /path/to/aburan28/crypto
@@ -206,7 +212,7 @@ import hashlib, json, re, struct, sys
 
 V2_MAGIC = b"ECC2KDP2"
 V3_MAGIC = b"ECC2KDT3"
-LEGACY_KEY_RE = re.compile(r"^dp/(slot-\d+)/(\d+)-(\d+)\.bin$")
+ORBIT_KEY_RE = re.compile(r"^dp/(slot-\d+)/([0-9a-f]{32})-(\d+)-([0-9a-f]{64})\.bin$")
 
 def frame(body):
     if body[:8] == V2_MAGIC:
@@ -328,21 +334,21 @@ PY
       "$walker" "${args[@]}" >&2
     fi
     python3 -c "$FRAME_PRELUDE
-body = open('$DP_FILE', 'rb').read()
+body = open(sys.argv[1], 'rb').read()
 kind, records, why = frame(body)
 if kind == 'bad':
     sys.stderr.write('collected file is not a corpus: %s\n' % why)
     sys.exit(1)
-print('collected %d bytes: %s, %d distinguished orbit(s) in %s' % (len(body), kind, records, '$DP_FILE'))
+print('collected %d bytes: %s, %d distinguished orbit(s) in %s' % (len(body), kind, records, sys.argv[1]))
 print('next: verify-local to check it, strip for the campaign upload, witness for a cairn claim')
-"
+" "$DP_FILE"
     ;;
   strip)
     [[ -n "$DP_FILE" ]] || { echo "strip needs --dp-file (the v2 corpus)" >&2; exit 2; }
     [[ -f "$DP_FILE" ]] || { echo "no such file: $DP_FILE" >&2; exit 2; }
     [[ -n "$OUT_FILE" ]] || { echo "strip needs --out (where the v1 bytes go)" >&2; exit 2; }
     python3 -c "$FRAME_PRELUDE
-body = open('$DP_FILE', 'rb').read()
+body = open(sys.argv[1], 'rb').read()
 kind, records, why = frame(body)
 if kind == 'bad':
     sys.stderr.write('not a corpus: %s\n' % why)
@@ -351,13 +357,13 @@ if kind == 'v3':
     sys.stderr.write('not stripping: the ingester reads a v3 table corpus itself and checks it over the original bytes\n')
     sys.exit(1)
 if kind == 'v1':
-    open('$OUT_FILE', 'wb').write(body)
-    print('already v1: copied %d records unchanged to $OUT_FILE' % records)
+    open(sys.argv[2], 'wb').write(body)
+    print('already v1: copied %d records unchanged to %s' % (records, sys.argv[2]))
 else:
-    open('$OUT_FILE', 'wb').write(strip_v2(body))
-    print('stripped v2 -> v1: %d records, seed+canon kept, iters+counts stay in $DP_FILE' % records)
-    print('wrote $OUT_FILE (%d bytes)' % (records * 32))
-"
+    open(sys.argv[2], 'wb').write(strip_v2(body))
+    print('stripped v2 -> v1: %d records, seed+canon kept, iters+counts stay in %s' % (records, sys.argv[1]))
+    print('wrote %s (%d bytes)' % (sys.argv[2], records * 32))
+" "$DP_FILE" "$OUT_FILE"
     ;;
   verify-local)
     [[ -n "$DP_FILE" ]] || { echo "verify-local needs --dp-file" >&2; exit 2; }
@@ -367,7 +373,7 @@ else:
     fi
     python3 -c "$FRAME_PRELUDE
 import time
-body = open('$DP_FILE', 'rb').read()
+body = open(sys.argv[1], 'rb').read()
 kind, records, why = frame(body)
 if kind == 'bad':
     sys.stderr.write('NOT UPLOADABLE: %s\n' % why)
@@ -375,17 +381,18 @@ if kind == 'bad':
 if kind == 'v2':
     print('valid v2 corpus: %d records with carried witnesses (iters+counts)' % records)
     print('NOT UPLOADABLE as-is: the campaign store takes 32-byte records only and refuses v2;')
-    print('run: $0 strip --dp-file $DP_FILE --out <v1 file>')
+    print('run: ecc2k-dp.sh strip --dp-file <v2 corpus> --out <v1 file>')
     sys.exit(1)
 digest = hashlib.sha256(body).hexdigest()
-key = 'dp/slot-%05d/<epoch>-0000000000000000.bin' % int('$SLOT')
-assert LEGACY_KEY_RE.match(key.replace('<epoch>', '1700000000')), 'key shape drifted from dp_ingest LEGACY_KEY_RE'
+slot = int(sys.argv[2])
+key = 'dp/slot-%05d/%s-0-%s.bin' % (slot, '0' * 32, digest)
+assert ORBIT_KEY_RE.match(key), 'key shape drifted from dp_ingest ORBIT_KEY_RE'
 print('format: %s, %d records, %d bytes' % (kind, records, len(body)))
 print('sha256: %s' % digest)
 print('marker: %s' % json.dumps({'sha256': digest, 'records': records, 'producedAt': int(time.time()), 'format': 'ecc2k130-gpu-packed32'}, separators=(',', ':')))
-print('key shape: %s  (matches the legacy worker shape dp_ingest recognises)' % key)
-print('UPLOADABLE: upload would put these bytes under dp/slot-%05d/' % int('$SLOT'))
-"
+print('key shape: %s  (stream id is minted per grant)' % key)
+print('UPLOADABLE: upload would put these bytes under dp/slot-%05d/' % slot)
+" "$DP_FILE" "$SLOT"
     ;;
   witness)
     wit=$(ensure_witness)
@@ -405,64 +412,82 @@ print('UPLOADABLE: upload would put these bytes under dp/slot-%05d/' % int('$SLO
     echo "claim-ready: ${#batches[@]} batch(es) in $OUT_DIR, each accepted by the pinned checker"
     ;;
   upload)
-    need_crypto
     [[ -n "$DP_FILE" ]] || { echo "upload needs --dp-file" >&2; exit 2; }
     [[ -f "$DP_FILE" ]] || { echo "no such file: $DP_FILE" >&2; exit 2; }
     if [[ -z "$SLOT" ]]; then
       SLOT="${ECC_SLOT:-0}"
     fi
-    # Upload one immutable object under dp/slot-N/, matching the legacy
-    # worker key shape the ingester already recognises. The body's sha256
-    # goes in a sibling .bin.json commit marker so a truncated put cannot
-    # become a stored point. A v2 corpus is stripped to its v1 bytes first,
-    # loudly: the store refuses 72-byte records, and silently uploading
-    # bytes the ingester will reject is worse than naming the conversion.
+    # Through `cairn deposit`, never boto3: the node mints a content-keyed
+    # object name the ingester recognises, signs the PUT itself, and writes
+    # the commit marker beside the body. AWS credentials stay in
+    # `cairn secret`; no Python AWS stack and no keys in the environment.
+    DEPOSIT="${ECC_DEPOSIT:-ecc2k130}"
+    if ! "$CAIRN" secret get AWS_ACCESS_KEY_ID >/dev/null 2>&1 \
+        || ! "$CAIRN" secret get AWS_SECRET_ACCESS_KEY >/dev/null 2>&1; then
+      echo "no AWS credentials stored; try:" >&2
+      echo "  cairn secret set AWS_ACCESS_KEY_ID --file …" >&2
+      echo "  cairn secret set AWS_SECRET_ACCESS_KEY --file …" >&2
+      exit 2
+    fi
+    # Use the same framing check as verify-local. V2 becomes v1 for the
+    # campaign store; v3 keeps its signed header and uses proxy redemption so
+    # the node can validate those bytes before it writes a commit marker.
     upload_py="$FRAME_PRELUDE
-import os, time
-try:
-    import boto3
-except ImportError:
-    sys.stderr.write('boto3 is required to upload: pip install boto3\n')
-    sys.exit(2)
-
-path, slot = sys.argv[1], sys.argv[2]
-raw = open(path, 'rb').read()
+import tempfile
+raw = open(sys.argv[1], 'rb').read()
 kind, records, why = frame(raw)
 if kind == 'bad':
     sys.stderr.write('not uploading: %s\n' % why)
     sys.exit(1)
+stripped = ''
 if kind == 'v2':
-    sys.stderr.write('stripping v2 -> v1 for upload (%d records); the local file keeps its witnesses\n' % records)
     body = strip_v2(raw)
+    tmp = tempfile.NamedTemporaryFile(prefix='ecc2k-dp-v1-', suffix='.bin', delete=False)
+    tmp.write(body)
+    tmp.close()
+    stripped = tmp.name
+    sys.stderr.write('stripping v2 -> v1 for upload (%d records); the local file keeps its witnesses\n' % records)
 else:
     body = raw
-# frame's count already matches what the ingester derives: for v3 the
-# header is 16 bytes, so len//32 and (len-16)//32 agree.
-
-account = boto3.client('sts').get_caller_identity()['Account']
-bucket = os.environ.get('ECC_BUCKET') or os.environ.get('RHO_BUCKET') or ('ecc2k130-%s' % account)
-region = os.environ.get('AWS_DEFAULT_REGION', 'us-west-2')
-epoch = int(time.time())
-key = 'dp/slot-%05d/%d-%016x.bin' % (int(slot), epoch, 0)
-assert LEGACY_KEY_RE.match(key), 'key shape drifted from dp_ingest LEGACY_KEY_RE'
-digest = hashlib.sha256(body).hexdigest()
-marker = {
-    'sha256': digest,
-    'records': records,
-    'producedAt': epoch,
-    'format': 'ecc2k130-gpu-packed32',
-}
-s3 = boto3.client('s3', region_name=region)
-s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType='application/octet-stream')
-s3.put_object(
-    Bucket=bucket,
-    Key=key + '.json',
-    Body=json.dumps(marker, separators=(',', ':')).encode(),
-    ContentType='application/json',
-)
-print('uploaded s3://%s/%s (%d records)' % (bucket, key, records))
-print('status will move once dp_ingest runs; see https://aburan28.github.io/crypto/status/')
+print('%s\t%d\t%d\t%s\t%s' % (hashlib.sha256(body).hexdigest(), len(body), records, kind, stripped))
 "
-    with_secrets python3 -c "$upload_py" "$DP_FILE" "$SLOT"
+    frame=$(python3 -c "$upload_py" "$DP_FILE") || exit 1
+    IFS=$'\t' read -r SHA256 SIZE RECORDS KIND STRIPPED <<< "$frame"
+    UPLOAD="$DP_FILE"
+    if [[ -n "$STRIPPED" ]]; then
+      UPLOAD="$STRIPPED"
+      trap 'rm -f "$STRIPPED"' EXIT
+    fi
+    if "$CAIRN" deposit show "$DEPOSIT" >/dev/null 2>&1; then
+      if ! "$CAIRN" deposit show "$DEPOSIT" | grep -q "key_shape: ecc2k-dp"; then
+        echo "deposit $DEPOSIT exists but does not mint campaign keys; re-add it:" >&2
+        echo "  cairn deposit add --name $DEPOSIT --provider s3 --bucket B --prefix dp/ \\" >&2
+        echo "    --region R --key-shape ecc2k-dp" >&2
+        exit 2
+      fi
+    else
+      BUCKET="$("$CAIRN" secret get ECC_BUCKET 2>/dev/null || true)"
+      [[ -n "$BUCKET" ]] || BUCKET="${ECC_BUCKET:-}"
+      if [[ -z "$BUCKET" ]]; then
+        echo "no campaign bucket configured; try:" >&2
+        echo "  cairn secret set ECC_BUCKET --value ecc2k130-<account>" >&2
+        exit 2
+      fi
+      REGION="$("$CAIRN" secret get AWS_DEFAULT_REGION 2>/dev/null || true)"
+      [[ -n "$REGION" ]] || REGION="${AWS_DEFAULT_REGION:-us-west-2}"
+      "$CAIRN" deposit add --name "$DEPOSIT" --provider s3 --bucket "$BUCKET" \
+        --prefix dp/ --region "$REGION" --key-shape ecc2k-dp >&2
+    fi
+    grant_args=(--deposit "$DEPOSIT" --submitter "slot-$SLOT"
+      --digest "$SHA256" --slot "$SLOT")
+    if [[ "$KIND" != "v3" ]]; then
+      grant_args+=(--size "$SIZE")
+    fi
+    GRANT_JSON=$("$CAIRN" deposit grant "${grant_args[@]}")
+    GRANT_ID=$(echo "$GRANT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["grant_id"])')
+    RECEIPT=$("$CAIRN" deposit put --grant "$GRANT_ID" --file "$UPLOAD")
+    KEY=$(echo "$RECEIPT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')
+    echo "uploaded $KEY ($RECORDS records, sha256 $SHA256)"
+    echo "status will move once dp_ingest runs; see https://aburan28.github.io/crypto/status/"
     ;;
 esac

@@ -4359,6 +4359,20 @@ fn deposit_grant(
             }
         },
     };
+    let slot = match value.get("slot") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_u64() {
+            Some(n) => Some(n),
+            None => {
+                return respond(
+                    stream,
+                    400,
+                    "application/json",
+                    error_body("slot must be a non-negative integer").as_bytes(),
+                );
+            }
+        },
+    };
     // Counted per address, so one requester cannot hold every grant. Loopback
     // is the operator's own machine and is not counted.
     let requester = stream
@@ -4376,6 +4390,7 @@ fn deposit_grant(
         max_bytes,
         size,
         digest,
+        slot,
         requester: requester.as_deref(),
     };
     match deposit::issue_grant(&dir, &grant_request, None, &secrets_dir) {
