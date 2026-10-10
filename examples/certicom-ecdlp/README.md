@@ -4,10 +4,11 @@
 cairn post examples/certicom-ecdlp/objective-nums-50.json
 python3 examples/certicom-ecdlp/tools/selftest.py
 python3 examples/certicom-ecdlp/tools/nums.py verify examples/certicom-ecdlp/instances/nums-60.json
+python3 examples/certicom-ecdlp/tools/ecc2_131_selftest.py
 ```
 
 The portfolio includes two solvable NUMS rungs, open answer challenges for
-ECCp-131 and ECC2K-130, and separate piecework objectives that pay for search
+ECCp-131, ECC2-131 and ECC2K-130, and separate piecework objectives that pay for search
 progress. ECCp-131's rho work is paid per distinguished point; ECC2K-130's is
 paid per **orbit**, because on a Koblitz curve that is what a collision is
 between, and a point there cannot carry its own certificate at all.
@@ -61,8 +62,23 @@ arithmetic agrees** — the same reason a manifest from a stranger is safe in
 `swarm::piece`, one field up.
 
 ECC2K-130 is included as both an answer objective and an orbit-based
-piecework objective. Other binary-field instances are not included; they need
-GF(2^m) arithmetic at several field sizes and their own audited checkers.
+piecework objective. ECC2-131 is also included as an answer objective; its
+random curve uses the same binary field but has no Koblitz Frobenius speedup.
+Other binary-field instances are not included; they need their own audited
+checkers.
+
+## Binary-field answer challenge: ECC2-131
+
+`objective-ecc2-131.json` adds Certicom's random-curve ECC2-131 challenge,
+separate from the Koblitz ECC2K-130 instance. Its pinned checker implements
+GF(2^131) arithmetic and the binary elliptic-curve group law directly, then
+accepts only a scalar in `[1, n)` whose multiplication of the published point
+`P` equals `Q`. `tools/ecc2_131_selftest.py` exercises the positive control,
+subgroup checks, malformed encodings, and wrong answers. The field polynomial,
+curve, generator, target, and subgroup order match [Certicom's published curve
+list][certicom-curves]; Sage independently confirms the field is irreducible,
+`n` is prime, and both points have exact order `n`.
+
 
 ## The ladder: nothing-up-my-sleeve instances
 
@@ -315,3 +331,5 @@ Pollard rho with distinguished points parallelises linearly and needs almost no
 memory; BSGS is simpler but wants `sqrt(n)` of it, which is what makes it the
 wrong tool past about 2^50. Nothing in this repository helps you solve these,
 and the checker is deliberately indifferent to how you did.
+
+[certicom-curves]: https://www.certicom.com/en/curves-list
