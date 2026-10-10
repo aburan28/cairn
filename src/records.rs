@@ -441,6 +441,11 @@ pub struct Objective {
     /// no ids -- and, as with `confidentiality`, the default had to be
     /// whatever every pre-existing objective already meant.
     pub require_signed_submitter: bool,
+    /// Optional sole recipient of this objective's claims. An exploration
+    /// assignment needs the payer to bind the gateway evidence to the key that
+    /// will receive settlement; otherwise a copied receipt could be submitted
+    /// under a different name. Omitted when absent to preserve existing ids.
+    pub assignee: Option<String>,
 }
 
 impl Objective {
@@ -474,6 +479,7 @@ impl Objective {
             embargo_epochs: None,
             artifact_schema: None,
             require_signed_submitter: false,
+            assignee: None,
         };
         objective.validate()?;
         Ok(objective)
@@ -499,6 +505,13 @@ impl Objective {
     pub fn requiring_signed_submitters(mut self) -> Objective {
         self.require_signed_submitter = true;
         self
+    }
+
+    /// Restrict this objective to one signed submitter key.
+    pub fn assigned_to(mut self, assignee: impl Into<String>) -> Result<Objective, RecordError> {
+        self.assignee = Some(assignee.into());
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn with_artifact_schema(mut self, schema: Value) -> Result<Objective, RecordError> {
@@ -637,6 +650,17 @@ impl Objective {
                 });
             }
         }
+        if self
+            .assignee
+            .as_deref()
+            .is_some_and(|who| signed_submitter(who).is_none())
+        {
+            return Err(RecordError::InvalidField {
+                record: "objective",
+                field: "assignee",
+                expected: "a lowercase ed25519 public key",
+            });
+        }
         // Refused, not downgraded. Paying for an artifact nobody may read needs
         // a ZK proof that the pinned verifier accepts it; quietly treating the
         // request as `embargoed` would tell a funder their result stays secret
@@ -712,6 +736,9 @@ impl Objective {
         // field existed meant, so emitting it would move every id.
         if self.require_signed_submitter {
             body.insert("require_signed_submitter".to_string(), Value::Bool(true));
+        }
+        if let Some(assignee) = &self.assignee {
+            body.insert("assignee".to_string(), Value::string(assignee.clone()));
         }
         Value::Object(body)
     }
@@ -850,6 +877,7 @@ impl Objective {
                     })
                 }
             },
+            assignee: optional_string(value, RECORD, "assignee")?,
             artifact_schema,
         };
         objective.validate()?;
@@ -3643,6 +3671,7 @@ mod tests {
             embargo_epochs: None,
             artifact_schema: None,
             require_signed_submitter: false,
+            assignee: None,
         }
     }
 

@@ -726,6 +726,12 @@ pub enum RuleViolation {
         objective_id: String,
         submitter: String,
     },
+    /// A sponsor restricted this objective to one signed contributor.
+    WrongAssignee {
+        objective_id: String,
+        assignee: String,
+        submitter: String,
+    },
     /// A reveal into an epoch whose settlement batch has already been paid.
     ///
     /// Refused rather than queued for the next batch. An epoch's batch is
@@ -1309,6 +1315,16 @@ impl fmt::Display for RuleViolation {
                  --identity; the public key it prints becomes your submitter name",
                 crate::canonical::short(objective_id)
             ),
+            RuleViolation::WrongAssignee {
+                objective_id,
+                assignee,
+                submitter,
+            } => write!(
+                f,
+                "objective {} is assigned to {}, not {submitter:?}",
+                crate::canonical::short(objective_id),
+                crate::canonical::short(assignee)
+            ),
             RuleViolation::EpochAlreadySettled { epoch } => write!(
                 f,
                 "epoch {epoch} has already settled; a reveal cannot join a batch \
@@ -1706,6 +1722,19 @@ impl Node {
                 })
             }
         };
+        if objective
+            .assignee
+            .as_deref()
+            .is_some_and(|who| crate::records::signed_submitter(who).is_none())
+        {
+            return Err(RuleViolation::InadmissibleRecord(
+                crate::records::RecordError::InvalidField {
+                    record: "objective",
+                    field: "assignee",
+                    expected: "a lowercase ed25519 public key",
+                },
+            ));
+        }
 
         let id = objective.id();
         if self.is_posted(&id) {
@@ -4914,6 +4943,15 @@ impl Node {
                 submitter: commitment.submitter.clone(),
             });
         }
+        if let Some(assignee) = &objective.assignee {
+            if &commitment.submitter != assignee {
+                return Err(RuleViolation::WrongAssignee {
+                    objective_id: commitment.objective_id.clone(),
+                    assignee: assignee.clone(),
+                    submitter: commitment.submitter.clone(),
+                });
+            }
+        }
         // A ratchet and a piecework objective both stay open after a
         // settlement; only a pass/fail one closes when it pays.
         if objective.ratchet.is_none()
@@ -5287,6 +5325,15 @@ impl Node {
                 objective_id: claim.objective_id.clone(),
                 submitter: claim.submitter.clone(),
             });
+        }
+        if let Some(assignee) = &objective.assignee {
+            if &claim.submitter != assignee {
+                return Err(RuleViolation::WrongAssignee {
+                    objective_id: claim.objective_id.clone(),
+                    assignee: assignee.clone(),
+                    submitter: claim.submitter.clone(),
+                });
+            }
         }
 
         let commitment_entry = match matching_commitment {
@@ -7202,6 +7249,41 @@ impl Node {
                 ));
             } else if let Err(error) = objective.verify_funding_signature() {
                 problems.push(format!("objective at entry {}: {error}", entry.seq));
+            }
+        }
+
+        // Admission is not an audit: peers can send a log that never passed
+        // this node's commit/reveal path. Recheck the funder's submitter policy
+        // against both halves, including claims that never reached settlement.
+        for kind in [COMMITMENT, CLAIM] {
+            for entry in self.ledger.entries_of_kind(kind) {
+                let (Some(objective_id), Some(submitter)) = (
+                    payload_str(&entry.payload, "objective_id"),
+                    payload_str(&entry.payload, "submitter"),
+                ) else {
+                    continue;
+                };
+                let Some(objective) = objectives.get(objective_id) else {
+                    continue;
+                };
+                if objective.require_signed_submitter
+                    && crate::records::signed_submitter(submitter).is_none()
+                {
+                    problems.push(format!(
+                        "entry {}: {kind} names an unsigned submitter on a signed-only objective",
+                        entry.seq
+                    ));
+                }
+                if objective
+                    .assignee
+                    .as_deref()
+                    .is_some_and(|assignee| assignee != submitter)
+                {
+                    problems.push(format!(
+                        "entry {}: {kind} submitter differs from the objective's assignee",
+                        entry.seq
+                    ));
+                }
             }
         }
 

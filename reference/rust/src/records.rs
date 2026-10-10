@@ -142,6 +142,8 @@ pub struct Objective {
     pub embargo_epochs: Option<u64>,
     pub artifact_schema: Option<Value>,
     pub require_signed_submitter: bool,
+    /// Omitted when absent, so all previously published objective ids remain.
+    pub assignee: Option<String>,
 }
 
 impl Objective {
@@ -178,6 +180,9 @@ impl Objective {
         }
         if self.require_signed_submitter {
             body.push(("require_signed_submitter", Value::Bool(true)));
+        }
+        if let Some(assignee) = &self.assignee {
+            body.push(("assignee", Value::string(assignee.clone())));
         }
         Value::object(body)
     }
@@ -297,6 +302,7 @@ impl Objective {
                 Some(other) => Some(other.clone()),
             },
             require_signed_submitter,
+            assignee: optional_text(value, "assignee")?,
         };
         objective.validate()?;
         Ok(objective)
@@ -331,6 +337,15 @@ impl Objective {
             if schema.as_object().is_none() {
                 return Err(RecordError("artifact_schema must be an object".into()));
             }
+        }
+        if self
+            .assignee
+            .as_deref()
+            .is_some_and(|who| signed_submitter(who).is_none())
+        {
+            return Err(RecordError(
+                "assignee must be a lowercase ed25519 public key".into(),
+            ));
         }
         // A length on an objective that is not embargoed is a funder who
         // thinks they asked for delay and did not.
@@ -1199,6 +1214,7 @@ mod tests {
             embargo_epochs: None,
             artifact_schema: None,
             require_signed_submitter: false,
+            assignee: None,
         }
     }
 
@@ -1212,9 +1228,22 @@ mod tests {
             "confidentiality",
             "artifact_schema",
             "require_signed_submitter",
+            "assignee",
         ] {
             assert!(value.get(absent).is_none(), "{absent} was emitted");
         }
+    }
+
+    #[test]
+    fn assigned_objective_matches_independent_canonical_digest() {
+        let canonical = r#"{"assignee":"31debe55d37c722768b137131caa6087080b2e0b60b94bd785d14575cfa498bc","created_at":"2026-07-28T00:00:00+00:00","deadline":"2026-07-28T00:00:00+00:00","funder":"treasury","goal":"assigned-research","reward":0,"statement":"Deliver one metered research assignment","type":"objective","verifier":{"kind":"lean","statement":"theorem assigned : True"}}"#;
+        let value = Value::from_json(canonical).expect("canonical fixture");
+        let objective = Objective::from_value(&value).expect("assigned objective");
+        assert_eq!(objective.to_value().canonical_string(), canonical);
+        assert_eq!(
+            objective.id(),
+            "sha256:64b34b8780a101a6014e889eae0823bc1f5d5606c358dd2f4051f2d59680dc15"
+        );
     }
 
     #[test]
