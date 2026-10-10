@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   type ProgressResponse,
   type WorkerRow,
@@ -12,10 +12,8 @@ import {
   assignedBins,
   collisionOdds,
   denseHours,
-  etaSeconds,
   fetchProgress,
   formatAge,
-  formatDuration,
   formatLog2,
   formatMagnitude,
   formatPercent,
@@ -23,9 +21,11 @@ import {
   mergeWorkers,
   shareOfExpected,
   short,
+  workForOdds,
   workerRate,
 } from "@/lib/progress";
 import { type SearchJob, expectedSteps, expectedUnits, jobFor, stepsPerUnit } from "@/lib/jobs";
+import { type Objective, fetchObjectives } from "@/lib/objectives";
 import { fetchObjective } from "@/lib/frontier";
 import { resolveNode } from "@/lib/site";
 import { goalSlug } from "@/lib/title";
@@ -175,19 +175,7 @@ function Task() {
   }, [base, load, progress !== null]);
 
   if (!id) {
-    return (
-      <>
-        <h1 className="text-[26px] font-semibold">Which task?</h1>
-        <p className="prose-block mt-2">
-          This page needs an objective id: <code className="mono">/task?id=sha256:…</code>. Pick one
-          from{" "}
-          <Link href="/objectives" className="text-accent hover:underline">
-            the objectives
-          </Link>
-          .
-        </p>
-      </>
-    );
+    return <ProgressIndex />;
   }
 
   const picker = <LiveStamp at={readAt} error={progress ? error : null} />;
@@ -266,6 +254,81 @@ function Task() {
   );
 }
 
+/** The navigation destination is useful without a copied objective id. */
+function ProgressIndex() {
+  const router = useRouter();
+  const [objectives, setObjectives] = useState<Objective[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [readAt, setReadAt] = useState<Date | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void resolveNode().then((base) => fetchObjectives(base)).then((list) => {
+      if (!active) return;
+      setObjectives(list);
+      setReadAt(new Date());
+    }).catch((cause: unknown) => {
+      if (active) setError(cause instanceof Error ? cause.message : String(cause));
+    });
+    return () => { active = false; };
+  }, []);
+
+  const searches = useMemo(() =>
+    (objectives ?? [])
+      .filter((objective) => objective.piecework)
+      .sort((a, b) => Number(b.open) - Number(a.open) || a.goal.localeCompare(b.goal)),
+  [objectives]);
+
+  useEffect(() => {
+    if (searches.length === 1) {
+      router.replace(`/task?id=${encodeURIComponent(searches[0].id)}`);
+    }
+  }, [router, searches]);
+
+  return (
+    <>
+      <PageHeader
+        title="Progress"
+        subtitle="Follow verified results and current activity for a shared search."
+        actions={<LiveStamp at={readAt} error={error} />}
+      />
+      {error && <Note title="Could not read this node" tone="bad">{error}</Note>}
+      {!error && objectives === null && <Skeleton className="h-32 w-full" />}
+      {!error && searches.length === 1 && <Skeleton className="h-32 w-full" />}
+      {!error && objectives !== null && searches.length === 0 && (
+        <EmptyState title="No shared searches yet">
+          When this node has a search divided into paid tasks, its progress will appear here.
+        </EmptyState>
+      )}
+      {searches.length > 1 && (
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {searches.map((objective) => (
+            <Link
+              key={objective.id}
+              href={`/task?id=${encodeURIComponent(objective.id)}`}
+              className="box block p-5 transition-colors hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <Badge tone={objective.open ? "accent" : "neutral"}>
+                  {objective.open ? "Open" : "Settled"}
+                </Badge>
+                <span className="text-[11px] text-ink-3">View progress →</span>
+              </div>
+              <h2 className="text-[17px] font-semibold text-ink">
+                {objective.goal ? goalSlug(objective.goal) : short(objective.id)}
+              </h2>
+              <p className="mt-2 text-[12.5px] text-ink-2">
+                {amount(objective.piecework?.pool_remaining ?? 0)} available to pay ·{" "}
+                {amount(objective.piecework?.paid_total ?? 0)} paid
+              </p>
+            </Link>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 function Dashboard({
   id,
   base,
@@ -298,12 +361,19 @@ function Dashboard({
   const share = expected ? shareOfExpected(derived.steps, expected) : null;
   const odds = expected ? collisionOdds(derived.steps, expected) : null;
   const rate = reported.live > 0 ? reported.steps_per_second : null;
-  const eta = expected ? etaSeconds(derived.steps, expected, rate) : null;
+  const medianWork = expected ? workForOdds(0.5, expected) : null;
+  const ninetyWork = expected ? workForOdds(0.9, expected) : null;
   const unitsPerHour = derived.last_day.units_paid / 24;
   const poolSpent =
     piecework && reward > 0 ? Math.min(1, piecework.paid_total / reward) : null;
   const unitWord = job?.version === 2 ? "orbit" : "unit";
-  const hours = useMemo(() => denseHours(derived.hourly, HISTORY_HOURS, new Date()), [derived.hourly]);
+  const hours = useMemo(() => {
+    const generated = Date.parse(progress.generated_at);
+    // On a failed refresh, keep the chart's window at the last node snapshot;
+    // filling later hours with zeros would turn missing data into no work.
+    return denseHours(derived.hourly, HISTORY_HOURS,
+      new Date(Number.isFinite(generated) ? generated : Date.now()));
+  }, [derived.hourly, progress.generated_at]);
 
   const searchName = progress.goal
     ? goalSlug(progress.goal).toUpperCase()
@@ -312,8 +382,8 @@ function Dashboard({
   return (
     <>
       <PageHeader
-        crumb={{ href: "/objectives", label: "Objectives" }}
-        title={searchName + " progress"}
+        crumb={{ href: "/task", label: "Progress" }}
+        title={searchName}
         subtitle={
           progress.kind === "piecework"
             ? "See verified results, current contributors, and rewards for this shared search."
@@ -343,9 +413,81 @@ function Dashboard({
         </div>
       )}
 
+      {!stale && derived.units_paid > 0 && derived.last_hour.units_paid === 0 && (
+        <div className="mb-4">
+          <Note title="Nothing paid in the last hour" tone="warn">
+            Workers may still be walking. The latest verified result was{" "}
+            {derived.last_paid_at && Number.isFinite(Date.parse(derived.last_paid_at))
+              ? formatAge(Math.max(0, (Date.now() - Date.parse(derived.last_paid_at)) / 1000))
+              : "earlier"}.
+          </Note>
+        </div>
+      )}
+
+      <section className="box mb-5 overflow-hidden p-5 md:p-6" aria-label="Search progress dashboard">
+        <div className="flex flex-wrap items-start justify-between gap-5">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-3">
+              Operations in paid trails
+            </p>
+            <p className="mono mt-2 text-[42px] font-semibold leading-none text-accent md:text-[52px]">
+              {derived.steps > 0 ? formatLog2(derived.steps) : "0"}
+            </p>
+            <p className="mt-2 text-[12.5px] text-ink-2">
+              {amount(derived.steps)} counted from paid witnesses; capped and unpaid trails are excluded
+            </p>
+          </div>
+          <div className="min-w-[12rem] rounded-lg border border-edge bg-surface-2 px-4 py-3">
+            <p className="text-[11px] text-ink-3">Model chance on paid trails</p>
+            <p className="mono mt-1 text-[29px] font-semibold text-accent">{formatPercent(odds)}</p>
+            <p className="text-[11px] text-ink-3">from verified work and the search model</p>
+          </div>
+        </div>
+
+        {expected ? (
+          <>
+            <div className="mt-5 rounded-lg border border-edge bg-surface-2 p-3 md:p-4">
+              <ProbabilityCurve steps={derived.steps} expected={expected} />
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <HeroMetric
+                label="Paid work vs expected cost"
+                value={formatPercent(share)}
+                note={`${formatLog2(expected)} operations is the model mean`}
+              />
+              <HeroMetric
+                label="Live reported rate"
+                value={rate && rate > 0 ? formatRate(rate) : "—"}
+                note={rate && rate > 0 ? `${reported.live} worker${reported.live === 1 ? "" : "s"} reporting` : "No live rate reported"}
+              />
+              <HeroMetric
+                label="Paid in the last hour"
+                value={`${amount(derived.last_hour.units_paid)} ${unitWord}${derived.last_hour.units_paid === 1 ? "" : "s"}`}
+                note="Settled in this node's log"
+              />
+              <HeroMetric
+                label="Operations reported now"
+                value={reported.live > 0 ? formatMagnitude(reported.steps) : "—"}
+                note="Live worker session counters; not a lifetime total"
+              />
+            </div>
+            <p className="mt-4 text-[12px] leading-relaxed text-ink-3">
+              The curve is a random-walk estimate using only operations in paid witness trails.
+              It cannot include other work the fleet may have done. The live rate is self-reported
+              and is not added to the curve. Reaching the expected cost does not guarantee a collision.
+            </p>
+          </>
+        ) : (
+          <p className="mt-5 text-[12.5px] text-ink-2">
+            This reader does not know the search parameters pinned by this checker, so it cannot
+            estimate collision odds. Verified work and contributor activity remain available below.
+          </p>
+        )}
+      </section>
+
       {!progress.settled && <WorkPanel objective={id} base={base} />}
 
-      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
+      <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat
           label={"Verified " + unitWord + "s"}
           value={amount(derived.units_paid)}
@@ -353,14 +495,9 @@ function Dashboard({
           tone="accent"
         />
         <Stat
-          label="Workers reporting now"
-          value={String(reported.live)}
-          from="Self-reported · last 3 min"
-        />
-        <Stat
-          label="Live search rate"
-          value={rate && rate > 0 ? formatRate(rate) : "—"}
-          from={rate && rate > 0 ? "Live worker reports" : "Awaiting measured rate"}
+          label="Paid claims"
+          value={amount(derived.claims_paid)}
+          from="Verified settlements in the log"
         />
         <Stat
           label={piecework ? "Reward remaining" : "Objective reward"}
@@ -375,18 +512,28 @@ function Dashboard({
       </div>
 
       <div className="mb-5 grid gap-4 lg:grid-cols-2">
-        <Box title="Search progress">
-          {share !== null ? (
-            <div className="flex flex-col gap-3">
-              <Progress value={share} label="Verified work compared with the expected search effort" />
-              <p className="text-[12.5px] leading-relaxed text-ink-2">
-                Based on verified work. A collision may arrive earlier or later than this estimate.
-              </p>
-            </div>
+        <Box title={"Verified " + unitWord + "s by hour · last " + HISTORY_HOURS + " hours"}>
+          <HourlyBars hours={hours} />
+        </Box>
+        <Box title={"Cumulative verified " + unitWord + "s · last " + HISTORY_HOURS + " hours"}>
+          <CumulativeChart hours={hours} total={derived.units_paid} unitWord={unitWord} />
+        </Box>
+      </div>
+
+      <div className="mb-5 grid gap-4 lg:grid-cols-2">
+        <Box
+          title="Where verified work came from"
+          aside={derived.coverage ? <span className="text-[11px] font-normal text-ink-3">
+            {amount(derived.coverage.units_touched)} of {amount(derived.coverage.units)} units touched
+          </span> : undefined}
+        >
+          {derived.coverage ? (
+            <CoverageStrip
+              counts={derived.coverage.counts}
+              assigned={assignedBins(reported.workers, derived.coverage.units, derived.coverage.bins)}
+            />
           ) : (
-            <p className="text-[12.5px] text-ink-2">
-              The expected search effort is unavailable for this objective. Verified results are still shown above.
-            </p>
+            <p className="text-[12.5px] text-ink-3">No unit coverage is available yet.</p>
           )}
         </Box>
         <Box title="Reward pool">
@@ -455,11 +602,13 @@ function Dashboard({
               <dd className="mono">{formatPercent(odds)}</dd>
               <dt>Reported worker rate</dt>
               <dd className="mono">{formatRate(rate)}</dd>
-              <dt>Time at reported rate</dt>
-              <dd className="mono">{eta !== null ? formatDuration(eta) : "—"}</dd>
+              <dt>Work for 50% odds</dt>
+              <dd className="mono">{medianWork ? formatLog2(medianWork) : "—"}</dd>
+              <dt>Work for 90% odds</dt>
+              <dd className="mono">{ninetyWork ? formatLog2(ninetyWork) : "—"}</dd>
             </dl>
             <p className="mt-3 text-[12px] text-ink-3">
-              {job ? "The estimate uses this search's known parameters." : "Search parameters are unavailable."}
+              {job ? "The estimate uses this search's known parameters and paid witness trails only." : "Search parameters are unavailable."}
               {unitsExpected && perUnit
                 ? " About " + formatMagnitude(unitsExpected) + " " + unitWord + "s are expected across the search."
                 : ""}
@@ -491,28 +640,6 @@ function Dashboard({
               )}
             </dl>
           </Box>
-          <Box
-            title="Where verified work came from"
-            aside={
-              derived.coverage ? (
-                <span className="text-[11px] font-normal text-ink-3">
-                  {amount(derived.coverage.units_touched)} of {amount(derived.coverage.units)} units touched
-                </span>
-              ) : undefined
-            }
-          >
-            {derived.coverage ? (
-              <CoverageStrip
-                counts={derived.coverage.counts}
-                assigned={assignedBins(reported.workers, derived.coverage.units, derived.coverage.bins)}
-              />
-            ) : (
-              <p className="text-[12.5px] text-ink-3">No unit coverage is available yet.</p>
-            )}
-          </Box>
-          <Box title={"Verified " + unitWord + "s by hour · last " + HISTORY_HOURS + " hours"}>
-            <HourlyBars hours={hours} />
-          </Box>
         </div>
       </Disclosure>
 
@@ -539,6 +666,112 @@ function Dashboard({
         </Disclosure>
       </div>
     </>
+  );
+}
+
+function HeroMetric({ label, value, note }: { label: string; value: string; note: string }) {
+  return (
+    <div className="rounded-lg border border-edge bg-surface-2 px-3 py-3">
+      <p className="text-[11px] text-ink-3">{label}</p>
+      <p className="mono mt-1 text-[20px] font-semibold text-ink">{value}</p>
+      <p className="mt-1 text-[11px] leading-snug text-ink-3">{note}</p>
+    </div>
+  );
+}
+
+/** Probability against counted work in paid witness trails. */
+function ProbabilityCurve({ steps, expected }: { steps: number; expected: number }) {
+  const ratio = steps / expected;
+  const maxRatio = Math.max(2.1, ratio * 1.12);
+  const left = 45;
+  const top = 12;
+  const width = 645;
+  const height = 170;
+  const x = (at: number) => left + (Math.min(at, maxRatio) / maxRatio) * width;
+  const y = (chance: number) => top + (1 - chance) * height;
+  const oddsAt = (at: number) => collisionOdds(at * expected, expected) ?? 0;
+  const points = Array.from({ length: 101 }, (_, index) => {
+    const at = (index / 100) * maxRatio;
+    return `${index === 0 ? "M" : "L"}${x(at).toFixed(1)},${y(oddsAt(at)).toFixed(1)}`;
+  }).join(" ");
+  const median = workForOdds(0.5, expected)! / expected;
+  const ninety = workForOdds(0.9, expected)! / expected;
+
+  return (
+    <div>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <p className="text-[12px] font-medium text-ink">Chance of a collision by paid-trail work</p>
+        <span className="text-[11px] text-ink-3">50% near 0.94× · 90% near 1.71× expected cost</span>
+      </div>
+      <svg
+        viewBox="0 0 720 216"
+        preserveAspectRatio="none"
+        className="h-44 w-full md:h-52"
+        role="img"
+        aria-label={`Estimated collision chance ${formatPercent(collisionOdds(steps, expected))} after ${steps > 0 ? formatLog2(steps) : "0"} operations in paid witness trails`}
+      >
+        {[0, 0.5, 0.9].map((chance) => (
+          <g key={chance}>
+            <line x1={left} y1={y(chance)} x2={left + width} y2={y(chance)} className="stroke-edge-strong" strokeWidth="1" />
+            <text x="39" y={y(chance) + 4} textAnchor="end" className="fill-ink-3 text-[11px]">{Math.round(chance * 100)}%</text>
+          </g>
+        ))}
+        {[median, ninety].map((at, index) => (
+          <line key={index} x1={x(at)} y1={top} x2={x(at)} y2={top + height} className="stroke-edge-strong" strokeWidth="1" strokeDasharray="3 4" />
+        ))}
+        <path d={points} fill="none" stroke="currentColor" strokeWidth="3" className="text-accent" vectorEffect="non-scaling-stroke" />
+        <line x1={x(ratio)} y1={y(oddsAt(ratio))} x2={x(ratio)} y2={top + height} className="stroke-accent" strokeWidth="1.5" strokeDasharray="3 3" />
+        <circle cx={x(ratio)} cy={y(oddsAt(ratio))} r="5" className="fill-accent stroke-surface" strokeWidth="2" />
+        <text x={left} y="207" className="fill-ink-3 text-[11px]">0</text>
+        <text x={x(1)} y="207" textAnchor="middle" className="fill-ink-3 text-[11px]">1× expected</text>
+        <text x={left + width} y="207" textAnchor="end" className="fill-ink-3 text-[11px]">{maxRatio.toFixed(1)}×</text>
+      </svg>
+      <div className="mt-1 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-ink-3">
+        <span><span className="text-accent">●</span> Counted paid-trail work now</span>
+      </div>
+    </div>
+  );
+}
+
+/** The node supplies hourly settlements, so the line starts at the lifetime
+ * total minus this visible window rather than inventing older snapshots. */
+function CumulativeChart({
+  hours, total, unitWord,
+}: {
+  hours: { hour: string; units_paid: number }[];
+  total: number;
+  unitWord: string;
+}) {
+  const windowTotal = hours.reduce((sum, hour) => sum + hour.units_paid, 0);
+  const before = total - windowTotal;
+  let added = 0;
+  const points = [`0,30`, ...hours.map((hour, index) => {
+    added += hour.units_paid;
+    const x = ((index + 1) / hours.length) * 100;
+    const y = 30 - (added / Math.max(1, windowTotal)) * 28;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  })].join(" ");
+  return (
+    <div className="flex flex-col gap-2">
+      {before < 0 ? (
+        <p className="text-[12.5px] text-ink-2">The hourly settlements exceed the lifetime total; this chart needs a fresh node read.</p>
+      ) : (
+        <>
+          <svg viewBox="0 0 100 32" preserveAspectRatio="none" className="h-24 w-full" role="img"
+            aria-label={`${amount(before)} verified ${unitWord}s before this window; ${amount(total)} now`}>
+            <line x1="0" y1="30" x2="100" y2="30" className="stroke-edge-strong" strokeWidth="0.5" />
+            <polyline points={points} fill="none" className="stroke-accent" strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
+          </svg>
+          <div className="flex justify-between text-[11px] text-ink-3">
+            <span>{amount(before)} at start</span>
+            <span>{amount(total)} now</span>
+          </div>
+          <p className="text-[11px] text-ink-3">
+            {windowTotal === 0 ? "No verified units were paid in this window." : `${amount(windowTotal)} ${unitWord}s paid in this window.`}
+          </p>
+        </>
+      )}
+    </div>
   );
 }
 
