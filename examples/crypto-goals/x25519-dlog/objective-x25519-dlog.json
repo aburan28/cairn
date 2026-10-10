@@ -1,0 +1,29 @@
+{
+  "artifact_schema": {
+    "description": "The sign-canonical Curve25519 subgroup discrete logarithm, as 64 lowercase hexadecimal digits.",
+    "example": {
+      "k": "0000000000000000000000000000000000000000000000000000000012345678"
+    },
+    "properties": {
+      "k": {
+        "description": "k with u([k]G)=Q, in [1, (ell-1)/2], choosing the smaller representative because u(P)=u(-P); zero-padded to 64 lowercase hexadecimal digits.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "k"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-10-10T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-x25519-prime-subgroup-dlog",
+  "reward": 81920000,
+  "statement": "Find the canonical discrete logarithm k for the X25519 basepoint u=9 in the prime-order Curve25519 subgroup: the u-coordinate of [k]G must equal Q. The RFC 7748 curve has equation v\u00b2=u\u00b3+486662u\u00b2+u over p=2\u00b2\u2075\u2075\u221219, subgroup order ell=2\u00b2\u2075\u00b2+27742317777372353535851937790883648493, and cofactor 8. The checker derives an on-curve point from SHAKE256 of the public seed cairn/x25519/prime-subgroup-dlog/v1 and a counter, then multiplies by 8 and checks subgroup membership. This construction selects no scalar. X-only encoding identifies P and \u2212P, so the required unique representative is 1 \u2264 k \u2264 (ell\u22121)/2. This is an un-clamped subgroup DLP benchmark; X25519 key generation normally clamps scalars. Submit k as exactly 64 lowercase hexadecimal digits. The deterministic target u-coordinate is 64b0e6c2b48abd7538bfaf899fd11384d3e1b197a16467da0c75f416e737e789; the first valid counter is 0.",
+  "verifier": {
+    "checker": "examples/crypto-goals/x25519-dlog/checkers/x25519_dlog.py",
+    "checker_sha256": "6905e09cc1f0911a60d3cc11b5deb53a39c28a0953ab9ade4640adbea2e7091e",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}
