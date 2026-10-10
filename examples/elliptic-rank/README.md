@@ -14,6 +14,10 @@ never merely a numerical rank claim.
 | [`objective-rank-30-new-j.json`](objective-rank-30-new-j.json) | rank at least 30 with `j` different from curve #273 | 20,000,000 |
 | [`objective-rank-30-lower-height.json`](objective-rank-30-lower-height.json) | rank at least 30 and exact invariant height below curve #273 | 25,000,000 |
 
+The public rank history currently lists a proven lower bound of 31. The rank-32
+objective is the next target, not an already achieved record; see the
+[maintained rank history][rank-history] (checked 2026-10-10).
+
 The first objective requires exactly 31 points. The other three use separate
 entrypoints in the same pinned evaluator: they score the number of submitted
 points only after certifying the entire set independent, then enforce their
@@ -190,3 +194,5 @@ The reward is notional, as with every Stage 0 example in this repository.
 [curve-273]: https://elliptic-rank.icarm.cloud/curve/273
 [epoch]: https://epoch.ai/frontiermath/open-problems/elliptic-curve-rank
 [icarm-verifier]: https://github.com/icarm/elliptic-rank/blob/a6750aaf50d2bce36946c56eeed3218f6e01e627/src/verify.ts
+
+[rank-history]: https://web.math.pmf.unizg.hr/~duje/tors/rankhist.html

@@ -6,13 +6,11 @@ python3 examples/certicom-ecdlp/tools/selftest.py
 python3 examples/certicom-ecdlp/tools/nums.py verify examples/certicom-ecdlp/instances/nums-60.json
 ```
 
-Two solvable rungs and one open Certicom instance posted as a benchmark rather
-than as work anyone expects to finish — and then, for each of the two open
-instances, a *piecework* objective that pays for the search instead of for
-finishing it. ECCp-131's is a distributed Pollard rho paid per distinguished
-point; ECC2K-130's is paid per **orbit**, because on a Koblitz curve that is
-what a collision is between, and a point there cannot carry its own
-certificate at all.
+The portfolio includes two solvable NUMS rungs, open answer challenges for
+ECCp-131 and ECC2K-130, and separate piecework objectives that pay for search
+progress. ECCp-131's rho work is paid per distinguished point; ECC2K-130's is
+paid per **orbit**, because on a Koblitz curve that is what a collision is
+between, and a point there cannot carry its own certificate at all.
 
 ## Why Certicom's own instances could not simply be posted
 
@@ -27,7 +25,7 @@ two directions:
 | | status | why it fails as an objective |
 |---|---|---|
 | ECCp-79/89/97, ECCp-109, ECC2-109, ECC2K-95/108 | solved, answers published | the first copier settles instantly. *"Copying earns exactly zero"* — nobody is paid for work |
-| ECCp-131, ECC2-131, ECC2K-130 | **open** | ~2^65 group operations: **2,048×** the ECCp-109 effort, which took 549 days across ~10,000 machines |
+| ECCp-131, ECC2-131, ECC2K-130 | **open** | ECC2K-130 benefits from Koblitz endomorphisms; see the orbit piecework section for its search model |
 | ECCp-163 … ECCp-359 | open | 1.3×10^8 to 4×10^37 times ECCp-109 |
 
 There is no middle rung, and that is the whole reason this directory has two
@@ -62,9 +60,9 @@ prime-field instances, and all six pass. **The source stops mattering once the
 arithmetic agrees** — the same reason a manifest from a stranger is safe in
 `swarm::piece`, one field up.
 
-The binary-field instances (`ECC2-*`, `ECC2K-*`) are not included: they need
-GF(2^m) arithmetic for m up to 353, which is a different checker and no more
-solvable than the prime-field ones.
+ECC2K-130 is included as both an answer objective and an orbit-based
+piecework objective. Other binary-field instances are not included; they need
+GF(2^m) arithmetic at several field sizes and their own audited checkers.
 
 ## The ladder: nothing-up-my-sleeve instances
 
