@@ -1,0 +1,203 @@
+"""Pinned checker for buyer-audited ECC2K-130 ingester service periods.
+
+The configured auditor signs a receipt after checking private S3 and RDS data.
+This checker verifies the signature and public receipt arithmetic. Its accept
+verdict means the pinned auditor approved the period, not that the private
+data became independently observable to every Cairn node.
+"""
+
+import hashlib
+import json
+from datetime import datetime, timezone
+
+AUDITOR_KEY = bytes.fromhex("@AUDITOR_PUBLIC_KEY@")
+SERVICE = "@SERVICE_ID@"
+INPUT_BUCKET = "@INPUT_BUCKET@"
+PERIOD_SECONDS = @PERIOD_SECONDS@
+DOMAIN = b"cairn/ecc2k130-ingest-service/v1\n"
+
+# RFC 8032 Ed25519 verification, kept in this pinned single file because the
+# certificate sandbox cannot rely on third-party Python packages.
+P = 2**255 - 19
+L = 2**252 + 27742317777372353535851937790883648493
+D = (-121665 * pow(121666, P - 2, P)) % P
+I = pow(2, (P - 1) // 4, P)
+IDENTITY = (0, 1, 1, 0)
+
+
+def point_add(p, q):
+    x1, y1, z1, t1 = p
+    x2, y2, z2, t2 = q
+    a = (y1 - x1) * (y2 - x2) % P
+    b = (y1 + x1) * (y2 + x2) % P
+    c = 2 * D * t1 * t2 % P
+    d = 2 * z1 * z2 % P
+    e, f, g, h = (b - a) % P, (d - c) % P, (d + c) % P, (b + a) % P
+    return e * f % P, g * h % P, f * g % P, e * h % P
+
+
+def point_mul(p, n):
+    out = IDENTITY
+    while n:
+        if n & 1:
+            out = point_add(out, p)
+        p = point_add(p, p)
+        n >>= 1
+    return out
+
+
+def decode_point(raw):
+    if len(raw) != 32:
+        raise ValueError("point length")
+    y = int.from_bytes(raw, "little") & ((1 << 255) - 1)
+    sign = raw[31] >> 7
+    if y >= P:
+        raise ValueError("noncanonical point")
+    xx = (y * y - 1) * pow(D * y * y + 1, P - 2, P) % P
+    x = pow(xx, (P + 3) // 8, P)
+    if (x * x - xx) % P:
+        x = x * I % P
+    if (x * x - xx) % P or (x == 0 and sign):
+        raise ValueError("point not on curve")
+    if (x & 1) != sign:
+        x = P - x
+    return x, y, 1, x * y % P
+
+
+def point_equal(p, q):
+    return p[0] * q[2] % P == q[0] * p[2] % P and p[1] * q[2] % P == q[1] * p[2] % P
+
+
+BASE = decode_point(bytes.fromhex("5866666666666666666666666666666666666666666666666666666666666666"))
+
+
+def verify_signature(signature, message):
+    if len(signature) != 64:
+        return False
+    s = int.from_bytes(signature[32:], "little")
+    if s >= L:
+        return False
+    try:
+        r = decode_point(signature[:32])
+        a = decode_point(AUDITOR_KEY)
+    except ValueError:
+        return False
+    if point_equal(a, IDENTITY) or not point_equal(point_mul(a, L), IDENTITY):
+        return False
+    if not point_equal(point_mul(r, L), IDENTITY):
+        return False
+    h = int.from_bytes(hashlib.sha512(signature[:32] + AUDITOR_KEY + message).digest(), "little") % L
+    return point_equal(point_mul(BASE, s), point_add(r, point_mul(a, h)))
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+
+def nonnegative(value):
+    return type(value) is int and value >= 0
+
+
+def timestamp(value):
+    if type(value) is not str or not value.endswith("Z"):
+        raise ValueError("UTC timestamp required")
+    parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    if parsed.tzinfo != timezone.utc or parsed.microsecond:
+        raise ValueError("UTC timestamp required")
+    delta = parsed - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return delta.days * 86400 + delta.seconds
+
+
+def check(artifact):
+    if type(artifact) is not dict or set(artifact) != {"body", "period", "signature"}:
+        return False, "receipt shape"
+    body = artifact["body"]
+    sig = artifact["signature"]
+    if type(body) is not dict or type(sig) is not str or len(sig) != 128:
+        return False, "receipt shape"
+    try:
+        signature = bytes.fromhex(sig)
+        message = DOMAIN + canonical(body)
+    except (ValueError, TypeError, OverflowError, UnicodeError):
+        return False, "receipt encoding"
+    if not verify_signature(signature, message):
+        return False, "auditor signature"
+    required = {"service", "input_bucket", "period", "operator", "nonce", "input_objects", "progress", "before_status", "after_status", "polls"}
+    if set(body) != required or body["service"] != SERVICE or body["input_bucket"] != INPUT_BUCKET:
+        return False, "service receipt shape"
+    period = body["period"]
+    if not nonnegative(period) or type(artifact["period"]) is not int or artifact["period"] != period or type(body["operator"]) is not str or not body["operator"]:
+        return False, "period or operator"
+    if type(body["nonce"]) is not str or len(body["nonce"]) != 64:
+        return False, "receipt nonce"
+    try:
+        if bytes.fromhex(body["nonce"]).hex() != body["nonce"]:
+            return False, "receipt nonce"
+    except ValueError:
+        return False, "receipt nonce"
+    if not nonnegative(body["polls"]) or body["polls"] == 0:
+        return False, "no observed poll"
+    objects, progress = body["input_objects"], body["progress"]
+    if type(objects) is not list or type(progress) is not list or len(objects) != len(progress):
+        return False, "input/progress shape"
+    keys = set()
+    for obj, row in zip(objects, progress):
+        if type(obj) is not dict or set(obj) != {"key", "sha256", "bytes", "records"}:
+            return False, "input object shape"
+        if type(row) is not dict or set(row) != {"key", "records", "duplicates"}:
+            return False, "progress row shape"
+        key, digest = obj["key"], obj["sha256"]
+        if type(key) is not str or not key or key in keys or type(digest) is not str or len(digest) != 64:
+            return False, "input object identity"
+        try:
+            if bytes.fromhex(digest).hex() != digest:
+                return False, "input digest"
+        except ValueError:
+            return False, "input digest"
+        if not nonnegative(obj["bytes"]) or not nonnegative(obj["records"]):
+            return False, "input counters"
+        if row["key"] != key or not nonnegative(row["records"]) or row["records"] != obj["records"]:
+            return False, "progress mismatch"
+        if not nonnegative(row["duplicates"]) or row["duplicates"] > row["records"]:
+            return False, "duplicate counter"
+        keys.add(key)
+    before, after = body["before_status"], body["after_status"]
+    if type(before) is not dict or type(after) is not dict:
+        return False, "status snapshots"
+    if set(before) != {"sha256", "raw"} or set(after) != set(before):
+        return False, "status snapshot shape"
+    parsed = []
+    for snapshot in (before, after):
+        digest = snapshot["sha256"]
+        if type(digest) is not str or len(digest) != 64 or type(snapshot["raw"]) is not str or len(snapshot["raw"]) > 1_000_000:
+            return False, "status digest or bytes"
+        try:
+            if bytes.fromhex(digest).hex() != digest:
+                return False, "status digest"
+            if hashlib.sha256(snapshot["raw"].encode("utf-8")).hexdigest() != digest:
+                return False, "status bytes"
+            value = json.loads(snapshot["raw"])
+            if type(value) is not dict or value.get("campaign_id") != "ecc2k-130" or not nonnegative(value.get("dps")):
+                return False, "status count"
+            health = value.get("ingest")
+            if type(health) is not dict or not nonnegative(health.get("outstanding_objects")) or not nonnegative(health.get("unrecognised_objects")):
+                return False, "status ingest health"
+            parsed.append(value)
+        except (ValueError, TypeError, UnicodeError):
+            return False, "status digest"
+    if parsed[1]["dps"] < parsed[0]["dps"]:
+        return False, "point count decreased"
+    try:
+        before_at = timestamp(parsed[0]["generated_at"])
+        after_at = timestamp(parsed[1]["generated_at"])
+        before_published = timestamp(parsed[0]["published_at"])
+        after_published = timestamp(parsed[1]["published_at"])
+    except ValueError:
+        return False, "status timestamp"
+    start = period * PERIOD_SECONDS
+    end = start + PERIOD_SECONDS
+    if not (start - PERIOD_SECONDS <= before_at <= start and end <= after_at <= end + PERIOD_SECONDS):
+        return False, "status does not bracket period"
+    if not (before_at <= before_published <= start and after_at <= after_published <= end + PERIOD_SECONDS):
+        return False, "status was not published in period window"
+    return True, "auditor-approved ingester service period"
