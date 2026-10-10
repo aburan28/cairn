@@ -20,6 +20,7 @@ import { NODE_URL } from "@/lib/objectives";
 export const ROUTES = [
   { href: "/", label: "Overview", hint: "Your node at a glance, and what it is paying for" },
   { href: "/objectives", label: "Objectives", hint: "Every challenge this node knows, and what is still payable" },
+  { href: "/task", label: "Progress", hint: "Verified work, live rates, odds, history, and contributors" },
   { href: "/coordination", label: "Coordination", hint: "Launch a coordinated task from a description, and watch the running ones" },
   { href: "/network", label: "Network", hint: "Your node's role, the agents and machines connected to it, and other nodes" },
   { href: "/log", label: "Log", hint: "Everything that happened: the records, and what the node saw" },
@@ -27,7 +28,6 @@ export const ROUTES = [
   { href: "/goals", label: "Goals", hint: "The problems the network is working on, and each approach to them" },
   { href: "/contribute", label: "Contribute", hint: "Offer compute, connect an agent, check answers, fund a question" },
   { href: "/submit", label: "Post a challenge", hint: "Fund a question with a pinned checker" },
-  { href: "/task", label: "Task progress", hint: "A divided search: what is settled, who is working it, how far along" },
   { href: "/peers", label: "Address book", hint: "Every node that announced an address in the log" },
   { href: "/how-it-works", label: "How it works", hint: "The network in plain words, and its limits" },
 ] as const;
@@ -56,7 +56,8 @@ const NAV: {
         icon: <IconTarget />,
         match: ["/challenge", "/frontier", "/submit", "/goals"],
       },
-      { href: "/coordination", label: "Coordination", icon: <IconSplit />, match: ["/task"] },
+      { href: "/task", label: "Progress", icon: <IconTrend /> },
+      { href: "/coordination", label: "Coordination", icon: <IconSplit /> },
       { href: "/network", label: "Network", icon: <IconNetwork />, match: ["/peers"] },
       { href: "/log", label: "Log", icon: <IconList /> },
       { href: "/knowledge", label: "Knowledge", icon: <IconCheck />, match: ["/chain"] },
@@ -555,6 +556,15 @@ function IconSplit() {
   return (
     <Icon>
       <path d="M2.5 8h3.5M6 8l3-4.5h4.5M6 8l3 4.5h4.5M9 8h4.5" />
+    </Icon>
+  );
+}
+
+function IconTrend() {
+  return (
+    <Icon>
+      <path d="M2.5 12.5 6 9l2.5 1.5L13.5 4" />
+      <path d="M10.5 4h3v3" />
     </Icon>
   );
 }

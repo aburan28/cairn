@@ -175,8 +175,7 @@ export async function fetchProgress(
     response = await fetch(url, { cache: "no-store" });
   } catch (cause) {
     throw new NodeUnreachable(
-      `No node answered at ${base || "this origin"}. Start one with \`cairn run\`, or set ` +
-        `NEXT_PUBLIC_CAIRN_NODE to where yours is listening.`,
+      "The node is not responding. Open Cairn and start your node, then try again.",
       { cause },
     );
   }

@@ -90,8 +90,7 @@ export async function fetchObjectives(
     response = await fetch(`${base}/objectives`, { cache: "no-store" });
   } catch (cause) {
     throw new NodeUnreachable(
-      `No node answered at ${base}. Start one with \`make serve\`, or set ` +
-        `NEXT_PUBLIC_CAIRN_NODE to where yours is listening.`,
+      "The node is not responding. Open Cairn and start your node, then try again.",
       { cause },
     );
   }
