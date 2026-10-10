@@ -1,0 +1,30 @@
+{
+  "artifact_schema": {
+    "additionalProperties": false,
+    "description": "The discrete logarithm k, encoded as 64 lowercase hexadecimal characters.",
+    "example": {
+      "k": "000000000000000000000000000000000000000000000000001a2b3c4d5e6f1234"
+    },
+    "properties": {
+      "k": {
+        "description": "The representative k in [1, n) satisfying [k]P = Q on Certicom ECC2-131.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "k"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-10-10T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-certicom-ecc2-131",
+  "reward": 2000000,
+  "statement": "Solve Certicom's published ECC2-131 elliptic-curve discrete logarithm challenge: find k in [1, n) such that [k]P = Q on y^2 + xy = x^3 + a*x^2 + b over GF(2^131), with field polynomial x^131 + x^13 + x^2 + x + 1. The curve coefficients, subgroup order, generator P, and target Q are the fixed values published in Certicom's curve list and pinned by the checker. Return k as exactly 64 lowercase hexadecimal characters. This objective pays Cairn's notional reward only; it does not include a Certicom prize.",
+  "verifier": {
+    "checker": "examples/certicom-ecdlp/checkers/certicom_ecc2_131.py",
+    "checker_sha256": "3c9687b620ead2be14dbaea8a70e180e8ed364fc1a34f554a39885a1a92e9db9",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}
