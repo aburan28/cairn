@@ -47,6 +47,8 @@ def _check_factor(artifact: dict, modulus: int) -> tuple[bool, str]:
         return False, "factor must be a canonical positive decimal string"
     if value == "0" or (value.startswith("0") and len(value) > 1):
         return False, "factor must be written without a leading zero"
+    if len(value) > len(str(modulus)):
+        return False, "factor has more digits than the pinned modulus"
     factor = int(value)
     if not 1 < factor < modulus:
         return False, "factor must be strictly between 1 and the pinned modulus"

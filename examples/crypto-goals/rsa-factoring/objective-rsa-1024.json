@@ -5,6 +5,8 @@
     "properties": {
       "factor": {
         "description": "A positive canonical decimal factor f such that 1 < f < N and N mod f = 0.",
+        "maxLength": 309,
+        "minLength": 1,
         "type": "string"
       }
     },
@@ -18,7 +20,7 @@
   "statement": "Find a nontrivial divisor of the fixed 1024-bit RSA Factoring Challenge number RSA-1024. Submit {\"factor\": \"...\"} as a canonical decimal string. The pinned checker verifies exact divisibility and a nontrivial complementary factor; it does not assert primality of either side. This is a historical academic challenge: RSA Laboratories ended its original prize contest in 2007, and this objective has only Cairn's notional Stage 0 reward. The modulus is transcribed from RSA Inc's published RSA-1024 challenge, hosted by MysteryTwister: https://mysterytwister.org/media/challenges/pdf/mtc3-rsa-15-en.pdf. No claim is made here that factoring RSA-1024 alone breaks current RSA deployments.",
   "verifier": {
     "checker": "examples/crypto-goals/rsa-factoring/checkers/rsa_challenge.py",
-    "checker_sha256": "cf08324723addcdf3e8f17240bcee7d0270b30984c0456424e3ee554b22b6389",
+    "checker_sha256": "0e3f33f5ddb980addf3f2dcc0d387d040de484f78e63d66037f413bf9ef01f45",
     "entrypoint": "check_rsa1024",
     "kind": "certificate"
   }

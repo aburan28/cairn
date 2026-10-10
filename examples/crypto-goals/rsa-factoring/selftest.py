@@ -23,6 +23,7 @@ def main() -> None:
     assert not MODULE._check_factor({"factor": "0101"}, 101 * 113)[0]
     assert not MODULE._check_factor({"factor": 101}, 101 * 113)[0]
     assert not MODULE._check_factor({"factor": "11413"}, 101 * 113)[0]
+    assert not MODULE._check_factor({"factor": "9" * 5000}, 101 * 113)[0]
     assert MODULE.RSA_1024.bit_length() == 1024
     assert MODULE.RSA_1536.bit_length() == 1536
     assert MODULE.RSA_2048.bit_length() == 2048
