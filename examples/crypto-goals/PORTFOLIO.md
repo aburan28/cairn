@@ -113,7 +113,7 @@ cryptanalysis challenges; their presence here does not imply otherwise.
 | 75 | SHA-256 reduced-round preimage | Message whose digest matches the pinned target under the specified reduced-round function |
 | 76 | SHA-3 reduced-round differential trail | Exact Keccak state transitions and probability for the declared round subset |
 | 77 | BLAKE2 reduced-round collision | Distinct inputs and equal output under the exact reduced-round specification |
-| 78 | HMAC truncated-tag forgery in a bounded toy instance | Transcript replay against the exact key, tag length and verification procedure |
+| 78 | HMAC truncated-tag forgery in a bounded reduced-key instance | Transcript replay against the exact key, tag length and verification procedure |
 | 79 | Chosen-prefix collision for a reduced-round hash | Two chosen prefixes extended to a collision under the pinned function |
 | 80 | Chosen-prefix collision cost record for a published hash challenge | Full collision artifact and a reproducible, source-pinned resource ledger |
 | 81 | Merkle-tree second-preimage construction in a constrained hash model | Exact tree and leaf witness checked against the declared hash and encoding |
