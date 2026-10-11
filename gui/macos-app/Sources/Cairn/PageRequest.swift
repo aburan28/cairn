@@ -42,7 +42,7 @@ enum PageRequest: Equatable {
     case stopDictation
     /// Turn a role on or off and restart the node with it.
     case setRole(PageRole, on: Bool)
-    /// Open a sheet; `objective` is what Work on This Mac… starts on.
+    /// Open a sheet; `objective` is what Share this Mac… starts on.
     case open(PageSheet, objective: String?)
 
     static func parse(_ body: Any) -> Result<PageRequest, AIError> {

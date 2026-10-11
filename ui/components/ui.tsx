@@ -16,6 +16,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { isLocalNodeUrl } from "@/lib/site";
 
 type Tone = "neutral" | "accent" | "warn" | "bad";
 
@@ -199,6 +200,9 @@ export function NodePicker({
   onRead: () => void;
   loading: boolean;
 }) {
+  const [editing, setEditing] = useState(false);
+  const local = typeof window !== "undefined" && isLocalNodeUrl(value, window.location.origin);
+  const shown = !editing && local ? "this node" : value;
   return (
     <form
       className="flex w-full items-center gap-1.5 sm:w-auto"
@@ -213,10 +217,15 @@ export function NodePicker({
       <input
         id="node"
         className="field field-mono min-w-0 flex-1 py-1.5 sm:w-64 sm:flex-none"
-        value={value}
+        value={shown}
         onChange={(event) => onChange(event.target.value)}
+        onFocus={() => {
+          setEditing(true);
+          if (local) onChange(value);
+        }}
+        onBlur={() => setEditing(false)}
         spellCheck={false}
-        title="Read another node without a redeploy"
+        title="Read another node without a redeploy. Leave it as this node to read the current page's node."
       />
       <button className="btn btn-sm py-1.5" type="submit" disabled={loading}>
         {loading ? "Reading…" : "Read"}

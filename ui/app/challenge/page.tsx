@@ -845,7 +845,7 @@ function WorkOnThis({
               <>
                 <div>
                   <button type="button" className="btn btn-primary btn-sm" onClick={() => ask("work")}>
-                    Work on this Mac…
+                    Share this Mac…
                   </button>
                 </div>
                 <details className="text-[12.5px] text-ink-2">

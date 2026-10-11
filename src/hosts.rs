@@ -33,6 +33,7 @@ use std::fmt;
 
 use crate::canonical::Value;
 use crate::progress::{Liveness, FORGET_SECONDS};
+use crate::scheduling::ResourceOffer;
 use crate::time::format_iso8601_utc;
 
 /// Registrations this node will hold at once. Past this the server answers
@@ -51,7 +52,7 @@ const MAX_OBJECTIVES: usize = 64;
 /// The fields a registration may carry at the top level. Anything else is
 /// named back to the poster under `ignored`, so a misspelling is noticed by
 /// the client that made it.
-const FIELDS: [&str; 7] = [
+const FIELDS: [&str; 8] = [
     "host",
     "agent",
     "roles",
@@ -59,6 +60,7 @@ const FIELDS: [&str; 7] = [
     "sandboxes",
     "jobs",
     "objectives",
+    "resources",
 ];
 
 /// What a host posts to `POST /hosts`.
@@ -82,6 +84,10 @@ pub struct Registration {
     pub jobs: Value,
     /// Objectives the host is currently running jobs for.
     pub objectives: Vec<String>,
+    /// The resources this host is willing to make available to scheduled
+    /// challenge work. Older agents omit it; the node then derives a
+    /// conservative offer from `hardware` and job capacity.
+    pub resources: ResourceOffer,
     /// Whether an enrolled fleet member signed it. Set by the node after it
     /// verified the signature, never read from the body.
     pub member: bool,
@@ -187,14 +193,26 @@ impl Registration {
         };
 
         let host = text("host", MAX_NAME_LEN)?.ok_or(RegistrationError::Missing("host"))?;
+        let hardware = object_field("hardware")?;
+        let jobs = object_field("jobs")?;
+        let resources = match object.get("resources") {
+            None | Some(Value::Null) => ResourceOffer::from_host_facts(&hardware, &jobs),
+            Some(value) => {
+                ResourceOffer::from_value(value).map_err(|_| RegistrationError::Invalid {
+                    field: "resources",
+                    expected: "an object of non-negative integer capacities",
+                })?
+            }
+        };
         let registration = Registration {
             host,
             agent: text("agent", MAX_TEXT_LEN)?,
             roles: names("roles", MAX_ROLES)?,
-            hardware: object_field("hardware")?,
+            hardware,
             sandboxes: object_field("sandboxes")?,
-            jobs: object_field("jobs")?,
+            jobs,
             objectives: names("objectives", MAX_OBJECTIVES)?,
+            resources,
             member: false,
         };
         Ok((registration, ignored))
@@ -475,6 +493,7 @@ impl Listed {
                 "objectives",
                 Value::array(reg.objectives.iter().map(|id| Value::string(id.clone()))),
             ),
+            ("resources", reg.resources.to_value()),
             ("member", Value::Bool(reg.member)),
         ])
     }

@@ -29,7 +29,7 @@ import {
 } from "@/lib/progress";
 import { type SearchJob, expectedSteps, expectedUnits, jobFor, stepsPerUnit } from "@/lib/jobs";
 import { fetchObjective } from "@/lib/frontier";
-import { resolveNode } from "@/lib/site";
+import { readableNode, resolveNode } from "@/lib/site";
 import {
   Badge,
   Box,
@@ -349,7 +349,7 @@ function Dashboard({
       />
 
       <p className="mb-4 text-[12px] text-ink-3">
-        Read from <span className="mono">{origin}</span>
+        Read from <span className="mono">{readableNode(origin, typeof window !== "undefined" ? window.location.origin : undefined)}</span>
         {readAt && <> at {readAt.toLocaleTimeString()}</>}, again every {REFRESH_SECONDS} s while
         this tab is visible.{" "}
         <span className="text-accent">Settled</span> figures are recomputed from the node&rsquo;s

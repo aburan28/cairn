@@ -12,6 +12,7 @@
  */
 
 import { expectFields } from "./shape";
+import type { ObjectiveCapabilities } from "./scheduling";
 
 /** Where a ratcheted objective currently stands. Absent until the first claim. */
 export type Frontier = {
@@ -55,6 +56,8 @@ export type Objective = {
    *  settlement entries, which for a batch objective is paid *claims* --
    *  the per-unit figure is on `/progress/{id}`, and `/task?id=` shows it. */
   piecework?: PieceworkStanding;
+  /** Routing metadata declared by the objective; it never decides payment. */
+  capabilities?: ObjectiveCapabilities;
 };
 
 export type PieceworkStanding = {
@@ -176,6 +179,7 @@ export type ObjectiveDetail = {
   created_at?: string;
   ratchet?: Ratchet;
   verifier?: Verifier;
+  capabilities?: ObjectiveCapabilities;
 };
 
 /**

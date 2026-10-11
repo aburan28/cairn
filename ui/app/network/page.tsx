@@ -27,7 +27,8 @@ import {
   sumByClass,
 } from "@/lib/network";
 import { formatAge, formatMagnitude, formatRate } from "@/lib/progress";
-import { resolveNode } from "@/lib/site";
+import { readableNode, resolveNode } from "@/lib/site";
+import { resourceSummary, workerModeLabel } from "@/lib/scheduling";
 import {
   Badge,
   Box,
@@ -260,7 +261,7 @@ function Dashboard({
       />
 
       <p className="mb-4 text-[12px] text-ink-3">
-        Read from <span className="mono">{origin}</span>
+        Read from <span className="mono">{readableNode(origin, typeof window !== "undefined" ? window.location.origin : undefined)}</span>
         {readAt && <> at {readAt.toLocaleTimeString()}</>}, again every {REFRESH_SECONDS} s while
         this tab is visible. <span className="text-accent">Declared</span> is what this node says;{" "}
         <span className="text-warn">reported</span> is what peers and workers did and said, held in
@@ -796,68 +797,71 @@ function NetworkTopology({
   const hosts = network.compute.hosts?.hosts.filter((host) => host.status === "live") ?? [];
   const workers = network.compute.workers.filter((worker) => worker.status === "live");
   const roles = network.node.roles.declared;
+  const peerNodes = reached.slice(0, 6);
+  const hostNodes = hosts.slice(0, 4);
+  const workerNodes = workers.slice(0, 4);
+  const capabilityEdges = network.compute.assignments ?? [];
 
   return (
     <div className="mb-5">
-      <Box title="Network topology" aside={<span className="text-[11px] font-normal text-ink-3">from this node's view</span>}>
-        <div className="grid items-stretch gap-3 md:grid-cols-[minmax(0,1fr)_2rem_minmax(0,1.1fr)_2rem_minmax(0,1fr)]">
-          <div className="rounded-lg border border-edge bg-surface-2 p-3">
-            <div className="text-[11px] font-semibold tracking-wide text-ink-3 uppercase">Peer sessions</div>
-            <div className="mt-1 text-[18px] font-semibold text-ink">
-              {sessions?.available || network.peers.available
-                ? `${sessions?.available ? reached.length : network.peers.reached} reached`
-                : "No sessions"}
-            </div>
-            {reached.length > 0 ? (
-              <ul className="mt-2 flex flex-col gap-1.5">
-                {reached.slice(0, 3).map((peer) => (
-                  <li key={peer.peer_id} className="flex items-center gap-2 text-[12px]">
-                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-                    <Hash value={peer.peer_id} chars={8} />
-                    <span className="ml-auto text-ink-3">reached</span>
-                  </li>
-                ))}
-                {reached.length > 3 && <li className="text-[11px] text-ink-3">+{reached.length - 3} more</li>}
-              </ul>
-            ) : (
-              <p className="mt-2 text-[12px] text-ink-3">
-                {sessions?.available ? "No recent authenticated session to draw." : "Individual sessions are unavailable from this node."}
-              </p>
-            )}
-          </div>
-          <div className="hidden items-center md:flex" aria-hidden="true">
-            {reached.length > 0 && <div className="h-px w-full bg-accent-line" />}
-          </div>
-          <div className="rounded-lg border border-accent-line bg-accent-soft p-3">
-            <div className="text-[11px] font-semibold tracking-wide text-accent uppercase">This node</div>
-            <div className="mt-1 flex items-center gap-2 text-[16px] font-semibold text-ink">
-              <span className="h-2 w-2 rounded-full bg-accent" /> Cairn node
-            </div>
-            {sessions?.this_node?.peer_id && <div className="mt-1 text-[12px] text-ink-2"><Hash value={sessions.this_node.peer_id} chars={10} /></div>}
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {roles.length > 0
-                ? roles.map((role) => <Badge key={role} tone="accent" title="Declared by this node">{role}</Badge>)
-                : <Badge tone="neutral">no role declared</Badge>}
-            </div>
-            <p className="mt-2 text-[11px] text-ink-3">Roles are declared intent, not authority.</p>
-          </div>
-          <div className="hidden items-center md:flex" aria-hidden="true">
-            {hosts.length + workers.length > 0 && <div className="h-px w-full bg-accent-line" />}
-          </div>
-          <div className="rounded-lg border border-edge bg-surface-2 p-3">
-            <div className="text-[11px] font-semibold tracking-wide text-ink-3 uppercase">Reported compute</div>
-            <div className="mt-1 text-[18px] font-semibold text-ink">{hosts.length} hosts · {workers.length} workers</div>
-            <ul className="mt-2 flex flex-col gap-1 text-[12px] text-ink-2">
-              {hosts.slice(0, 2).map((host) => <li key={host.host} className="truncate" title={host.host}>Host {host.host}{host.roles.length ? ` · ${host.roles.join(", ")}` : ""}</li>)}
-              {workers.slice(0, 2).map((worker) => <li key={`${worker.worker}-${worker.objective_id}`} className="truncate" title={worker.worker}>Worker {worker.worker}</li>)}
-              {hosts.length + workers.length === 0 && <li className="text-ink-3">No live heartbeat reported.</li>}
-              {hosts.length + workers.length > 4 && <li className="text-ink-3">+{hosts.length + workers.length - 4} more below</li>}
-            </ul>
-          </div>
+      <Box title="Network map" aside={<span className="text-[11px] font-normal text-ink-3">observed from this node</span>}>
+        <div className="overflow-x-auto rounded-lg border border-edge bg-surface-2 p-2">
+          <svg viewBox="0 0 900 360" className="min-w-[720px] w-full" role="img" aria-labelledby="network-map-title network-map-description">
+            <title id="network-map-title">Observed Cairn network</title>
+            <desc id="network-map-description">This node connects to authenticated peer nodes and receives reports from compute hosts and active workers.</desc>
+            <defs>
+              <marker id="network-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+                <path d="M0,0 L7,3.5 L0,7 z" className="fill-accent" />
+              </marker>
+            </defs>
+            {peerNodes.map((peer, index) => {
+              const x = 90 + (index % 3) * 125;
+              const y = index < 3 ? 58 : 132;
+              return <line key={`peer-edge-${peer.peer_id}`} x1={x + 34} y1={y + 34} x2={450} y2={180} className="stroke-accent-line" strokeWidth="2" markerEnd="url(#network-arrow)" />;
+            })}
+            {hostNodes.map((host, index) => {
+              const x = 620 + (index % 2) * 130;
+              const y = 70 + Math.floor(index / 2) * 86;
+              return <line key={`host-edge-${host.host}`} x1={450} y1={180} x2={x} y2={y + 26} className="stroke-edge-strong" strokeWidth="2" markerEnd="url(#network-arrow)" />;
+            })}
+            {workerNodes.map((worker, index) => {
+              const x = 620 + (index % 2) * 130;
+              const y = 70 + Math.floor(index / 2) * 86;
+              return <line key={`worker-edge-${worker.worker}-${worker.objective_id}`} x1={450} y1={180} x2={x} y2={y + 26} className="stroke-warn" strokeWidth="2" strokeDasharray="5 4" markerEnd="url(#network-arrow)" />;
+            })}
+            {peerNodes.map((peer, index) => {
+              const x = 90 + (index % 3) * 125;
+              const y = index < 3 ? 58 : 132;
+              return <g key={peer.peer_id} transform={`translate(${x},${y})`}><circle r="34" cx="34" cy="34" className="fill-surface stroke-accent" strokeWidth="2" /><text x="34" y="31" textAnchor="middle" className="fill-ink text-[11px]">peer</text><text x="34" y="46" textAnchor="middle" className="fill-ink-3 text-[9px]">{peer.peer_id.slice(0, 8)}…</text></g>;
+            })}
+            <g transform="translate(400,130)"><circle r="50" cx="50" cy="50" className="fill-accent-soft stroke-accent" strokeWidth="3" /><text x="50" y="42" textAnchor="middle" className="fill-ink text-[13px] font-semibold">this node</text><text x="50" y="58" textAnchor="middle" className="fill-ink-2 text-[10px]">{roles.length ? roles.join(" · ") : "no role declared"}</text><text x="50" y="73" textAnchor="middle" className="fill-ink-3 text-[8px]">{network.node.resources ? "sharing capacity" : "capacity off"}</text></g>
+            {hostNodes.map((host, index) => { const x = 620 + (index % 2) * 130; const y = 70 + Math.floor(index / 2) * 86; return <g key={host.host} transform={`translate(${x - 24},${y})`}><title>{`${host.host}: ${host.resources ? resourceSummary(host.resources) : "capacity not reported"}`}</title><rect width="116" height="52" rx="10" className="fill-surface stroke-edge-strong" strokeWidth="2" /><text x="58" y="23" textAnchor="middle" className="fill-ink text-[11px]">host</text><text x="58" y="39" textAnchor="middle" className="fill-ink-3 text-[9px]">{host.host.slice(0, 16)}</text></g>; })}
+            {workerNodes.map((worker, index) => { const x = 620 + (index % 2) * 130; const y = 70 + Math.floor(index / 2) * 86; return <g key={`worker-${worker.worker}-${worker.objective_id}`} transform={`translate(${x - 24},${y + 12})`}><rect width="116" height="40" rx="20" className="fill-warn-soft stroke-warn" strokeWidth="2" /><text x="58" y="25" textAnchor="middle" className="fill-ink text-[10px]">worker · {worker.worker.slice(0, 11)}</text></g>; })}
+          </svg>
         </div>
-        <p className="mt-3 text-[11.5px] text-ink-3">
-          Lines appear for this node's observed sessions and incoming reports. They do not show connections between other peers or prove their roles.
-        </p>
+        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-[11.5px] text-ink-2">
+          <span><i className="mr-1.5 inline-block h-2 w-2 rounded-full bg-accent" />peer node</span>
+          <span><i className="mr-1.5 inline-block h-2 w-2 rounded-sm border border-edge-strong bg-surface" />compute host</span>
+          <span><i className="mr-1.5 inline-block h-2 w-2 rounded-full bg-warn" />active worker</span>
+        </div>
+        <p className="mt-2 text-[11.5px] text-ink-3">Solid lines are authenticated sessions or host reports. Dashed lines are active worker reports. The map does not invent connections between two other peers.</p>
+        {capabilityEdges.length > 0 && (
+          <div className="mt-3 rounded-lg border border-accent-line bg-accent-soft p-3">
+            <div className="text-[11px] font-semibold tracking-wide text-accent uppercase">Capability edges</div>
+            <p className="mt-1 text-[11.5px] text-ink-2">These are the open challenges this node currently considers compatible with a reported offer.</p>
+            <ul className="mt-2 grid gap-1 text-[12px] sm:grid-cols-2">
+              {capabilityEdges.slice(0, 8).map((edge) => (
+                <li key={`${edge.host}-${edge.objective_id}`} className="flex items-center gap-1.5 text-ink-2">
+                  <span className="text-accent">{edge.host}</span>
+                  <span aria-hidden="true">→</span>
+                  <span className="mono" title={edge.objective_id}>{edge.objective_id.slice(0, 14)}…</span>
+                  <span className="text-ink-3">({workerModeLabel(edge.worker)})</span>
+                </li>
+              ))}
+            </ul>
+            {capabilityEdges.length > 8 && <p className="mt-2 text-[11px] text-ink-3">+{capabilityEdges.length - 8} more compatible assignments</p>}
+          </div>
+        )}
       </Box>
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4" aria-label="Node types">

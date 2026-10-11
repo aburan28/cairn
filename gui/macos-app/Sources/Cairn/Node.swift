@@ -45,7 +45,7 @@ final class Node: ObservableObject {
     @Published var presentConnectivity = false
     @Published var presentAgents = false
     @Published var presentWork = false
-    /// What Work on This Mac… opens on: the objective the reader's page asked
+    /// What Share this Mac… opens on: the objective the reader's page asked
     /// for, or nil from the menu and the toolbar.
     private(set) var workObjective: String?
     /// The one `cairn work` this app runs, against this node or another.
@@ -111,7 +111,7 @@ final class Node: ObservableObject {
             || presentConnectivity || presentAgents || presentWork
     }
 
-    /// Open Work on This Mac…, on `objective` when the page named one.
+    /// Open Share this Mac…, on `objective` when the page named one.
     func work(on objective: String? = nil) {
         workObjective = objective
         presentWork = true

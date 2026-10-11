@@ -5,8 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   SNAPSHOT,
   forgetResolvedNode,
+  isLocalNodeUrl,
   progress,
   provenance,
+  readableNode,
   resolveNode,
   short,
   units,
@@ -46,12 +48,24 @@ describe("progress (site.ts copy, as a percentage)", () => {
 
 describe("provenance", () => {
   it("names the node for a live value and the snapshot otherwise", () => {
-    expect(provenance({ live: true, origin: "http://127.0.0.1:8080" })).toBe(
-      "live from http://127.0.0.1:8080",
-    );
+    expect(provenance({ live: true, origin: "http://127.0.0.1:8080" })).toBe("live on this node");
     expect(provenance({ live: false, origin: "launch/cairn.jsonl" })).toBe(
       "from the bundled snapshot",
     );
+  });
+});
+
+describe("node labels", () => {
+  it("keeps local transport addresses out of human-facing labels", () => {
+    expect(readableNode("http://127.0.0.1:8080", "http://127.0.0.1:8080")).toBe("this node");
+    expect(readableNode("http://localhost:8080", "http://localhost:8080")).toBe("this node");
+    expect(readableNode("https://node.example", "https://reader.example")).toBe("https://node.example");
+  });
+
+  it("recognizes same-origin nodes without exposing the origin", () => {
+    expect(isLocalNodeUrl("", "http://reader.example")).toBe(true);
+    expect(isLocalNodeUrl("/", "http://reader.example")).toBe(true);
+    expect(isLocalNodeUrl("https://other.example", "http://reader.example")).toBe(false);
   });
 });
 

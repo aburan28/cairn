@@ -15,6 +15,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NODE_URL } from "@/lib/objectives";
+import { readableNode } from "@/lib/site";
 
 export const ROUTES = [
   { href: "/", label: "Overview", hint: "What cairn is, and this node's numbers" },
@@ -229,7 +230,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
  */
 function NodeStatus() {
   const [state, setState] = useState<"checking" | "live" | "down">("checking");
-  const target = NODE_URL || "this origin";
+  const target = readableNode(NODE_URL || "", typeof window !== "undefined" ? window.location.origin : undefined);
 
   useEffect(() => {
     let cancelled = false;

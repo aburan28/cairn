@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { type NetworkResponse, fetchNetwork } from "@/lib/network";
 import { type Objective, loadObjectives, resolveNode } from "@/lib/site";
+import { type ChallengeAssignment, fetchAssignments, resourceSummary, workerModeLabel } from "@/lib/scheduling";
 import {
   type AppRole,
   type AppSheet,
@@ -100,6 +101,14 @@ export default function Page() {
       <div className="flex flex-col gap-5">
         <ThisNode network={network} error={networkError} loading={base === null} />
 
+        <SharedChallenges
+          base={base}
+          shared={network?.node.resources != null}
+          bridge={bridge}
+          busy={restarting !== null}
+          onOpen={open}
+        />
+
         {restarting && (
           <Note title="restarting the node">
             Cairn.app is starting the node again with{" "}
@@ -147,6 +156,76 @@ export default function Page() {
         </p>
       </div>
     </>
+  );
+}
+
+function SharedChallenges({
+  base,
+  shared,
+  bridge,
+  busy,
+  onOpen,
+}: {
+  base: string | null;
+  shared: boolean;
+  bridge: Bridge | null;
+  busy: boolean;
+  onOpen: (sheet: AppSheet, objective?: string) => void;
+}) {
+  const [assignments, setAssignments] = useState<ChallengeAssignment[]>([]);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!base || !shared) {
+      setAssignments([]);
+      setProblem(null);
+      return;
+    }
+    let cancelled = false;
+    void fetchAssignments(base)
+      .then((response) => {
+        if (!cancelled) {
+          setAssignments(response.assignments.filter((assignment) => assignment.eligible));
+          setProblem(null);
+        }
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setProblem(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [base, shared]);
+
+  if (!shared) return null;
+  return (
+    <Box title="Challenges this Mac can take" aside={<span className="text-[11px] font-normal text-ink-3">from this node&rsquo;s offer</span>}>
+      {problem ? (
+        <p className="text-[12.5px] text-warn">The node could not match its offer to challenges yet: {problem}</p>
+      ) : assignments.length === 0 ? (
+        <p className="text-[12.5px] text-ink-3">No open challenge currently matches the resources shared in Settings.</p>
+      ) : (
+        <ul className="grid gap-2 sm:grid-cols-2">
+          {assignments.slice(0, 8).map((assignment) => (
+            <li key={assignment.objective_id} className="rounded-lg border border-edge bg-surface-2 p-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="truncate text-[13px] font-medium text-ink" title={assignment.statement}>{assignment.goal || assignment.statement}</div>
+                  <div className="mt-1 text-[11.5px] text-ink-3">{workerModeLabel(assignment.capabilities.worker)} · {assignment.capabilities.assignment} · {resourceSummary(assignment.capabilities.resources)}</div>
+                </div>
+                <span className="shrink-0 text-[12px] text-ink-2">{assignment.reward.toLocaleString("en-US")}</span>
+              </div>
+              {bridge && (
+                <button type="button" className="btn btn-sm mt-2" onClick={() => onOpen("work", assignment.objective_id)} disabled={busy}>
+                  Share this Mac…
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-3 text-[11.5px] text-ink-3">These matches are a scheduling suggestion based on reported capacity. A worker still has to run, submit, and pass the objective&rsquo;s pinned checker.</p>
+    </Box>
   );
 }
 
@@ -202,6 +281,8 @@ function ThisNode({
             ? network.node.verifiers.servable.join(", ")
             : "no verifier kind on this machine"}
         </dd>
+        <dt>shared capacity</dt>
+        <dd>{network.node.resources ? resourceSummary(network.node.resources) : "not shared"}</dd>
       </dl>
       {warnings.length > 0 && (
         <ul className="mt-3 flex flex-col gap-1 text-[12.5px] text-warn">
@@ -409,7 +490,7 @@ function AddMachine({
                   )}
                   {objectives.map((o) => (
                     <option key={o.id} value={o.id}>
-                      {objectiveTitle(o)}
+                      {objectiveTitle(o)} · {o.capabilities ? workerModeLabel(o.capabilities.worker) : "External worker"}
                     </option>
                   ))}
                 </select>
@@ -442,16 +523,6 @@ function AddMachine({
                   spellCheck={false}
                 />
               </label>
-              <label className="flex flex-col gap-1 text-[12px] text-ink-3">
-                Solver command
-                <input
-                  className="field field-mono"
-                  value={solver}
-                  placeholder="./your-solver"
-                  onChange={(e) => setSolver(e.target.value)}
-                  spellCheck={false}
-                />
-              </label>
             </div>
           </li>
           <li className="flex flex-col gap-2">
@@ -459,9 +530,10 @@ function AddMachine({
             {bridge ? (
               <>
                 <span className="text-[12.5px] text-ink-2">
-                  In Cairn.app on that machine: <b className="text-ink">Contribute ▸ Work on this
-                  Mac…</b>, with the node address and the objective above, its name, and the
-                  solver chosen on that machine. To try the solver here first:
+                  In Cairn.app on that machine: <b className="text-ink">Contribute ▸ Share this
+                  Mac…</b>, choose this challenge; it uses the resources allowed in Settings. The
+                  current worker protocol still needs a search program for objectives without an
+                  app-provided integration, so that choice lives under Advanced.
                 </span>
                 <div>
                   <button
@@ -470,7 +542,7 @@ function AddMachine({
                     onClick={() => onOpen("work", objective || undefined)}
                     disabled={busy}
                   >
-                    Work on this Mac…
+                    Share this Mac…
                   </button>
                 </div>
                 <details className="text-[12.5px] text-ink-2">
@@ -494,10 +566,9 @@ function AddMachine({
               </div>
             )}
             <span className="text-[12.5px] text-ink-2">
-              Each round the solver gets its slice of the work as JSON on stdin and prints
-              candidate answers, one JSON object per line. The worker commits them, reveals them
-              after the epoch turns, and reports in so the machine shows as <i>working now</i> on
-              the challenge page. The checker decides what is paid.
+              The machine joins the selected challenge and reports its progress.
+              When a search program is required, it gets its slice as JSON on stdin and prints
+              candidate answers, one object per line. The checker decides what is paid.
               {leader ? (
                 <>
                   {" "}

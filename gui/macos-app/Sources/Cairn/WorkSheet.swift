@@ -2,8 +2,9 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Node → Work on This Mac…: put this Mac to work on one objective with a
-/// solver of your own, without a terminal.
+/// Node → Share this Mac…: choose an objective first, then put this Mac to
+/// work. The solver is an advanced escape hatch because the protocol still
+/// needs a search program for objectives that do not ship one.
 ///
 /// The fields are `cairn work`'s flags and nothing else, so what this sheet
 /// starts is exactly what the Contribute page used to print for a terminal.
@@ -29,14 +30,13 @@ struct WorkSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label("Work on this Mac", systemImage: "cpu").font(.headline)
+            Label("Share this Mac", systemImage: "cpu").font(.headline)
             Text("""
-                Each round, this Mac takes its slice of the objective's search and runs your \
-                solver on it: the slice arrives as one line of JSON on the solver's stdin, and \
-                every line of JSON it prints is a candidate answer. Cairn commits each one, \
-                reveals it after the epoch turns, and reports in so this Mac shows as \
-                *working now* on the challenge page. Only the objective's pinned checker \
-                decides what is paid; nothing a solver prints is graded here.
+                Choose an open challenge and this Mac will use the resources allowed in Settings \
+                for it. Cairn reports the machine and objective to the network; the objective's pinned \
+                checker decides what is paid. The current worker protocol still needs a search \
+                program for objectives without an app-provided integration, so that choice lives \
+                under Advanced.
                 """)
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -59,7 +59,7 @@ struct WorkSheet: View {
                     Button("Start") { start() }
                         .keyboardShortcut(.defaultAction)
                         .disabled(startProblem != nil)
-                        .help(startProblem ?? "Start cairn work on this Mac")
+                        .help(startProblem ?? "Share this Mac's resources")
                 }
                 Button("Show Log") {
                     NSWorkspace.shared.open(node.workLogFile)
@@ -80,22 +80,15 @@ struct WorkSheet: View {
     private var form: some View {
         Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 10) {
             GridRow {
-                Text("Node").gridColumnAlignment(.trailing)
-                TextField("http://host:port", text: $address)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.body.monospaced())
-                    .disabled(worker.isRunning)
-            }
-            GridRow {
-                Text("Objective").gridColumnAlignment(.trailing)
+                Text("Challenge").gridColumnAlignment(.trailing)
                 HStack {
-                    Picker("Objective", selection: $objective) {
+                    Picker("Challenge", selection: $objective) {
                         if objectives.isEmpty {
-                            Text(loadingObjectives ? "Reading the node…" : "No open objective on that node").tag("")
+                            Text(loadingObjectives ? "Reading open challenges…" : "No open challenges on this node").tag("")
                         } else {
-                            Text("Choose…").tag("")
+                            Text("Choose a challenge…").tag("")
                             ForEach(objectives) { o in
-                                Text(o.title).tag(o.id)
+                                Text("\(o.title) · \(o.workerLabel)").tag(o.id)
                             }
                         }
                     }
@@ -105,6 +98,21 @@ struct WorkSheet: View {
                         .controlSize(.small)
                         .disabled(loadingObjectives || worker.isRunning)
                 }
+            }
+            if let selected = objectives.first(where: { $0.id == objective }) {
+                GridRow {
+                    Text("").gridColumnAlignment(.trailing)
+                    Text("\(selected.workerLabel) · needs \(selected.resourceLabel)")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            GridRow {
+                Text("Node").gridColumnAlignment(.trailing)
+                TextField("http://host:port", text: $address)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.body.monospaced())
+                    .disabled(worker.isRunning)
             }
             if let objectivesProblem {
                 GridRow {
@@ -125,24 +133,28 @@ struct WorkSheet: View {
                 }
             }
             GridRow {
-                Text("Solver").gridColumnAlignment(.trailing)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack {
-                        TextField("A program on this Mac", text: $solver)
+                Text("").gridColumnAlignment(.trailing)
+                DisclosureGroup("Advanced: bring your own search program") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            TextField("A program on this Mac", text: $solver)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.body.monospaced())
+                                .disabled(worker.isRunning)
+                            Button("Choose…") { chooseSolver() }
+                                .disabled(worker.isRunning)
+                        }
+                        TextField("Arguments, if any", text: $solverArguments)
                             .textFieldStyle(.roundedBorder)
                             .font(.body.monospaced())
                             .disabled(worker.isRunning)
-                        Button("Choose…") { chooseSolver() }
-                            .disabled(worker.isRunning)
+                        Text("Use this when the selected challenge does not have an app-provided integration. It receives its slice on stdin and prints candidate answers as JSON, one per line.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    TextField("Its arguments, if any", text: $solverArguments)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.body.monospaced())
-                        .disabled(worker.isRunning)
-                    Text("Run once per round with the slice on stdin; prints candidate answers, one JSON object per line. Exit 0 with nothing printed means nothing this round.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
                 }
+                .disabled(worker.isRunning)
             }
         }
     }

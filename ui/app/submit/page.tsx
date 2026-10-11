@@ -389,7 +389,7 @@ export default function Page() {
         <div className={`mb-6 ${folded}`}>
           <Note title="this page cannot submit from here" tone="warn">
             You are reading this from{" "}
-            <span className="mono">{NODE_URL || "another origin"}</span>, and a node
+            <span className="mono">{NODE_URL ? "the selected node" : "this node"}</span>, and a node
             accepts submissions same-origin only — a JSON <span className="mono">POST</span>{" "}
             is preflighted, and <span className="mono">OPTIONS</span> is deliberately
             unrouted so no page can make its visitors fill a stranger&rsquo;s queue.

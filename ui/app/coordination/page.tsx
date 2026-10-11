@@ -33,7 +33,7 @@ import {
   workerRate,
 } from "@/lib/progress";
 import { type Objective, fetchObjectives } from "@/lib/objectives";
-import { resolveNode } from "@/lib/site";
+import { readableNode, resolveNode } from "@/lib/site";
 import {
   Badge,
   Box,
@@ -445,7 +445,7 @@ function Dashboard({
       />
 
       <p className="mb-4 text-[12px] text-ink-3">
-        Read from <span className="mono">{origin}</span>
+        Read from <span className="mono">{readableNode(origin, typeof window !== "undefined" ? window.location.origin : undefined)}</span>
         {readAt && <> at {readAt.toLocaleTimeString()}</>}, again every {REFRESH_SECONDS} s while this
         tab is visible. The <span className="text-accent">assignment</span> is arithmetic anyone can
         recompute; <span className="text-warn">reported</span> ranges and{" "}

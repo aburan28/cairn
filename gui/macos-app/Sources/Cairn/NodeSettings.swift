@@ -21,6 +21,12 @@ struct NodeSettings: Equatable {
         /// calls -- on every interface, so another machine on the LAN can
         /// join with `cairn work`. Off by default, like inbound P2P.
         static let shareHTTP = "shareHTTP"
+        /// Offer this Mac's configured capacity for compatible challenges.
+        static let shareResources = "shareResources"
+        static let resourceCPUs = "resourceCPUs"
+        static let resourceMemoryGB = "resourceMemoryGB"
+        static let resourceStorageGB = "resourceStorageGB"
+        static let resourceConcurrency = "resourceConcurrency"
         /// Dial no internet seeds: a node for one building's machines, which
         /// still finds the others by the LAN beacon and any bootstrap file.
         static let offline = "offline"
@@ -57,6 +63,8 @@ struct NodeSettings: Equatable {
     /// Settings gets what `cairn run` gives.
     static let defaultMemoryGB = 4
     static let defaultStorageGB = 50
+    static let defaultSharedMemoryGB = 1
+    static let defaultSharedStorageGB = 10
 
     /// Loopback: the node dials out and nothing dials in. The release's
     /// default, because an app that suddenly accepts connections on every
@@ -91,6 +99,14 @@ struct NodeSettings: Equatable {
     /// opens. Defaulted so code that builds a settings value by hand need not
     /// name it.
     var httpHost: String = loopbackHost
+    /// Whether this node publishes an operator-approved offer for challenge
+    /// work. Publishing capacity does not start a worker or reserve a task.
+    var shareResources: Bool = false
+    /// Shared CPU capacity; 0 means all active cores.
+    var resourceCPUs: Int = 1
+    var resourceMemoryGB: Int = defaultSharedMemoryGB
+    var resourceStorageGB: Int = defaultSharedStorageGB
+    var resourceConcurrency: Int = 1
     /// `CAIRN_SEEDS=off`: no built-in internet seeds.
     var offline: Bool = false
     /// Attest to every claim this node can verify, under the identity in
@@ -169,6 +185,11 @@ struct NodeSettings: Equatable {
             Key.storageGB: defaultStorageGB,
             Key.p2pHost: loopbackHost,
             Key.shareHTTP: false,
+            Key.shareResources: false,
+            Key.resourceCPUs: 1,
+            Key.resourceMemoryGB: defaultSharedMemoryGB,
+            Key.resourceStorageGB: defaultSharedStorageGB,
+            Key.resourceConcurrency: 1,
             Key.offline: false,
             Key.validator: false,
             Key.bootstrap: "",
@@ -209,6 +230,11 @@ struct NodeSettings: Equatable {
             // from typing an address into Settings.
             p2pHost: host == anyHost ? anyHost : loopbackHost,
             httpHost: defaults.bool(forKey: Key.shareHTTP) ? anyHost : loopbackHost,
+            shareResources: defaults.bool(forKey: Key.shareResources),
+            resourceCPUs: max(1, min(defaults.integer(forKey: Key.resourceCPUs) == 0 ? cores : defaults.integer(forKey: Key.resourceCPUs), cores)),
+            resourceMemoryGB: max(1, defaults.integer(forKey: Key.resourceMemoryGB)),
+            resourceStorageGB: max(1, defaults.integer(forKey: Key.resourceStorageGB)),
+            resourceConcurrency: max(1, defaults.integer(forKey: Key.resourceConcurrency)),
             offline: defaults.bool(forKey: Key.offline),
             validator: defaults.bool(forKey: Key.validator),
             bootstrapFiles: Self.parseBootstrap(defaults.string(forKey: Key.bootstrap) ?? ""),
@@ -274,7 +300,7 @@ struct NodeSettings: Equatable {
         dataFolder.appendingPathComponent("validator.identity.json")
     }
 
-    /// The key Work on This Mac… signs with, so what a worker here earns
+    /// The key Share this Mac… signs with, so what a worker here earns
     /// lands on a key this Mac holds rather than on a name anyone could
     /// use. Made by `cairn identity` on the first start, never overwritten.
     var workerIdentity: URL {
@@ -297,6 +323,13 @@ struct NodeSettings: Equatable {
     /// not one inherited from whatever launched the app.
     var environment: [String: String] {
         var env = ["CAIRN_SANDBOX_CPUS": String(cpus), "CAIRN_SANDBOX_MEMORY_MB": String(memoryMB)]
+        if shareResources {
+            env["CAIRN_SHARE_RESOURCES"] = "1"
+            env["CAIRN_RESOURCE_CPUS"] = String(resourceCPUs)
+            env["CAIRN_RESOURCE_MEMORY_MB"] = String(resourceMemoryGB * 1024)
+            env["CAIRN_RESOURCE_STORAGE_MB"] = String(resourceStorageGB * 1024)
+            env["CAIRN_RESOURCE_CONCURRENCY"] = String(resourceConcurrency)
+        }
         // Set only when chosen: a launcher that already pointed the node at
         // its own seed list (`CAIRN_SEEDS=path`) keeps it when this is off.
         if offline { env["CAIRN_SEEDS"] = "off" }
