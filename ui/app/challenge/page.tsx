@@ -140,19 +140,24 @@ function Challenge() {
           </>
         }
         actions={
-          <button
-            type="button"
-            className={`btn btn-sm ${followed ? "btn-primary" : ""}`}
-            aria-pressed={followed}
-            title={
-              followed
-                ? "Stop following. This only changes this browser."
-                : "Keep this page's activity live, and list it on the Overview. Stored in this browser only."
-            }
-            onClick={() => setFollowed(setFollowing(objective.id, !followed))}
-          >
-            {followed ? "Following" : "Follow"}
-          </button>
+          <div className="flex items-center gap-2">
+            <Link href={`/payouts?id=${encodeURIComponent(objective.id)}`} className="btn btn-sm btn-ghost">
+              External bounty split
+            </Link>
+            <button
+              type="button"
+              className={`btn btn-sm ${followed ? "btn-primary" : ""}`}
+              aria-pressed={followed}
+              title={
+                followed
+                  ? "Stop following. This only changes this browser."
+                  : "Keep this page's activity live, and list it on the Overview. Stored in this browser only."
+              }
+              onClick={() => setFollowed(setFollowing(objective.id, !followed))}
+            >
+              {followed ? "Following" : "Follow"}
+            </button>
+          </div>
         }
       />
 

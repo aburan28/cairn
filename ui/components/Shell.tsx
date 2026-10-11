@@ -27,6 +27,7 @@ export const ROUTES = [
   { href: "/goals", label: "Goals", hint: "The problems the network is working on, and each approach to them" },
   { href: "/contribute", label: "Contribute", hint: "Offer compute, connect an agent, check answers, fund a question" },
   { href: "/submit", label: "Post a challenge", hint: "Fund a question with a pinned checker" },
+  { href: "/payouts", label: "External bounties", hint: "See attributed shares and plan a payment outside Cairn" },
   { href: "/task", label: "Task progress", hint: "A divided search: what is settled, who is working it, how far along" },
   { href: "/peers", label: "Address book", hint: "Every node that announced an address in the log" },
   { href: "/how-it-works", label: "How it works", hint: "The network in plain words, and its limits" },
@@ -66,6 +67,7 @@ const NAV: {
     group: "Take part",
     items: [
       { href: "/contribute", label: "Contribute", icon: <IconHand /> },
+      { href: "/payouts", label: "External bounties", icon: <IconHand /> },
       { href: "/how-it-works", label: "How it works", icon: <IconBook /> },
     ],
   },

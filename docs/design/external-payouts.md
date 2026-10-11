@@ -1,11 +1,17 @@
 # Paying out in Bitcoin or Ethereum
 
-**Status: design only.** Nothing below is built, and nothing in this
-repository moves Bitcoin, Ether or any other asset. Phases 0 and 1 (§11)
-change no record, hash or rule; Phase 2 adds one optional record kind and
-needs both implementations. §12 is the legal analysis, and it is **not legal
-advice**: no phase that holds or moves value should ship before counsel in
-each jurisdiction it touches has read it.
+**Status: attribution preview built; payment rails are design only.**
+`GET /payouts/{objective_id}` and the reader's External bounties page show
+the default-policy contributor split from settled units. An amount entered in
+the page is a local illustration, rounded down after aggregating by identity;
+it is not a release receipt, since a real release must round separately per
+settlement. No receiving address is registered or checked, no external funds
+are proved, and nothing here moves Bitcoin, Ether or any other asset. The
+remaining Phase 0 receipt and address work, and Phases 1 and 2 (§11), still
+need implementation. Phases 0 and 1 change no record, hash or rule; Phase 2
+adds one optional record kind and needs both implementations. §12 is the legal
+analysis, and it is **not legal advice**: no phase that holds or moves value
+should ship before counsel in each jurisdiction it touches has read it.
 
 ## 1. The gap
 
@@ -366,8 +372,11 @@ conversion at escrow needs neither.
 | **2. Bitcoin escrow** | §9's taproot escrow with FROST attestors; batching; the optional `payout_binding` record in both implementations | the same | **yes**: one optional record kind, both implementations, new conformance vectors |
 | **R. Research** | adaptor-signature sales of discrete logs; zk settlement proofs | none (atomic), or none (proof-checked) | none, or the escrow contract's |
 
-Phase 0 is buildable now and moves nothing, so it is where to start. It also
-answers the question a funder asks first: what would I owe, and to whom?
+The attribution preview is the first part of Phase 0 and moves nothing. The
+next part needs signed payee bindings that the funder can independently verify,
+terms that pin the attribution parameters and rounding rule, and receipts
+computed per settlement. Until then the page answers who earned how many
+units, and illustrates an amount; it does not tell a wallet what to send.
 
 ## 12. The legal side
 

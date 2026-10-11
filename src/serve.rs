@@ -58,6 +58,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+use crate::attribution::{payouts_selected_with_enforced, FlowParams};
 use crate::canonical::{digest_bytes, Value};
 use crate::crypto::identity::Identity;
 use crate::deposit::{self, DepositDir, DepositError, MAX_PROXY_BYTES};
@@ -1333,6 +1334,9 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ("POST", "/auth/logout") => auth_logout(stream, serving),
         ("GET", "/verifiers") => verifiers(stream, serving),
         ("GET", "/objectives") => objectives(stream, serving),
+        ("GET", path) if path.starts_with("/payouts/") => {
+            payout_preview(stream, serving, &path["/payouts/".len()..])
+        }
         ("GET", "/peers") => peers(stream, serving),
         ("GET", "/log") => log(stream, serving),
         ("GET", "/checkpoint") => checkpoint(stream, serving),
@@ -1640,6 +1644,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /goals"),
                 Value::string("GET /goals?q={what you want solved}"),
                 Value::string("GET /goals/{key}"),
+                Value::string("GET /payouts/{objective_id}"),
                 Value::string("GET /frontier/{id}"),
                 Value::string("GET /progress/{id}"),
                 Value::string("GET /work_assignment?objective_id=&node_id="),
@@ -1987,6 +1992,110 @@ fn one_objective(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Res
     ];
     fields.extend(lifecycle_fields(&node, id, objective));
     json(stream, 200, &Value::object(fields))
+}
+
+/// Read-only external bounty preview. These are ledger units attributed to
+/// identities, not cryptocurrency held by this node. The funder may use them
+/// to prepare a payment in an independent wallet; no address or chain state
+/// can change a settlement here.
+fn payout_preview(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let objectives = node.objectives();
+    let Some(objective) = objectives.get(id) else {
+        return json_error(stream, 404, "no such objective in this log");
+    };
+    let mut all = Vec::new();
+    let mut selected = Vec::new();
+    let mut settled_units = 0u128;
+    for entry in node.ledger().entries_of_kind("settlement") {
+        let Some(claim_id) = entry.payload.get("claim_id").and_then(Value::as_str) else {
+            return json_error(stream, 500, "settlement has no claim id");
+        };
+        let Some(reward) = entry.payload.get("reward").and_then(Value::as_u64) else {
+            return json_error(stream, 500, "settlement reward is not a unit count");
+        };
+        let row = (claim_id.to_string(), reward);
+        if entry.payload.get("objective_id").and_then(Value::as_str) == Some(id) {
+            let Some(total) = settled_units.checked_add(u128::from(reward)) else {
+                return json_error(stream, 500, "settlement sum overflowed");
+            };
+            settled_units = total;
+            selected.push(row.clone());
+        }
+        all.push(row);
+    }
+    if settled_units > u128::from(objective.reward) {
+        return json_error(
+            stream,
+            500,
+            "settlements exceed the objective's funded units",
+        );
+    }
+    let policy = FlowParams::default();
+    let payouts = match payouts_selected_with_enforced(
+        &all,
+        &selected,
+        &node.all_claims(),
+        &node.enforced_citations(),
+        &policy,
+    ) {
+        Ok(payouts) => payouts,
+        Err(error) => return json_error(stream, 500, &error.to_string()),
+    };
+    let attributed = payouts
+        .values()
+        .try_fold(0u128, |total, units| total.checked_add(u128::from(*units)));
+    if attributed != Some(settled_units) {
+        return json_error(stream, 500, "attributed units do not equal settled units");
+    }
+    let payees = payouts
+        .into_iter()
+        .map(|(identity, units)| {
+            Value::object([
+                ("identity", Value::string(identity)),
+                ("units", Value::string(units.to_string())),
+            ])
+        })
+        .collect();
+    json(
+        stream,
+        200,
+        &Value::object([
+            ("objective_id", Value::string(id)),
+            (
+                "ledger",
+                Value::object([
+                    ("height", Value::Int(node.ledger().len() as i128)),
+                    (
+                        "head",
+                        Value::string(node.ledger().head().unwrap_or("")),
+                    ),
+                ]),
+            ),
+            ("reward_units", Value::string(objective.reward.to_string())),
+            ("settled_units", Value::string(settled_units.to_string())),
+            ("payees", Value::Array(payees)),
+            (
+                "attribution",
+                Value::object([
+                    ("delta_num", Value::Int(i128::from(policy.delta_num()))),
+                    ("delta_den", Value::Int(i128::from(policy.delta_den()))),
+                    ("max_depth", Value::Int(i128::from(policy.max_depth()))),
+                    ("reserved_num", Value::Int(i128::from(policy.reserved_num()))),
+                    ("reserved_den", Value::Int(i128::from(policy.reserved_den()))),
+                ]),
+            ),
+            (
+                "note",
+                Value::string(
+                    "Derived from this node's log under the default attribution policy. No external funds, payout address, escrow, or transfer is verified here."
+                ),
+            ),
+        ]),
+    )
 }
 
 /// A claim's record bytes, addressed by their content id for receipt checks.
@@ -6090,6 +6199,30 @@ mod tests {
             let _ = serve_on(listener, serving);
         });
         (addr, id)
+    }
+
+    #[test]
+    fn payout_preview_uses_paid_settlements_and_names_its_log_head() {
+        let dir = TempDir::new("payout-preview");
+        let (addr, id) = serve_orbit_search(&dir);
+        let (status, body) = get_json(addr, &format!("/payouts/{id}"));
+        assert!(
+            status.contains("200"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        assert_eq!(at(&body, "objective_id").as_str(), Some(id.as_str()));
+        assert_eq!(at(&body, "settled_units").as_str(), Some("400"));
+        assert!(at(&body, "ledger.head")
+            .as_str()
+            .is_some_and(|head| head.starts_with("sha256:")));
+        let payees = at(&body, "payees").as_array().expect("payees");
+        assert_eq!(payees.len(), 2);
+        assert_eq!(at(&payees[0], "identity").as_str(), Some("alice"));
+        assert_eq!(at(&payees[0], "units").as_str(), Some("300"));
+        assert_eq!(at(&payees[1], "identity").as_str(), Some("bob"));
+        assert_eq!(at(&payees[1], "units").as_str(), Some("100"));
+        assert!(body.get("address").is_none());
     }
 
     /// Everything in `derived` is a join over records already in the log:

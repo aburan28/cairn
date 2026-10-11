@@ -417,6 +417,19 @@ pub fn payouts_with_enforced(
     payouts_inner(settlements, claims, enforced, params)
 }
 
+/// Attribute only the selected settlements while keeping the weights from the
+/// complete log. An external bounty for one objective must not forget a cited
+/// claim's settled weight merely because that claim earned it elsewhere.
+pub fn payouts_selected_with_enforced(
+    all_settlements: &[(String, u64)],
+    selected: &[(String, u64)],
+    claims: &BTreeMap<String, Claim>,
+    enforced: &BTreeMap<String, String>,
+    params: &FlowParams,
+) -> Result<BTreeMap<String, u64>, FlowError> {
+    payouts_inner_selected(all_settlements, selected, claims, enforced, params)
+}
+
 /// Reward-weighted attribution: `delta` split among **all transitive
 /// ancestors**, weighted by each ancestor's own settled reward.
 ///
@@ -458,7 +471,17 @@ fn payouts_inner(
     enforced: &BTreeMap<String, String>,
     params: &FlowParams,
 ) -> Result<BTreeMap<String, u64>, FlowError> {
-    let weights: BTreeMap<&str, u64> = settlements
+    payouts_inner_selected(settlements, settlements, claims, enforced, params)
+}
+
+fn payouts_inner_selected(
+    all_settlements: &[(String, u64)],
+    settlements: &[(String, u64)],
+    claims: &BTreeMap<String, Claim>,
+    enforced: &BTreeMap<String, String>,
+    params: &FlowParams,
+) -> Result<BTreeMap<String, u64>, FlowError> {
+    let weights: BTreeMap<&str, u64> = all_settlements
         .iter()
         .map(|(id, reward)| (id.as_str(), *reward))
         .collect();
@@ -1001,6 +1024,29 @@ mod tests {
             1140,
             "conservation holds across settlements"
         );
+    }
+
+    #[test]
+    fn selected_bounty_keeps_weights_from_other_settlements() {
+        let (records, claims) = diamond();
+        let bob = records.get(1).expect("diamond has four claims");
+        let carol = records.get(2).expect("diamond has four claims");
+        let dave = records.get(3).expect("diamond has four claims");
+        let all = vec![(bob.id(), 40u64), (carol.id(), 100), (dave.id(), 1000)];
+        let selected = vec![(dave.id(), 1000u64)];
+        let payout = payouts_selected_with_enforced(
+            &all,
+            &selected,
+            &claims,
+            &BTreeMap::new(),
+            &FlowParams::default(),
+        )
+        .expect("attribution conserves");
+        assert_eq!(
+            payout,
+            expect(&[("dave", 750), ("carol", 179), ("bob", 71)])
+        );
+        assert_eq!(total(&payout), 1000);
     }
 
     #[test]
