@@ -24,7 +24,7 @@ column for every committed artifact is what `cairn try` reported on that date.
 and 40 objective files; its own row was measured then. `replay-reproduction`
 was added on 2026-10-04 (21 directories, 41 objective files). `bound-frontier`
 was added on 2026-10-06; `find examples -name 'objective*.json'` then counted
-56 files in 27 directories after adding `crypto-goals/rsa-factoring` (three objectives) and `crypto-goals/secp256k1-dlog` (one objective). The two directories with objective files not shown in this table remain `lab/` (a lab policy and its environments) and `workspace-network/`.
+57 files in 28 directories after adding `crypto-goals/rsa-factoring` (three objectives), `crypto-goals/secp256k1-dlog` (one objective), and `elliptic-rank/objective-rank-33.json`. The two directories with objective files not shown in this table remain `lab/` (a lab policy and its environments) and `workspace-network/`.
 
 | example | verifier | reward | status | needs | worked artifact |
 |---|---|---|---|---|---|
@@ -45,7 +45,7 @@ was added on 2026-10-06; `find examples -name 'objective*.json'` then counted
 | [`replay-reproduction`](replay-reproduction/) | replay | 10000 | worked — the one `replay` example: exact integers a pinned command prints again | python3 | `artifact.json` |
 | [`bound-frontier`](bound-frontier/) | evaluator (maximize) + ratchet | 1000000 | worked — a **measured** ECDLP bound rescored from its own counts against the generic floor; an accept is a receipt for a self-consistent record, not a replay | python3 | `artifacts/prime-rho-neg.json` (score 682064), `artifacts/prime-bsgs-neg.json` (866743); `tampered-mean-gae.json` is there to be refused |
 | [`lean`](lean/) | lean | 50000 | worked, if you have Lean — `unavailable` on a node without it | a Lean 4 toolchain on PATH | `artifact.json`; `hole.json` is the `sorry` the verifier refuses |
-| [`elliptic-rank`](elliptic-rank/) | certificate + exact evaluator | 20000000 – 64000000 | **4 open rank-record bounties** | python3 | `artifacts/rank-30-record.json` — a baseline, rejected by the rank-31 objective |
+| [`elliptic-rank`](elliptic-rank/) | certificate + exact evaluator | 20000000 – 128000000 | **5 open rank-record bounties** | python3 | `artifacts/rank-30-record.json` — a baseline, rejected by the rank-31 objective |
 | [`certicom-ecdlp`](certicom-ecdlp/) | certificate | 120000 / 400000 / 2000000 | **open bounty** ×3 — two solvable NUMS rungs (50 and 60 bits) and Certicom's ECCp-131, posted as a frontier and not expected to settle | python3 | none |
 | [`first-blood`](first-blood/) | certificate | 100000 – 409600000 | **open bounty** ×5 | python3 | none |
 | [`aadp-witness-encryption`](aadp-witness-encryption/) | certificate | 300000 | **open bounty** — an external cryptanalysis challenge, pinned as posted | python3 | none |

@@ -11,10 +11,11 @@ never merely a numerical rank claim.
 |---|---|---:|
 | [`objective.json`](objective.json) | rank at least 31 | 31,000,000 |
 | [`objective-rank-32.json`](objective-rank-32.json) | rank at least 32 | 64,000,000 |
+| [`objective-rank-33.json`](objective-rank-33.json) | rank at least 33 | 128,000,000 |
 | [`objective-rank-30-new-j.json`](objective-rank-30-new-j.json) | rank at least 30 with `j` different from curve #273 | 20,000,000 |
 | [`objective-rank-30-lower-height.json`](objective-rank-30-lower-height.json) | rank at least 30 and exact invariant height below curve #273 | 25,000,000 |
 
-The first objective requires exactly 31 points. The other three use separate
+The rank-31 objective requires exactly 31 points. The other four use separate
 entrypoints in the same pinned evaluator: they score the number of submitted
 points only after certifying the entire set independent, then enforce their
 objective-specific threshold or record condition. A dependent extra point
@@ -46,12 +47,12 @@ y^2 + xy = x^3
 The leaderboard entry names the submitter as `ranksunbounded`; its commentary
 credits Claude, Levent Alpöge, and Ava Howell. That public solution makes a new
 rank-30 bounty a copying contest, so this objective advances the threshold to
-31, asks for rank 32 as a further milestone, and uses two orthogonal record
+31, sets rank 32 and 33 as higher milestones, and uses two orthogonal record
 conditions to make rank-30 submissions non-copyable. The reported curve and
 all 30 points are retained verbatim in
 [`artifacts/rank-30-record.json`](artifacts/rank-30-record.json). The artifact
 is a positive rank-certificate baseline at threshold 30, but it is rejected by
-all four objectives: it is short of ranks 31 and 32, has its own `j`-invariant,
+all five objectives: it is short of ranks 31, 32, and 33, has its own `j`-invariant,
 and equals rather than improves its own height bound.
 
 Provenance captured on 2026-08-20:
