@@ -63,4 +63,34 @@ if [[ "$actual" != "$expected" ]]; then
   exit 1
 fi
 
+# Every ordinary scoped gate uses an exact-false skip, and cancellation must
+# stop stale work while detector failures and missing outputs keep gates live.
+ci_workflow="$script_dir/../workflows/ci.yml"
+ios_workflow="$script_dir/../workflows/ios-app.yml"
+seed_workflow="$script_dir/../workflows/seed-pod.yml"
+guard_count="$(grep -Fc "if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs." "$ci_workflow")"
+[[ "$guard_count" == 11 ]]
+exact_false_count="$(grep -Fc " != 'false')" "$ci_workflow")"
+[[ "$exact_false_count" == 11 ]]
+
+should_run_gate() {
+  local result="$1" output="$2" cancelled="$3"
+  [[ "$cancelled" != true && ( "$result" != success || "$output" != false ) ]]
+}
+should_run_gate success false false && exit 1
+should_run_gate success true false
+should_run_gate failure false false
+should_run_gate success '' false
+should_run_gate success invalid false
+should_run_gate success false true && exit 1
+
+# Keep the callable workflow's `gui-ios / app` context on every non-cancelled
+# CI run, with a Linux no-op when the classifier explicitly says false.
+grep -Fq 'if: always() && !cancelled()' "$ci_workflow"
+grep -Fq 'run_build: ${{ needs.changes.result != '\''success'\'' || needs.changes.outputs.ios != '\''false'\'' }}' "$ci_workflow"
+grep -Fq 'uses: ./.github/workflows/ios-app.yml' "$ci_workflow"
+grep -Fq 'runs-on: ${{ inputs.run_build && '\''macos-latest'\'' || '\''ubuntu-latest'\'' }}' "$ios_workflow"
+grep -Fq 'if: ${{ !inputs.run_build }}' "$ios_workflow"
+grep -Fq 'timeout-minutes: 10' "$seed_workflow"
+
 echo 'CI scope cases passed.'
