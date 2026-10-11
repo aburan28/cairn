@@ -1,5 +1,25 @@
 # Changelog
 
+## [6.1.0](https://github.com/aburan28/cairn/compare/v6.0.0...v6.1.0) (2026-10-11)
+
+
+### Features
+
+* **examples:** add full secp256k1 DLP challenge ([#287](https://github.com/aburan28/cairn/issues/287)) ([d9a3813](https://github.com/aburan28/cairn/commit/d9a3813a94afd825d4c71cd571f7c888bea246e2))
+* **examples:** add RSA factoring challenge objectives ([00771dc](https://github.com/aburan28/cairn/commit/00771dca5cb0da780967c145679a4dbde712df7a))
+* **examples:** add RSA factoring challenge objectives ([b3895f6](https://github.com/aburan28/cairn/commit/b3895f6ba434d083ac5db249e66f5dc07ac61657))
+
+
+### Fixes
+
+* **examples:** bound RSA factor artifact length ([b4cb52e](https://github.com/aburan28/cairn/commit/b4cb52e1254f06c642662c35a46d4fa8eb10238c))
+
+
+### Documentation
+
+* clarify crypto and rank challenge targets ([#282](https://github.com/aburan28/cairn/issues/282)) ([2c31169](https://github.com/aburan28/cairn/commit/2c3116932d8698a865c4f8a4dfcb099cedb26a47))
+* curate a 100-slot cryptographic objective portfolio ([1889454](https://github.com/aburan28/cairn/commit/188945490e30c2368dc5bee7426ff4a970d52673))
+
 ## [6.0.0](https://github.com/aburan28/cairn/compare/v5.0.0...v6.0.0) (2026-10-10)
 
 
