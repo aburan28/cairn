@@ -24,8 +24,7 @@ column for every committed artifact is what `cairn try` reported on that date.
 and 40 objective files; its own row was measured then. `replay-reproduction`
 was added on 2026-10-04 (21 directories, 41 objective files). `bound-frontier`
 was added on 2026-10-06; `find examples -name 'objective*.json'` then counted
-52 files in 25 directories, two of which this table does not list (`lab/`,
-a lab policy and its environments, and `workspace-network/`).
+56 files in 27 directories after adding `crypto-goals/rsa-factoring` (three objectives) and `crypto-goals/secp256k1-dlog` (one objective). The two directories with objective files not shown in this table remain `lab/` (a lab policy and its environments) and `workspace-network/`.
 
 | example | verifier | reward | status | needs | worked artifact |
 |---|---|---|---|---|---|
@@ -50,6 +49,8 @@ a lab policy and its environments, and `workspace-network/`).
 | [`certicom-ecdlp`](certicom-ecdlp/) | certificate + piecework | 120000 / 400000 / 2000000 | open answer challenges: NUMS 50/60-bit rungs, ECCp-131 and ECC2K-130; separate rho/orbit piecework objectives pay for search progress | python3 | none |
 | [`first-blood`](first-blood/) | certificate | 100000 – 409600000 | **open bounty** ×5 | python3 | none |
 | [`aadp-witness-encryption`](aadp-witness-encryption/) | certificate | 300000 | **open bounty** — an external cryptanalysis challenge, pinned as posted | python3 | none |
+| [`crypto-goals/rsa-factoring`](crypto-goals/rsa-factoring/) | certificate ×3 | 100000000 / 200000000 / 400000000 | three fixed historical RSA challenge moduli (1024, 1536, 2048 bits); Cairn rewards only | python3 | none |
+| [`crypto-goals/secp256k1-dlog`](crypto-goals/secp256k1-dlog/) | certificate | 40960000000 | full-order secp256k1 DLP from a deterministic hash-derived target; long-horizon frontier | python3 | none |
 | [`hash-differential`](hash-differential/) | certificate ×6; evaluator (minimize) + ratchet ×2 | 5000 – 50000000 | **open bounty** ×6, two worked | python3 | `artifacts/md5-48.json`, `artifacts/dv-sha0-optimal.json` (reaches the proved optimum and exhausts the pool), `artifacts/dv-sha1-baseline.json` (a baseline that settles for nothing, by design) |
 | [`faster-algorithms`](faster-algorithms/) | evaluator (minimize) + ratchet | 1200000 – 2000000 | **open bounty** ×4 | python3 | `artifacts/`, baselines only |
 
