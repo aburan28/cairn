@@ -8,6 +8,14 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request supersedes the run it replaces, so cancel it:
+# this workflow is 12 jobs, two of them on macOS runners, and every superseded
+# run holds those runners until it finishes. A push to main is never cancelled,
+# so every merged revision still gets a finished result.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   rust:
     runs-on: ubuntu-latest
