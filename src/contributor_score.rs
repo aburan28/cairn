@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use crate::exploration::{cost_for_artifact, AssignmentPolicy};
 use crate::node::Node;
 use crate::partition::{epoch_of, EPOCH_SECONDS};
-use crate::records::{Claim, Objective};
+use crate::records::{signed_submitter, Claim, Objective};
 use crate::verifiers::{Status, Verdict};
 
 const PARTS_PER_MILLION: u128 = 1_000_000;
@@ -215,6 +215,8 @@ pub fn observations_from_node(
             Objective::from_value(&entry.payload).map_err(|_| ScoreError::InvalidObservation)?;
         if objective.assignee.as_deref() != Some(assignee)
             || !trusted_funders.contains(&objective.funder)
+            || signed_submitter(&objective.funder).is_none()
+            || objective.verify_funding_signature().is_err()
         {
             continue;
         }

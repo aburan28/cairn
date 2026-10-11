@@ -27,7 +27,8 @@ fn assignment_is_enforced_at_admission_and_audit() {
     let mut node = Node::with_registry(ledger, VerifierRegistry::new(&dir));
     let alice = Identity::from_secret_bytes([23; 32]);
     let bob = Identity::from_secret_bytes([2; 32]);
-    let objective = Objective::new(
+    let funder = Identity::from_secret_bytes([31; 32]);
+    let unsigned_objective = Objective::new(
         "assigned-research",
         "Deliver one metered research assignment",
         Value::object([
@@ -45,15 +46,16 @@ fn assignment_is_enforced_at_admission_and_audit() {
     .expect("assignee is a key");
     // Independently computed with Python's sorted, compact JSON and hashlib.
     assert_eq!(
-        objective.id(),
+        unsigned_objective.id(),
         "sha256:64b34b8780a101a6014e889eae0823bc1f5d5606c358dd2f4051f2d59680dc15"
     );
-    assert_ne!(objective.id(), {
-        let mut open = objective.clone();
+    assert_ne!(unsigned_objective.id(), {
+        let mut open = unsigned_objective.clone();
         open.assignee = None;
         assert!(open.to_value().get("assignee").is_none());
         open.id()
     });
+    let objective = unsigned_objective.clone().funded_by(&funder);
     node.post_objective(&objective, TS).expect("post");
     let artifact = Value::object([("n", Value::Int(1))]);
     let bob_commitment = Commitment::new(
@@ -81,7 +83,7 @@ fn assignment_is_enforced_at_admission_and_audit() {
         cairn::time::parse_rfc3339(TS).expect("timestamp") as u64,
         cairn::partition::EPOCH_SECONDS,
     ) + 1;
-    let trusted = std::collections::BTreeSet::from([String::from("treasury")]);
+    let trusted = std::collections::BTreeSet::from([funder.submitter_id()]);
     let rows = observations_from_node(&node, &alice.submitter_id(), &trusted, as_of)
         .expect("derive assignments");
     assert_eq!(rows.len(), 1);
@@ -89,6 +91,28 @@ fn assignment_is_enforced_at_admission_and_audit() {
     assert!(
         observations_from_node(&node, &alice.submitter_id(), &Default::default(), as_of)
             .expect("untrusted funders are omitted")
+            .is_empty()
+    );
+    node.post_objective(&unsigned_objective, TS)
+        .expect("legacy objective with a funder name");
+    let legacy_commitment = Commitment::new(
+        unsigned_objective.id(),
+        alice.submitter_id(),
+        commitment_hash(
+            &unsigned_objective.id(),
+            &alice.submitter_id(),
+            &artifact,
+            "legacy-nonce",
+        ),
+        TS,
+    )
+    .signed_with(&alice);
+    node.commit(&legacy_commitment, TS)
+        .expect("signed worker accepts legacy objective");
+    let spoofed_funder = std::collections::BTreeSet::from([String::from("treasury")]);
+    assert!(
+        observations_from_node(&node, &alice.submitter_id(), &spoofed_funder, as_of)
+            .expect("unsigned sponsor name is ignored")
             .is_empty()
     );
 

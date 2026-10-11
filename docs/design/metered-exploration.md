@@ -61,8 +61,10 @@ multiple completions. This module moves no money.
 ## Contributor score
 
 The score is a reader calculation over an audited log and a reader-selected set
-of trusted funders. It separates task family and verifier tier, uses a declared
-recency window, and displays verified, rejected, missed, and unavailable counts.
+of trusted **signed** funders. Unsigned funder names in legacy logs cannot
+establish sponsorship because anyone may post under that name. It separates
+task family and verifier tier, uses a declared recency window, and displays
+verified, rejected, missed, and unavailable counts.
 It also displays attributed spend and settled reward separately. A signed
 commitment is required before an assignment enters the denominator. A miss is
 counted only after the deadline epoch closes; an unavailable checker is not a
