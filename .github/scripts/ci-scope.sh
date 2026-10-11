@@ -27,7 +27,7 @@ elif ! git fetch --no-tags --depth=1 origin "$base"; then
   echo "Could not fetch the base commit; enabling every CI scope." >&2
   all_scopes
   exit 0
-elif ! changed_paths="$(git diff --name-only "$base" "$head")"; then
+elif ! changed_paths="$(git diff --no-renames --name-only "$base" "$head")"; then
   echo "Could not compute changed paths; enabling every CI scope." >&2
   all_scopes
   exit 0

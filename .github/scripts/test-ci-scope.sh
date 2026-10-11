@@ -2,6 +2,7 @@
 set -euo pipefail
 
 all='audit core examples interop ios jail macos msrv packaging reference tla ui'
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -31,5 +32,35 @@ check ios 'gui/ios/Cairn.swift' 'ios'
 check workflow '.github/workflows/ci.yml' "$all"
 check merge-group '' "$all" merge_group
 check missing-base 'docs/design.md' "$all" pull_request missing
+
+# Git's default rename detection reports only the destination. That would let
+# renaming code into docs hide the source scope, so exercise a real repository
+# diff with rename detection disabled.
+repo="$tmp/repo"
+origin="$tmp/origin.git"
+mkdir -p "$repo/src"
+git -C "$repo" init -q
+git -C "$repo" config user.name 'CI scope test'
+git -C "$repo" config user.email ci-scope@example.invalid
+printf 'source\n' > "$repo/src/canonical.rs"
+git -C "$repo" add src/canonical.rs
+git -C "$repo" commit -qm base
+base="$(git -C "$repo" rev-parse HEAD)"
+git clone --bare -q "$repo" "$origin"
+git -C "$repo" remote add origin "$origin"
+mkdir -p "$repo/docs"
+git -C "$repo" mv src/canonical.rs docs/canonical.md
+git -C "$repo" commit -qm rename
+head="$(git -C "$repo" rev-parse HEAD)"
+: > "$tmp/output"
+(cd "$repo" && env -u CI_CHANGED_PATHS GITHUB_OUTPUT="$tmp/output" \
+  GITHUB_EVENT_NAME=pull_request CI_BASE_SHA="$base" CI_HEAD_SHA="$head" \
+  bash "$script_dir/ci-scope.sh")
+actual="$(sed -n 's/=true$//p' "$tmp/output" | sort | tr '\n' ' ' | sed 's/ $//')"
+expected='audit core examples interop jail msrv reference tla ui'
+if [[ "$actual" != "$expected" ]]; then
+  printf 'rename diff: expected [%s], got [%s]\n' "$expected" "$actual" >&2
+  exit 1
+fi
 
 echo 'CI scope cases passed.'

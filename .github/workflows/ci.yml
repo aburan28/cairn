@@ -44,14 +44,14 @@ jobs:
           persist-credentials: false
       - run: bash .github/scripts/test-ci-scope.sh
       - id: scope
-        run: .github/scripts/ci-scope.sh
+        run: bash .github/scripts/ci-scope.sh
         env:
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           CI_HEAD_SHA: ${{ github.sha }}
 
   rust:
     needs: changes
-    if: needs.changes.outputs.core == 'true'
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.core == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -234,7 +234,7 @@ jobs:
     # turn the contract into a description of one program's behaviour, so
     # nothing regenerates it -- the reference reproduces it or fails.
     needs: changes
-    if: needs.changes.outputs.reference == 'true'
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.reference == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -265,7 +265,7 @@ jobs:
     # Reject; a pinned checker's scratch directory was mounted read-only; and
     # a test expected a refusal the jail never gave.
     needs: changes
-    if: needs.changes.outputs.jail == 'true'
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.jail == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -296,7 +296,7 @@ jobs:
     # ones who find out. 1.75 was the original claim and was measurably false:
     # transitive deps need edition2024.
     needs: changes
-    if: needs.changes.outputs.msrv == 'true'
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.msrv == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -316,7 +316,7 @@ jobs:
     # is a broken job. Locally it is a skip; the script never turns it into a
     # pass.
     needs: changes
-    if: needs.changes.outputs.tla == 'true'
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.tla == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -341,7 +341,7 @@ jobs:
     # other produced. This is what catches a canonical-encoding drift before it
     # silently forks the network's identity scheme.
     needs: changes
-    if: needs.changes.outputs.interop == 'true'
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.interop == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -412,7 +412,7 @@ jobs:
     # dependency tree is part of the sandbox boundary. `continue-on-error` is
     # spelled out so the intent survives someone "fixing" a red build.
     needs: changes
-    if: needs.changes.outputs.audit == 'true'
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.audit == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     continue-on-error: false
@@ -433,7 +433,7 @@ jobs:
     # /chain.html with no build step -- ui/ is the richer client, not the only
     # one. See ui/README.md.
     needs: changes
-    if: needs.changes.outputs.ui == 'true'
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.ui == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -485,7 +485,7 @@ jobs:
     # with a new SDK would fail pull requests that touched no Swift. What this
     # job catches is a compile that fails.
     needs: changes
-    if: needs.changes.outputs.macos == 'true'
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.macos == 'true')
     runs-on: macos-latest
     timeout-minutes: 25
     steps:
@@ -514,7 +514,7 @@ jobs:
     # The iPhone reader, including Cairn.xcodeproj. Lives in ios-app.yml so
     # a dispatch can compile the .app without waiting for rust.
     needs: changes
-    if: needs.changes.outputs.ios == 'true'
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.ios == 'true')
     uses: ./.github/workflows/ios-app.yml
 
   examples:
@@ -523,7 +523,7 @@ jobs:
     # Without this, an example nobody demos can rot into one the CLI rejects,
     # and a stale sha256 pin turns an open bounty into an unsatisfiable one.
     needs: changes
-    if: needs.changes.outputs.examples == 'true'
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.examples == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -607,7 +607,7 @@ jobs:
     # lets through -- so "it linted here" was not evidence that it lints here.
     #
     needs: changes
-    if: needs.changes.outputs.packaging == 'true'
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.packaging == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
