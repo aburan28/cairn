@@ -9,7 +9,7 @@ use cairn::contributor_score::{observations_from_node, AssignmentOutcome};
 use cairn::crypto::identity::Identity;
 use cairn::ledger::Ledger;
 use cairn::node::{Node, RuleViolation};
-use cairn::records::{commitment_hash, Commitment, Objective};
+use cairn::records::{commitment_hash, Claim, Commitment, Objective};
 use cairn::verifiers::VerifierRegistry;
 
 const TS: &str = "2026-07-28T00:00:00+00:00";
@@ -126,6 +126,94 @@ fn assignment_is_enforced_at_admission_and_audit() {
         problems.iter().any(|problem| problem.contains("assignee")),
         "{problems:?}"
     );
+    drop(node);
+    fs::remove_dir_all(dir).expect("remove scratch directory");
+}
+
+#[test]
+fn accepted_work_scores_only_after_settlement() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "cairn-exploration-settlement-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("scratch directory");
+    let ledger = Ledger::open(dir.join("log.jsonl")).expect("log");
+    let mut node = Node::with_registry(ledger, VerifierRegistry::new(env!("CARGO_MANIFEST_DIR")));
+    let contributor = Identity::from_secret_bytes([41; 32]);
+    let funder = Identity::from_secret_bytes([42; 32]);
+    let base = cairn::time::parse_rfc3339(TS).expect("timestamp");
+    let epoch_seconds = cairn::partition::EPOCH_SECONDS as i64;
+    let reveal_at = cairn::time::format_iso8601_utc(base + epoch_seconds);
+    let settle_at = cairn::time::format_iso8601_utc(
+        base + (2 + cairn::partition::finality_epochs() as i64) * epoch_seconds,
+    );
+    let deadline = cairn::time::format_iso8601_utc(base + 8 * epoch_seconds);
+    let example = fs::read_to_string("examples/collatz/objective.json").expect("objective");
+    let mut objective = Objective::from_value(&Value::from_json(&example).expect("JSON"))
+        .expect("example objective");
+    objective.deadline = Some(deadline);
+    let objective = objective
+        .assigned_to(contributor.submitter_id())
+        .expect("assignee")
+        .funded_by(&funder);
+    node.post_objective(&objective, TS).expect("post");
+    let artifact =
+        Value::from_json(&fs::read_to_string("examples/collatz/artifact.json").expect("artifact"))
+            .expect("JSON");
+    let nonce = "first";
+    let commitment = Commitment::new(
+        objective.id(),
+        contributor.submitter_id(),
+        commitment_hash(
+            &objective.id(),
+            &contributor.submitter_id(),
+            &artifact,
+            nonce,
+        ),
+        TS,
+    )
+    .signed_with(&contributor);
+    node.commit(&commitment, TS).expect("commit");
+    let claim = Claim::new(
+        objective.id(),
+        contributor.submitter_id(),
+        artifact,
+        nonce,
+        &reveal_at,
+        vec![],
+    )
+    .expect("claim")
+    .signed_with(&contributor);
+    let outcome = node.reveal(&claim, &reveal_at).expect("reveal");
+    assert!(outcome.is_pending(), "{outcome:?}");
+    let trusted = std::collections::BTreeSet::from([funder.submitter_id()]);
+    let reveal_epoch = cairn::partition::epoch_of(
+        (base + epoch_seconds) as u64,
+        cairn::partition::EPOCH_SECONDS,
+    );
+    assert!(
+        observations_from_node(&node, &contributor.submitter_id(), &trusted, reveal_epoch)
+            .expect("pending score")
+            .is_empty(),
+        "an accepted verdict cannot buy delivery credit before settlement"
+    );
+    node.settle_at(&settle_at).expect("settle");
+    let rows = observations_from_node(
+        &node,
+        &contributor.submitter_id(),
+        &trusted,
+        reveal_epoch + cairn::partition::finality_epochs() + 1,
+    )
+    .expect("settled score");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, AssignmentOutcome::Verified);
+    assert_eq!(rows[0].verified_gain, objective.reward);
+    assert_eq!(rows[0].epoch, reveal_epoch);
+    assert!(node.audit(false).is_empty(), "finished log must audit");
     drop(node);
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }

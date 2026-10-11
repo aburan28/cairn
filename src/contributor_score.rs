@@ -16,7 +16,7 @@ const PARTS_PER_MILLION: u128 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignmentOutcome {
-    /// The assignment's pinned evidence checker accepted its deliverable.
+    /// The checker accepted the deliverable and the claim settled.
     Verified,
     /// The checker ran and rejected the deliverable.
     Rejected,
@@ -165,6 +165,7 @@ pub fn observations_from_node(
     let entries = node.ledger().entries();
     let mut verdicts = std::collections::BTreeMap::new();
     let mut settled = std::collections::BTreeMap::new();
+    let mut drained_epochs = BTreeSet::new();
     let entry_epoch = |ts: &str| {
         crate::time::parse_rfc3339(ts)
             .and_then(|seconds| u64::try_from(seconds).ok())
@@ -176,6 +177,15 @@ pub fn observations_from_node(
             continue;
         }
         match entry.kind.as_str() {
+            "batch" => {
+                if let Some(epoch) = entry
+                    .payload
+                    .get("epoch")
+                    .and_then(crate::canonical::Value::as_u64)
+                {
+                    drained_epochs.insert(epoch);
+                }
+            }
             "verdict" => {
                 let (Some(claim_id), Some(verdict)) = (
                     entry
@@ -253,12 +263,12 @@ pub fn observations_from_node(
         if !accepted_assignment {
             continue;
         }
-        let mut accepted = false;
-        let mut rejected = false;
-        let mut unavailable = false;
+        let mut verified_epoch: Option<u64> = None;
+        let mut rejected_epoch: Option<u64> = None;
+        let mut unavailable_epoch: Option<u64> = None;
+        let mut pending_accept = false;
         let mut eligible_spend = 0u64;
         let mut verified_gain = 0u64;
-        let mut last_claim_epoch = None;
         for claim_entry in entries.iter().filter(|entry| entry.kind == "claim") {
             let Ok(claim) = Claim::from_value(&claim_entry.payload) else {
                 continue;
@@ -270,42 +280,46 @@ pub fn observations_from_node(
             if claim_epoch > as_of_epoch {
                 continue;
             }
-            last_claim_epoch =
-                Some(last_claim_epoch.map_or(claim_epoch, |old: u64| old.max(claim_epoch)));
             match verdicts.get(&claim.id()) {
                 Some(Status::Accept) => {
-                    accepted = true;
-                    verified_gain = verified_gain
-                        .checked_add(settled.get(&claim.id()).copied().unwrap_or(0))
-                        .ok_or(ScoreError::ArithmeticOverflow)?;
-                    if let Some(policy) = &policy {
-                        let spend =
-                            cost_for_artifact(policy, &claim.artifact, true, &BTreeSet::new())
-                                .map_err(|_| ScoreError::InvalidObservation)?;
-                        eligible_spend = eligible_spend.max(spend);
+                    if let Some(reward) = settled.get(&claim.id()) {
+                        // A verifier can accept a duplicate that the settlement
+                        // rules pay zero for. It must not earn delivery credit.
+                        verified_epoch =
+                            Some(verified_epoch.map_or(claim_epoch, |old| old.max(claim_epoch)));
+                        verified_gain = verified_gain
+                            .checked_add(*reward)
+                            .ok_or(ScoreError::ArithmeticOverflow)?;
+                        if let Some(policy) = &policy {
+                            let spend =
+                                cost_for_artifact(policy, &claim.artifact, true, &BTreeSet::new())
+                                    .map_err(|_| ScoreError::InvalidObservation)?;
+                            eligible_spend = eligible_spend.max(spend);
+                        }
+                    } else if !drained_epochs.contains(&claim_epoch) {
+                        pending_accept = true;
                     }
                 }
-                Some(Status::Reject) => rejected = true,
-                Some(Status::Unavailable | Status::InvalidSpec) => unavailable = true,
+                Some(Status::Reject) => {
+                    rejected_epoch =
+                        Some(rejected_epoch.map_or(claim_epoch, |old| old.max(claim_epoch)));
+                }
+                Some(Status::Unavailable | Status::InvalidSpec) => {
+                    unavailable_epoch =
+                        Some(unavailable_epoch.map_or(claim_epoch, |old| old.max(claim_epoch)));
+                }
                 None => {}
             }
         }
         let deadline_epoch = objective.deadline.as_deref().map(entry_epoch).transpose()?;
-        let (outcome, epoch) = if accepted {
-            (
-                AssignmentOutcome::Verified,
-                last_claim_epoch.unwrap_or(as_of_epoch),
-            )
-        } else if rejected {
-            (
-                AssignmentOutcome::Rejected,
-                last_claim_epoch.unwrap_or(as_of_epoch),
-            )
-        } else if unavailable {
-            (
-                AssignmentOutcome::Unavailable,
-                last_claim_epoch.unwrap_or(as_of_epoch),
-            )
+        let (outcome, epoch) = if let Some(epoch) = verified_epoch {
+            (AssignmentOutcome::Verified, epoch)
+        } else if pending_accept {
+            continue;
+        } else if let Some(epoch) = rejected_epoch {
+            (AssignmentOutcome::Rejected, epoch)
+        } else if let Some(epoch) = unavailable_epoch {
+            (AssignmentOutcome::Unavailable, epoch)
         } else if let Some(deadline_epoch) = deadline_epoch.filter(|epoch| *epoch < as_of_epoch) {
             (AssignmentOutcome::Missed, deadline_epoch)
         } else {
