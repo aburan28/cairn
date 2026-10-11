@@ -121,6 +121,11 @@
     "require_signed_submitter": {
       "type": "boolean",
       "description": "Refuse submissions from anyone but a signed identity. When true, a submitter must be 64 lowercase hex characters -- an ed25519 public key -- and the record must carry a signature from it. Omitted when false, which is what every objective written before this field existed meant."
+    },
+    "assignee": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Optional exclusive submitter Ed25519 public key. A signed commitment from this key both accepts the assignment for reader-side scoring and is required before any reveal. Omitted for an open objective so previous ids retain their bytes."
     }
   }
 }

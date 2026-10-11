@@ -12,6 +12,28 @@ fn vectors() -> Value {
 }
 
 #[test]
+fn assigned_objective_matches_the_independent_python_vector() {
+    use cairn::records::Objective;
+
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/conformance/assigned-objective.json"
+    ))
+    .expect("assigned-objective vector");
+    let vector = Value::from_json(&text).expect("canonical vector");
+    let record = vector.get("record").expect("record");
+    let objective = Objective::from_value(record).expect("assigned objective");
+    assert_eq!(
+        objective.to_value().canonical_string(),
+        vector.get("canonical").and_then(Value::as_str).unwrap()
+    );
+    assert_eq!(
+        objective.id(),
+        vector.get("id").and_then(Value::as_str).unwrap()
+    );
+}
+
+#[test]
 fn canonical_bytes_match_the_reference_implementation() {
     let v = vectors();
     let cases = v.get("canonical").unwrap().as_array().unwrap();

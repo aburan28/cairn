@@ -2304,6 +2304,13 @@ impl Node {
             ));
         }
         let id = objective.id();
+        if objective
+            .assignee
+            .as_deref()
+            .is_some_and(|who| signed_submitter(who).is_none())
+        {
+            return Err("assignee must be a lowercase ed25519 public key".into());
+        }
         if self.objectives().contains_key(&id) {
             return Err("objective already posted".into());
         }
@@ -2384,6 +2391,16 @@ impl Node {
                 commitment.submitter
             ));
         }
+        if let Some(assignee) = &objective.assignee {
+            if &commitment.submitter != assignee {
+                return Err(format!(
+                    "objective {} is assigned to {}, not {:?}",
+                    short(&commitment.objective_id),
+                    short(assignee),
+                    commitment.submitter
+                ));
+            }
+        }
         // A progressive objective stays open after a settlement; a pass/fail
         // one does not.
         if objective.ratchet.is_none()
@@ -2444,6 +2461,16 @@ impl Node {
                 short(&claim.objective_id),
                 claim.submitter
             ));
+        }
+        if let Some(assignee) = &objective.assignee {
+            if &claim.submitter != assignee {
+                return Err(format!(
+                    "objective {} is assigned to {}, not {:?}",
+                    short(&claim.objective_id),
+                    short(assignee),
+                    claim.submitter
+                ));
+            }
         }
         let (commitment, admitted_at) = matching_commitment
             .ok_or("no matching prior commitment: commit H(artifact‖submitter‖nonce) first")?;
@@ -3116,6 +3143,39 @@ impl Node {
                     entry.seq, entry.kind
                 )),
                 Err(error) => problems.push(format!("entry {}: {error}", entry.seq)),
+            }
+        }
+
+        // Check policy even on imported logs, including commitments and
+        // claims that were never paid. Otherwise admission would enforce a
+        // funder's assignee while audit silently certified a bypass.
+        for kind in [COMMITMENT, CLAIM] {
+            for entry in self.ledger.entries_of_kind(kind) {
+                let (Some(objective_id), Some(submitter)) = (
+                    entry.payload.get("objective_id").and_then(Value::as_str),
+                    entry.payload.get("submitter").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                let Some(objective) = objectives.get(objective_id) else {
+                    continue;
+                };
+                if objective.require_signed_submitter && signed_submitter(submitter).is_none() {
+                    problems.push(format!(
+                        "entry {}: {kind} names an unsigned submitter on a signed-only objective",
+                        entry.seq
+                    ));
+                }
+                if objective
+                    .assignee
+                    .as_deref()
+                    .is_some_and(|assignee| assignee != submitter)
+                {
+                    problems.push(format!(
+                        "entry {}: {kind} submitter differs from the objective's assignee",
+                        entry.seq
+                    ));
+                }
             }
         }
 
@@ -4385,6 +4445,7 @@ mod tests {
                 embargo_epochs: None,
                 artifact_schema: None,
                 require_signed_submitter: false,
+                assignee: None,
             };
             objective.funding_signature = Some(hex(&key
                 .sign(&objective.funding_signing_payload().canonical_bytes())
@@ -4656,6 +4717,7 @@ mod tests {
             embargo_epochs: None,
             artifact_schema: None,
             require_signed_submitter: false,
+            assignee: None,
         };
         let artifact = Value::object([("answer", Value::Int(1))]);
         let nonce = "nonce";
