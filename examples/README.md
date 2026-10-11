@@ -24,9 +24,8 @@ column for every committed artifact is what `cairn try` reported on that date.
 and 40 objective files; its own row was measured then. `replay-reproduction`
 was added on 2026-10-04 (21 directories, 41 objective files). `bound-frontier`
 was added on 2026-10-06; `find examples -name 'objective*.json'` then counted
-55 files in 26 objective-bearing directories, two of which this table does not list (`lab/`,
-a lab policy and its environments, and `workspace-network/`). NIST prime-curve DLP
-objectives were added on 2026-10-10.
+57 files in 27 objective-bearing directories, two of which this table does not list (`lab/`,
+a lab policy and its environments, and `workspace-network/`). NIST prime-curve DLP and BLS12-381 G1/G2 objectives were added on 2026-10-10.
 
 | example | verifier | reward | status | needs | worked artifact |
 |---|---|---|---|---|---|
@@ -50,6 +49,7 @@ objectives were added on 2026-10-10.
 | [`elliptic-rank`](elliptic-rank/) | certificate + exact evaluator | 20000000 – 64000000 | **4 open rank-record bounties**; public proven record 31, next target 32 | python3 | `artifacts/rank-30-record.json` — a baseline, rejected by the rank-31 objective |
 | [`certicom-ecdlp`](certicom-ecdlp/) | certificate + piecework | 120000 / 400000 / 2000000 | open answer challenges: NUMS 50/60-bit rungs, ECCp-131 and ECC2K-130; separate rho/orbit piecework objectives pay for search progress | python3 | none |
 | [`crypto-goals/nist-dlog`](crypto-goals/nist-dlog/) | certificate ×3 | 40960000 / 81920000 / 163840000 | **open bounty** ×3 — standard-curve full-order ECDLP challenges on NIST P-256, P-384, and P-521 | python3 | none |
+| [`crypto-goals/bls12-381-dlog`](crypto-goals/bls12-381-dlog/) | certificate ×2 | 81920000 each | **open bounty** ×2 — full-order DLP in the BLS12-381 G1 and G2 pairing subgroups | python3 | none |
 | [`first-blood`](first-blood/) | certificate | 100000 – 409600000 | **open bounty** ×5 | python3 | none |
 | [`aadp-witness-encryption`](aadp-witness-encryption/) | certificate | 300000 | **open bounty** — an external cryptanalysis challenge, pinned as posted | python3 | none |
 | [`hash-differential`](hash-differential/) | certificate ×6; evaluator (minimize) + ratchet ×2 | 5000 – 50000000 | **open bounty** ×6, two worked | python3 | `artifacts/md5-48.json`, `artifacts/dv-sha0-optimal.json` (reaches the proved optimum and exhausts the pool), `artifacts/dv-sha1-baseline.json` (a baseline that settles for nothing, by design) |
