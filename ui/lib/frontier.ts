@@ -38,6 +38,7 @@ export type ObjectiveRecord = {
   statement: string;
   ratchet?: Ratchet;
   verifier?: Verifier;
+  piecework?: { unit_price: number; units?: number } | null;
 };
 
 export type ObjectiveResponse = {
