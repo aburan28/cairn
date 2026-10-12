@@ -283,6 +283,8 @@ pub const OUTPUT_DIR: &str = "/out";
 ///
 /// The receipt and the output files are one op: a peer never sees outputs
 /// without the run that produced them, or a run without its outputs.
+/// Unresolved conflicts under any declared lab input are refused before
+/// looking up an environment or starting a process.
 pub fn exec(
     lab: &mut Lab,
     identity: &Identity,
@@ -293,6 +295,12 @@ pub fn exec(
     }
     lab.refresh()?;
     let state = State::of(lab);
+    // Check the snapshot before probing this host's environment or sandbox:
+    // ambiguity is a refused request everywhere, not an infrastructure error
+    // on a machine that happens not to have the environment yet.
+    for input in &request.inputs {
+        state.list_unambiguous(input.prefix.trim_end_matches('/'))?;
+    }
     let environment = env::resolve(lab, &state, &request.env)?;
     let backend = exec::backend(request.sandbox)?;
 
@@ -351,6 +359,7 @@ fn exec_in(
         let prefix = input.prefix.trim_end_matches('/');
         let dir = work.join(format!("in-{n}"));
         fs::create_dir_all(&dir)?;
+        // `exec` checked this immutable snapshot before running anything.
         let listed = state.list(prefix);
         // A prefix that names one file, and nothing under it, is that file:
         // `--input x/run.py:/work/run.py` puts a file at `/work/run.py`, not
