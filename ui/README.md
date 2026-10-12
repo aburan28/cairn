@@ -192,6 +192,31 @@ build` and by `scripts/node-smoke.sh` against a real node. Each fetcher also
 asserts at runtime that the fields a page reads are present (`lib/shape.ts`),
 because an `as`-cast passes `tsc` for any field name at all.
 
+### Browser journey checks
+
+`npm run test:browser` exercises a running **local** reader against a disposable
+node with at least one objective. Use a production export to keep its assets
+stable throughout the check.
+Build and embed it with `make ui-build`, start that binary on a copied log, and
+set `CAIRN_UX_URL` to its `/ui/` URL:
+
+```sh
+cd ui
+npx playwright install chromium
+CAIRN_UX_URL=http://127.0.0.1:8080/ui/ npm run test:browser
+```
+
+`CAIRN_BROWSER_PATH` can select an installed Chromium;
+`CAIRN_UX_NO_SANDBOX=1` is available for an isolated Linux test container whose
+browser cannot create namespaces. `CAIRN_UX_SCREENSHOTS` saves the phone palette
+image to a directory. The test checks 320, 360 and 1280px layouts, keyboard and
+phone dialog controls, recovery from failed reads and filters, the real digest
+route for attribution, form validation and delayed authorization responses,
+and same-origin posting guidance after finding a seed. Seed the node with a
+piecework objective to include the coordination detail checks. No record is
+submitted; canonicalization is its only POST. The review and remaining product
+work are in [`docs/review/reader-ux.md`](../docs/review/reader-ux.md).
+
 ## How the public site gets there
 
 `.github/workflows/pages.yml` builds this app at whatever base path Pages

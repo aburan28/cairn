@@ -28,7 +28,8 @@ import {
   signPayload,
 } from "@/lib/wallet";
 import { type Bridge, appBridge, briefProblem, handOff } from "@/lib/draft";
-import { NODE_URL } from "@/lib/objectives";
+import { nodeAnswers } from "@/lib/site";
+import { useEvery, useNode } from "@/components/hooks";
 import { Badge, Card, Hash, Note, PageHeader, SectionHeading } from "@/components/ui";
 import { VoiceInput } from "@/components/VoiceInput";
 
@@ -81,6 +82,11 @@ import { VoiceInput } from "@/components/VoiceInput";
  * the declared hash on its own before trusting either.
  */
 export default function Page() {
+  const base = useNode();
+  const [nodeOnline, setNodeOnline] = useState<boolean | null>(null);
+  useEvery(async () => {
+    if (base !== null) setNodeOnline(await nodeAnswers(base));
+  }, 30, base !== null);
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   // Which fields the funder has actually touched. A form that greets you with
   // six red lines has told you nothing you did not know — you have just
@@ -105,6 +111,17 @@ export default function Page() {
   const [receipt, setReceipt] = useState<Queued | null>(null);
   const [busy, setBusy] = useState<null | "preparing" | "signing" | "submitting">(null);
   const [error, setError] = useState<string | null>(null);
+  // Edits and newer authorization requests supersede any outstanding file,
+  // canonicalization or wallet response. Disabling controls alone cannot
+  // stop a response that was already in flight when the controls locked.
+  const draftRevision = useRef(0);
+  const invalidate = useCallback(() => {
+    draftRevision.current += 1;
+    setPrepared(null);
+    setSignature(null);
+    setReceipt(null);
+    setError(null);
+  }, []);
 
   // `created_at` is fixed when the page loads rather than at submit time. It is
   // inside the objective's id, so a value that moved between "prepare" and
@@ -112,7 +129,7 @@ export default function Page() {
   // different one — which fails verification for a reason no message explains.
   const [createdAt] = useState(() => new Date().toISOString().replace(/\.\d+Z$/, "+00:00"));
 
-  const canWrite = reachableForWrites();
+  const canWrite = base !== null && nodeOnline === true && reachableForWrites(base);
 
   const [brief, setBrief] = useState("");
   // Undefined until mounted: the prerendered page cannot know whose window
@@ -135,8 +152,11 @@ export default function Page() {
     // funder is not made to approve the same page again.
     void (async () => {
       for (const candidate of available()) {
+        const revision = draftRevision.current;
         try {
           const restored = await connect(candidate.kind, true);
+          if (revision !== draftRevision.current) return;
+          invalidate();
           setWallet(restored);
           setDraft((d) => ({ ...d, funder: restored.funder }));
           return;
@@ -145,7 +165,7 @@ export default function Page() {
         }
       }
     })();
-  }, []);
+  }, [invalidate]);
 
   const found = useMemo(() => problems(draft), [draft]);
   const complete = Object.keys(found).length === 0;
@@ -156,13 +176,6 @@ export default function Page() {
 
   // Any edit invalidates a signature made over the previous draft. Silently
   // keeping it would submit a record whose authorization covers something else.
-  const invalidate = useCallback(() => {
-    setPrepared(null);
-    setSignature(null);
-    setReceipt(null);
-    setError(null);
-  }, []);
-
   const set = useCallback(
     <K extends keyof Draft>(key: K, value: Draft[K]) => {
       setDraft((d) => ({ ...d, [key]: value }));
@@ -186,9 +199,11 @@ export default function Page() {
   }
 
   async function onConnect(kind: string) {
+    const revision = draftRevision.current;
     setWalletError(null);
     try {
       const connected = await connect(kind);
+      if (revision !== draftRevision.current) return;
       setWallet(connected);
       set("funder", connected.funder);
     } catch (cause) {
@@ -198,8 +213,10 @@ export default function Page() {
 
   async function onLoadObjective(file: File | undefined) {
     if (!file) return;
+    const revision = draftRevision.current;
     try {
       const { draft: loaded, dropped } = fromRecord(JSON.parse(await file.text()));
+      if (revision !== draftRevision.current) return;
       // A connected wallet stays the funder: the file's funder is whoever
       // scaffolded it, and the person at this page is the one about to sign.
       setDraft(wallet ? { ...loaded, funder: wallet.funder } : loaded);
@@ -225,9 +242,11 @@ export default function Page() {
 
   async function onHashChecker(file: File | undefined) {
     if (!file) return;
+    const revision = draftRevision.current;
     setHashNote(null);
     try {
       const digest = await sha256Hex(await file.arrayBuffer());
+      if (revision !== draftRevision.current) return;
       set("programSha256", digest);
       if (!draft.program.trim()) set("program", file.name);
       setHashNote(`sha256 of ${file.name} (${file.size.toLocaleString()} bytes), hashed here.`);
@@ -238,11 +257,14 @@ export default function Page() {
 
   async function onPrepare() {
     if (!record) return;
+    const revision = ++draftRevision.current;
     setBusy("preparing");
+    setPrepared(null);
+    setSignature(null);
     setError(null);
     try {
-      setPrepared(await prepare(record));
-      setSignature(null);
+      const next = await prepare(record, base ?? "");
+      if (revision === draftRevision.current) setPrepared(next);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -252,10 +274,13 @@ export default function Page() {
 
   async function onSign() {
     if (!prepared || !wallet) return;
+    const revision = ++draftRevision.current;
     setBusy("signing");
+    setSignature(null);
     setError(null);
     try {
-      setSignature(await signPayload(wallet.kind, prepared.payload_hex));
+      const next = await signPayload(wallet.kind, prepared.payload_hex);
+      if (revision === draftRevision.current) setSignature(next);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -265,11 +290,13 @@ export default function Page() {
 
   async function onSubmit() {
     if (!record) return;
+    const revision = ++draftRevision.current;
     setBusy("submitting");
     setError(null);
     try {
       const signed = signature ? { ...record, funding_signature: signature } : record;
-      setReceipt(await submit(signed));
+      const next = await submit(signed, base ?? "");
+      if (revision === draftRevision.current) setReceipt(next);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -379,23 +406,21 @@ export default function Page() {
 
       {/* -- the form: the page in a browser, folded away in the app --------- */}
       {/* `site-only` is !important, so it does outrank the grid's display. */}
-      {!canWrite && (
+      {!canWrite && nodeOnline !== null && (
         <div className={`mb-6 ${folded}`}>
           <Note title="this page cannot submit from here" tone="warn">
-            You are reading this from{" "}
-            <span className="mono">{NODE_URL || "another origin"}</span>, and a node
-            accepts submissions same-origin only — a JSON <span className="mono">POST</span>{" "}
-            is preflighted, and <span className="mono">OPTIONS</span> is deliberately
-            unrouted so no page can make its visitors fill a stranger&rsquo;s queue.
-            Open this page from the node&rsquo;s own address in Cairn.app to submit.
-            You can still prepare the challenge here.
+            {nodeOnline
+              ? "You are reading a node from another site. To authorize and submit a challenge, open the reader served by that node."
+              : "No node is answering. Start or reconnect your node, then open its reader to authorize and submit a challenge."}
+            {base && <a href={`${base}/ui/submit/`} className="mt-2 block text-accent hover:underline">Open this node’s challenge form →</a>}
+            <p className="mt-2">You can still compose and review the fields here.</p>
           </Note>
         </div>
       )}
 
       <div className={`grid gap-6 lg:grid-cols-[minmax(0,1fr)_26rem] ${folded}`}>
         {/* -- the form ---------------------------------------------------- */}
-        <div className="flex flex-col gap-6">
+        <fieldset disabled={busy !== null} className="flex min-w-0 flex-col gap-6">
           <Card className="card-pad">
             <SectionHeading
               aside={
@@ -940,6 +965,7 @@ export default function Page() {
             <SectionHeading>Progressive payout</SectionHeading>
             <label className="flex cursor-pointer items-start gap-2.5">
               <input
+                id="ratchet"
                 type="checkbox"
                 className="mt-0.5 accent-[var(--accent)]"
                 checked={draft.useRatchet}
@@ -1008,7 +1034,7 @@ export default function Page() {
               </div>
             )}
           </Card>
-        </div>
+        </fieldset>
 
         {/* -- review and sign --------------------------------------------- */}
         <aside className="lg:sticky lg:top-20 lg:self-start">
@@ -1058,6 +1084,26 @@ export default function Page() {
                   detail="Queued for the operator to drain. Not admitted until then."
                 />
               </ol>
+
+              {!complete && (
+                <div className="mt-4 border-t border-edge pt-3">
+                  <p className="text-[12px] text-ink-2">Finish these fields to continue:</p>
+                  <ul className="mt-2 flex flex-col gap-1.5 text-[12px]">
+                    {Object.entries(found).map(([field, message]) => {
+                      const target = FIELD_TARGETS[field as keyof Draft];
+                      return (
+                        <li key={field}>
+                          <a href={`#${target}`} className="text-accent hover:underline" onClick={(event) => {
+                            event.preventDefault();
+                            setTouched((current) => ({ ...current, [field]: true }));
+                            document.getElementById(target)?.focus();
+                          }}>{message}</a>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
 
               <div className="mt-4 flex flex-col gap-2">
                 <button
@@ -1158,6 +1204,15 @@ export default function Page() {
     </>
   );
 }
+
+const FIELD_TARGETS: Record<keyof Draft, string> = {
+  goal: "goal", statement: "statement", funder: "funder", reward: "reward", deadline: "deadline",
+  verifierKind: "program", program: "program", programSha256: "sha", entrypoint: "entrypoint",
+  threshold: "threshold", direction: "direction", leanStatement: "lean-statement", leanPreamble: "lean-preamble",
+  timeoutSeconds: "lean-timeout", replayCommand: "replay-command", replayFields: "replay-fields", replayCwd: "replay-cwd",
+  useRatchet: "ratchet", baseline: "baseline", target: "target", minImprovement: "minimprovement",
+  requireSignedSubmitter: "funder", artifactSchema: "schema", verifierExtras: "extras",
+};
 
 function cap(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);

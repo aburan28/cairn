@@ -15,7 +15,8 @@
  */
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { useModalDialog } from "@/components/hooks";
 
 type Tone = "neutral" | "accent" | "warn" | "bad";
 
@@ -236,44 +237,30 @@ export function Sheet({
   onClose: () => void;
   children: React.ReactNode;
 }) {
-  const panel = useRef<HTMLDivElement>(null);
-  // Callers pass `onClose` inline, so it is a new function every render. Held
-  // in a ref: an effect keyed on it re-ran on every parent render and pulled
-  // focus back to the panel from whatever field the person was typing in.
-  const close = useRef(onClose);
-  close.current = onClose;
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close.current();
-    };
-    window.addEventListener("keydown", onKey);
-    panel.current?.focus();
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  const dialog = useModalDialog();
+  const titleId = useId();
   return (
-    <div
-      className="fixed inset-0 z-50 flex justify-end bg-canvas/60 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      aria-label={typeof title === "string" ? title : undefined}
+    <dialog
+      ref={dialog}
+      className="fixed inset-0 m-0 h-dvh max-h-none w-full max-w-none bg-transparent p-0 text-ink open:flex open:justify-end backdrop:bg-canvas/60 backdrop:backdrop-blur-sm"
+      aria-labelledby={titleId}
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
       <div
-        ref={panel}
-        tabIndex={-1}
         className="flex h-full w-full max-w-xl flex-col border-l border-edge bg-surface shadow-2xl focus:outline-none"
       >
         <div className="flex items-center gap-3 border-b border-edge px-5 py-3.5">
-          <h2 className="min-w-0 flex-1 text-[15px] font-semibold">{title}</h2>
+          <h2 id={titleId} className="min-w-0 flex-1 text-[15px] font-semibold">{title}</h2>
           <button type="button" className="btn btn-sm btn-ghost" onClick={onClose} aria-label="Close">
             ✕
           </button>
         </div>
         <div className="flex-1 overflow-y-auto px-5 py-4">{children}</div>
       </div>
-    </div>
+    </dialog>
   );
 }
 

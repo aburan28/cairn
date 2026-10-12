@@ -16,7 +16,10 @@ export type PayoutPreview = {
 };
 
 export async function fetchPayoutPreview(base: string, objective: string): Promise<PayoutPreview> {
-  const response = await fetch(`${base}/payouts/${encodeURIComponent(objective)}`, { cache: "no-store" });
+  // The node matches record ids as raw path segments. The colon in sha256:
+  // is legal there; encoding it made every real attribution preview a 404.
+  const segment = encodeURIComponent(objective).replace(/%3A/gi, ":");
+  const response = await fetch(`${base}/payouts/${segment}`, { cache: "no-store" });
   if (!response.ok) throw new Error(`The node answered ${response.status} for payout attribution.`);
   const preview = (await response.json()) as PayoutPreview;
   if (!preview || preview.objective_id !== objective || !Array.isArray(preview.payees)

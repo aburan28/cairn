@@ -79,14 +79,18 @@ export default function Page() {
         </div>
       }
     >
-      <Task />
+      <SelectedTask />
     </Suspense>
   );
 }
 
-function Task() {
+function SelectedTask() {
   const params = useSearchParams();
   const id = params.get("id") ?? "";
+  return <Task key={id} id={id} />;
+}
+
+function Task({ id }: { id: string }) {
 
   const [base, setBase] = useState(NODE_URL);
   const [progress, setProgress] = useState<ProgressResponse | null>(null);
@@ -618,6 +622,18 @@ function CoverageStrip({
         with more. <span className="text-ink-2">Grey</span>: the unit ranges live workers report
         holding this epoch. {bins} bins.
       </p>
+      <Disclosure summary="Coverage details">
+        <h3 className="mb-2 text-[12px] font-medium">Bins with verified work</h3>
+        <ul className="mono grid grid-cols-2 gap-x-4 gap-y-1 text-[12px] sm:grid-cols-3">
+          {counts.map((count, index) => count > 0 ? <li key={index}>Bin {index}: {count} paid</li> : null)}
+        </ul>
+        {!counts.some((count) => count > 0) && <p className="text-[12px]">No paid elements yet.</p>}
+        <h3 className="mt-3 mb-2 text-[12px] font-medium">Live assignments this epoch</h3>
+        <ul className="mono flex flex-col gap-1 text-[12px]">
+          {assigned.map((range, index) => <li key={index}>{range.name}: bins {range.from}–{range.to}</li>)}
+        </ul>
+        {assigned.length === 0 && <p className="text-[12px]">No live assignment reported.</p>}
+      </Disclosure>
     </div>
   );
 }
