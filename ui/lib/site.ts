@@ -184,22 +184,28 @@ export function forgetResolvedNode(): void {
  * a node. That is not hypothetical for this site: `loadCheckpoint` already
  * carries a comment about Pages' HTML 404 being read as a node's own answer.
  */
-async function answers(base: string): Promise<boolean> {
+export async function nodeAnswers(base: string): Promise<boolean> {
+  const controller = new AbortController();
+  // A dead seed must not hold every page at "reading…" forever. Cover the
+  // body as well as the headers: a peer can send one and stall on the other.
+  const timer = setTimeout(() => controller.abort(), 3_000);
   try {
-    const response = await fetch(`${base}/health`, { cache: "no-store" });
+    const response = await fetch(`${base}/health`, { cache: "no-store", signal: controller.signal });
     if (!response.ok) return false;
     return (await response.text()).trim() === "ok";
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
 async function discoverNode(): Promise<string> {
   if (NODE_URL) return NODE_URL;
-  if (await answers("")) return "";
+  if (await nodeAnswers("")) return "";
   const protocol = typeof window === "undefined" ? "https:" : window.location.protocol;
   for (const seed of readableEndpoints(await loadSeeds(), protocol)) {
-    if (await answers(seed)) return seed;
+    if (await nodeAnswers(seed)) return seed;
   }
   return "";
 }
@@ -274,11 +280,8 @@ export async function loadObjectives(base?: string): Promise<Feed> {
       `${at || "this node"}/objectives`,
     );
     const objectives = body.objectives;
-    // A node with an empty log is a real answer, but showing a visitor nothing
-    // when a settled log ships in the repository helps no one.
-    if (objectives.length === 0) {
-      return { objectives: SNAPSHOT.objectives, live: false, origin: SNAPSHOT.source };
-    }
+    // An empty node is still a live answer. Replacing it with launch bounties
+    // contradicts this node's empty chain and suggests work is already posted.
     return { objectives, live: true, origin: at || "this node" };
   } catch (cause) {
     return {

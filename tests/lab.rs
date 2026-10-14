@@ -28,7 +28,7 @@ use std::time::Duration;
 use cairn::crypto::identity::Identity;
 use cairn::lab::api::{self, ExecRequest, Expect, Input};
 use cairn::lab::exec::{self, Preference};
-use cairn::lab::op::{Body, EntryRef, Member, Op, Outcome, Policy, Role};
+use cairn::lab::op::{Body, EntryRef, Field, Member, Op, Outcome, Policy, Role};
 use cairn::lab::state::{Conflict, State};
 use cairn::lab::store::Lab;
 use cairn::lab::sync::{self, Peer};
@@ -267,6 +267,214 @@ fn fresh_from(origin: &Lab, name: &str, ops: Vec<Op>) -> Lab {
 }
 
 // -- conflicts ----------------------------------------------------------------------------
+
+#[test]
+fn seven_writers_document_conflicts_are_not_returned_as_decided_fields() {
+    let people: Vec<Identity> = (20..27).map(id).collect();
+    let others: Vec<&Identity> = people.iter().skip(1).collect();
+    let mut origin = space("doc-seven", &people[0], &others, Policy::default());
+    let mut copies: Vec<Lab> = (0..7)
+        .map(|i| replica(&mut origin, &format!("doc-seven-{i}")))
+        .collect();
+    for (i, copy) in copies.iter_mut().enumerate() {
+        copy.append(
+            &people[i],
+            Body::Doc {
+                doc: "protocol".into(),
+                fields: vec![
+                    Field {
+                        key: "status".into(),
+                        value: cairn::canonical::Value::string(format!("proposal-{i}")),
+                        pred: Vec::new(),
+                    },
+                    Field {
+                        key: "benchmark".into(),
+                        value: cairn::canonical::Value::string("fixed-v1"),
+                        pred: Vec::new(),
+                    },
+                ],
+            },
+        )
+        .expect("concurrent fields");
+    }
+    for copy in &mut copies {
+        sync::sync(&mut origin, copy).expect("merge");
+    }
+    let state = State::of(&origin);
+    assert_eq!(state.docs["protocol"]["status"].len(), 7);
+    assert_eq!(state.docs["protocol"]["benchmark"].len(), 7);
+    let projection = state.doc("protocol").expect("doc");
+    assert!(
+        projection.get("status").is_none(),
+        "an unresolved status must not look like the protocol's decision: {projection:?}"
+    );
+    assert_eq!(
+        projection
+            .get("benchmark")
+            .and_then(cairn::canonical::Value::as_str),
+        Some("fixed-v1"),
+        "identical concurrent values remain usable"
+    );
+    assert_eq!(state.conflicts().len(), 1);
+
+    let mut rng = Lcg(7);
+    let mut shuffled = origin.ops().to_vec();
+    rng.shuffle(&mut shuffled);
+    shuffled.extend(origin.ops().iter().cloned());
+    let reordered = fresh_from(&origin, "doc-seven-reordered", shuffled);
+    assert_eq!(State::of(&reordered).doc("protocol"), Some(projection));
+
+    let seen = state.docs["protocol"]["status"]
+        .iter()
+        .map(|v| v.version.entry.clone())
+        .collect();
+    origin
+        .append(
+            &people[0],
+            Body::Doc {
+                doc: "protocol".into(),
+                fields: vec![Field {
+                    key: "status".into(),
+                    value: cairn::canonical::Value::string("approved"),
+                    pred: seen,
+                }],
+            },
+        )
+        .expect("resolve all seven proposals");
+    let resolved = State::of(&origin);
+    assert!(resolved.conflicts().is_empty());
+    assert_eq!(
+        resolved
+            .doc("protocol")
+            .expect("doc")
+            .get("status")
+            .and_then(cairn::canonical::Value::as_str),
+        Some("approved")
+    );
+}
+
+#[test]
+fn seven_writers_run_inputs_are_refused_before_any_environment_or_process_is_used() {
+    let people: Vec<Identity> = (30..37).map(id).collect();
+    let others: Vec<&Identity> = people.iter().skip(1).collect();
+    let mut origin = space("run-seven", &people[0], &others, Policy::default());
+    let mut copies: Vec<Lab> = (0..7)
+        .map(|i| replica(&mut origin, &format!("run-seven-{i}")))
+        .collect();
+    for (i, copy) in copies.iter_mut().enumerate() {
+        write(copy, &people[i], "solver/run.py", &format!("print({i})\n"));
+    }
+    for copy in &mut copies {
+        sync::sync(&mut origin, copy).expect("merge");
+    }
+    assert_eq!(State::of(&origin).files["solver/run.py"].len(), 7);
+    let before = origin.len();
+    let marker = temp("must-not-run");
+    for prefix in ["solver/run.py", "solver", "solver/", ""] {
+        let mut request = ExecRequest::new(
+            "not-imported",
+            vec!["touch".into(), marker.display().to_string()],
+        );
+        request.inputs.push(Input {
+            prefix: prefix.into(),
+            target: "/work".into(),
+        });
+        let error = api::exec(&mut origin, &people[0], &request).expect_err("ambiguous input");
+        assert!(
+            matches!(&error, LabError::Refused(message) if message.contains("solver/run.py")),
+            "the conflict must be refused before environment lookup or execution: {error}"
+        );
+        assert_eq!(origin.len(), before, "refusing an input must record no run");
+        assert!(!marker.exists(), "the command must never start");
+    }
+}
+
+#[test]
+fn a_document_deletion_concurrent_with_an_edit_is_not_a_decided_field() {
+    let alice = id(38);
+    let bob = id(39);
+    let mut a = space("doc-delete", &alice, &[&bob], Policy::default());
+    let mut b = replica(&mut a, "doc-delete-b");
+    for (lab, who, value) in [
+        (&mut a, &alice, cairn::canonical::Value::Null),
+        (&mut b, &bob, cairn::canonical::Value::string("approved")),
+    ] {
+        lab.append(
+            who,
+            Body::Doc {
+                doc: "protocol".into(),
+                fields: vec![Field {
+                    key: "status".into(),
+                    value,
+                    pred: Vec::new(),
+                }],
+            },
+        )
+        .expect("field");
+    }
+    sync::sync(&mut a, &mut b).expect("merge");
+    let state = State::of(&a);
+    assert_eq!(state.conflicts().len(), 1);
+    assert!(state.doc("protocol").expect("doc").get("status").is_none());
+}
+
+#[test]
+fn identical_input_versions_and_unrelated_conflicts_do_not_refuse_a_run() {
+    let alice = id(40);
+    let bob = id(41);
+    let mut a = space("input-scope", &alice, &[&bob], Policy::default());
+    let mut b = replica(&mut a, "input-scope-b");
+    for (lab, who) in [(&mut a, &alice), (&mut b, &bob)] {
+        write(lab, who, "solver/run.py", "print(1)\n");
+        write(lab, who, "solver-other.py", &who.submitter_id());
+    }
+    sync::sync(&mut a, &mut b).expect("merge");
+    let state = State::of(&a);
+    assert_eq!(state.files["solver/run.py"].len(), 2);
+    assert_eq!(state.conflicts().len(), 1);
+    assert_eq!(
+        state
+            .list_unambiguous("solver")
+            .expect("same content")
+            .len(),
+        1
+    );
+    for prefix in ["solver", "solver/", "solver/run.py"] {
+        let mut request = ExecRequest::new("not-imported", vec!["true".into()]);
+        request.inputs.push(Input {
+            prefix: prefix.into(),
+            target: "/work".into(),
+        });
+        assert!(
+            matches!(api::exec(&mut a, &alice, &request), Err(LabError::NotFound(message))
+                if message.contains("not-imported")),
+            "a valid input must pass preflight and reach environment lookup"
+        );
+    }
+}
+
+#[test]
+fn a_run_refuses_an_input_deletion_concurrent_with_an_edit() {
+    let alice = id(42);
+    let bob = id(43);
+    let mut a = space("input-delete", &alice, &[&bob], Policy::default());
+    write(&mut a, &alice, "solver/run.py", "print(1)\n");
+    let mut b = replica(&mut a, "input-delete-b");
+    api::delete_file(&mut a, &alice, "solver/run.py").expect("delete");
+    write(&mut b, &bob, "solver/run.py", "print(2)\n");
+    sync::sync(&mut a, &mut b).expect("merge");
+    let state = State::of(&a);
+    assert_eq!(state.conflicts().len(), 1);
+    let mut request = ExecRequest::new("not-imported", vec!["true".into()]);
+    request.inputs.push(Input {
+        prefix: "solver".into(),
+        target: "/work".into(),
+    });
+    assert!(
+        matches!(api::exec(&mut a, &alice, &request), Err(LabError::Refused(message))
+            if message.contains("solver/run.py"))
+    );
+}
 
 #[test]
 fn concurrent_edits_stay_visible_until_someone_who_saw_both_supersedes_them() {

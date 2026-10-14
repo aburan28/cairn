@@ -1,12 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   type FrontierMove,
   type ObjectiveResponse,
-  NODE_URL,
   ObjectiveNotFound,
   amount,
   fetchMoves,
@@ -20,13 +19,14 @@ import {
   Card,
   EmptyState,
   Hash,
+  LiveStamp,
   Note,
   PageHeader,
   Progress,
   SectionHeading,
   Skeleton,
 } from "@/components/ui";
-import { resolveNode } from "@/lib/site";
+import { useEvery, useNode } from "@/components/hooks";
 
 /**
  * One objective's frontier: the best verified result, and every result it
@@ -47,14 +47,21 @@ export default function Page() {
         </div>
       }
     >
-      <FrontierPage />
+      <SelectedFrontier />
     </Suspense>
   );
 }
 
-function FrontierPage() {
+function SelectedFrontier() {
   const params = useSearchParams();
   const id = params.get("id") ?? "";
+  return <FrontierPage key={id} id={id} />;
+}
+
+function FrontierPage({ id }: { id: string }) {
+  const base = useNode();
+  const inFlight = useRef(false);
+  const [readAt, setReadAt] = useState<Date | null>(null);
 
   const [objective, setObjective] = useState<ObjectiveResponse | null>(null);
   const [moves, setMoves] = useState<FrontierMove[] | null>(null);
@@ -64,37 +71,34 @@ function FrontierPage() {
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(
-    async (url: string) => {
-      if (!id) return;
+    async () => {
+      if (!id || base === null || inFlight.current) return;
+      inFlight.current = true;
       setLoading(true);
-      setError(null);
-      setNotFound(false);
       try {
-        const [obj, history] = await Promise.all([fetchObjective(id, url), fetchMoves(id, url)]);
+        const [obj, history] = await Promise.all([fetchObjective(id, base), fetchMoves(id, base)]);
         setObjective(obj);
         setMoves(history.moves);
         setProblems(history.problems);
+        setReadAt(new Date());
+        setError(null);
+        setNotFound(false);
       } catch (cause) {
-        setObjective(null);
-        setMoves(null);
-        setProblems([]);
         if (cause instanceof ObjectiveNotFound) {
           setNotFound(true);
         } else {
           setError(cause instanceof Error ? cause.message : String(cause));
         }
       } finally {
+        inFlight.current = false;
         setLoading(false);
       }
     },
-    [id],
+    [id, base],
   );
 
-  useEffect(() => {
-    void resolveNode().then((url) => {
-      void load(url);
-    });
-  }, [load]);
+  // History reads the log, so poll less often than the small objective list.
+  useEvery(load, 60, base !== null);
 
   if (!id) {
     return (
@@ -114,6 +118,12 @@ function FrontierPage() {
       <PageHeader crumb={{ href: "/objectives", label: "Objectives" }}
         title="Frontier"
         subtitle="The best verified result on this objective, and every result it displaced, in order."
+        actions={<>
+          <LiveStamp at={readAt} error={error} />
+          <button type="button" className="btn btn-sm" disabled={loading || base === null} onClick={() => void load()}>
+            {loading ? "Refreshing…" : "Refresh"}
+          </button>
+        </>}
       />
 
 
@@ -125,7 +135,7 @@ function FrontierPage() {
         )}
 
         {error && (
-          <Note title="could not read this objective" tone="bad">
+          <Note title={objective ? "Could not refresh the frontier; showing the last read" : "Could not read this objective"} tone="bad">
             {error}
           </Note>
         )}
@@ -168,7 +178,7 @@ function Detail({
     <>
       <Card className="card-pad flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-[15px] font-semibold">{record.goal}</h2>
+          <h2 className="min-w-0 text-[15px] font-semibold [overflow-wrap:anywhere]">{record.goal}</h2>
           <Badge tone="accent">{record.verifier?.kind ?? "?"}</Badge>
         </div>
 
@@ -176,7 +186,7 @@ function Detail({
           <div className="mb-1 text-[11px] tracking-wide text-ink-3 uppercase">
             statement — written by the funder, not checked
           </div>
-          <blockquote className="border-l-2 border-edge pl-3 text-[13px] leading-relaxed text-ink-2">
+          <blockquote className="border-l-2 border-edge pl-3 text-[13px] leading-relaxed text-ink-2 [overflow-wrap:anywhere]">
             {record.statement}
           </blockquote>
         </div>
@@ -251,9 +261,15 @@ function Detail({
       )}
 
       {!frontier && !objective.settlement && (
-        <EmptyState title="No claim yet.">
-          The frontier starts at the objective&rsquo;s baseline.
-        </EmptyState>
+        record.piecework ? (
+          <EmptyState title="Divided search" action={<Link href={`/task?id=${encodeURIComponent(objective.id)}`} className="btn">Open task progress</Link>}>
+            This challenge pays per verified piece. Task progress shows its payouts and contributors.
+          </EmptyState>
+        ) : (
+          <EmptyState title="Nothing settled yet.">
+            A result appears here when an accepted answer settles.
+          </EmptyState>
+        )
       )}
 
       {frontier && (

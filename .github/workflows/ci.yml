@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -14,11 +16,44 @@ permissions:
 # so every merged revision still gets a finished result.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 jobs:
-  rust:
+  changes:
+    # Stable job names below remain available to branch protection. A skipped
+    # job succeeds, so docs-only changes need only this small detector runner.
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      core: ${{ steps.scope.outputs.core }}
+      reference: ${{ steps.scope.outputs.reference }}
+      jail: ${{ steps.scope.outputs.jail }}
+      msrv: ${{ steps.scope.outputs.msrv }}
+      tla: ${{ steps.scope.outputs.tla }}
+      interop: ${{ steps.scope.outputs.interop }}
+      audit: ${{ steps.scope.outputs.audit }}
+      ui: ${{ steps.scope.outputs.ui }}
+      macos: ${{ steps.scope.outputs.macos }}
+      ios: ${{ steps.scope.outputs.ios }}
+      examples: ${{ steps.scope.outputs.examples }}
+      packaging: ${{ steps.scope.outputs.packaging }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - run: bash .github/scripts/test-ci-scope.sh
+      - id: scope
+        run: bash .github/scripts/ci-scope.sh
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          CI_HEAD_SHA: ${{ github.sha }}
+
+  rust:
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.core != 'false')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -198,7 +233,10 @@ jobs:
     # another language. Regenerating it from either Rust implementation would
     # turn the contract into a description of one program's behaviour, so
     # nothing regenerates it -- the reference reproduces it or fails.
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.reference != 'false')
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - run: cargo build --release --locked --manifest-path reference/rust/Cargo.toml
@@ -226,7 +264,10 @@ jobs:
     # host was Unavailable and every Lean verdict, for a `lean` named that way,
     # Reject; a pinned checker's scratch directory was mounted read-only; and
     # a test expected a refusal the jail never gave.
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.jail != 'false')
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -254,7 +295,10 @@ jobs:
     # An unchecked MSRV is a claim, not a fact, and downstream users are the
     # ones who find out. 1.75 was the original claim and was measurably false:
     # transitive deps need edition2024.
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.msrv != 'false')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.89.0
@@ -271,7 +315,10 @@ jobs:
     # status is not tolerated here: on a runner we control, "I could not check"
     # is a broken job. Locally it is a skip; the script never turns it into a
     # pass.
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.tla != 'false')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v6
@@ -293,7 +340,10 @@ jobs:
     # every id and every Merkle root, and each must be able to audit a log the
     # other produced. This is what catches a canonical-encoding drift before it
     # silently forks the network's identity scheme.
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.interop != 'false')
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -361,7 +411,10 @@ jobs:
     # project ships code that executes attacker-authored verifiers -- the
     # dependency tree is part of the sandbox boundary. `continue-on-error` is
     # spelled out so the intent survives someone "fixing" a red build.
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.audit != 'false')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     continue-on-error: false
     steps:
       - uses: actions/checkout@v7
@@ -379,7 +432,10 @@ jobs:
     # Node toolchain, and `cairn serve` renders the chain itself at
     # /chain.html with no build step -- ui/ is the richer client, not the only
     # one. See ui/README.md.
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.ui != 'false')
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       # v7. The inputs used here -- `node-version`, `cache`,
@@ -422,17 +478,16 @@ jobs:
     # compiler's exit status through, not even then: it packaged the binary an
     # earlier build had left in .build and printed "built".
     #
-    # On every push and pull request, as `ui` runs, rather than behind a
-    # gui/macos/** path filter. Nothing outside gui/macos goes into this build,
-    # but the compiler does: it is whichever Xcode the `macos-latest` image
-    # carries, and that changes without a commit here. Behind a filter, a break
-    # the toolchain caused would first go red on the next launcher PR, however
-    # much later, and read as that diff's fault.
+    # Runs for Swift and macOS packaging changes. The Xcode version is logged
+    # so an image-driven failure remains distinguishable from a source change.
     #
     # Warnings are not made fatal, for the same reason: a deprecation arriving
     # with a new SDK would fail pull requests that touched no Swift. What this
     # job catches is a compile that fails.
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.macos != 'false')
     runs-on: macos-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       # The compiler is the image's and is not pinned here, so the log names
@@ -456,19 +511,24 @@ jobs:
       - run: swift test --package-path gui/macos-app
 
   gui-ios:
-    # The iPhone reader, including Cairn.xcodeproj. Lives in ios-app.yml so
-    # a dispatch can compile the .app without waiting for rust. Same "every
-    # PR, not a path filter" argument as gui-macos: the compiler is the
-    # image's, and a toolchain break should go red here, not on the next
-    # Swift PR.
+    # Always call the reusable workflow to retain its `gui-ios / app` check
+    # name. Its Ubuntu no-op keeps that check successful without queueing a
+    # Mac when this diff does not touch the iOS reader.
+    needs: changes
+    if: always() && !cancelled()
     uses: ./.github/workflows/ios-app.yml
+    with:
+      run_build: ${{ needs.changes.result != 'success' || needs.changes.outputs.ios != 'false' }}
 
   examples:
     # Every example objective must pass schema validation and match its pinned
     # verifier hashes -- not only the ones the demo scripts happen to post.
     # Without this, an example nobody demos can rot into one the CLI rejects,
     # and a stale sha256 pin turns an open bounty into an unsatisfiable one.
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.examples != 'false')
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -549,11 +609,10 @@ jobs:
     # is older than the one on a developer's Mac and objects to things that one
     # lets through -- so "it linted here" was not evidence that it lints here.
     #
-    # On every pull request rather than behind a `packaging/**` filter, for the
-    # reason `gui-macos` gives: shellcheck is the image's, it changes without a
-    # commit here, and the break should go red now rather than on the next
-    # unrelated packaging change.
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.packaging != 'false')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       # The self-test skips the lint, with a note, where shellcheck is absent --

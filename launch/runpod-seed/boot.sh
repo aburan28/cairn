@@ -43,6 +43,45 @@ fi
 install -d -o cairn -g cairn -m 0750 /var/lib/cairn
 install -d -o cairn -g cairn -m 0755 /var/lib/cairn/public-seed
 
+# The bundle: the files an objective's pinned checkers live in. A node runs a
+# checker from the path the objective pins, resolved against --root, and hashes
+# the file against the pin first. --root defaults to the working directory, and
+# a container's is usually /, which holds none of the repository: a seed
+# started without a bundle answers every claim `unavailable` ("this node could
+# not check", never "rejected"), so nothing gets verified or paid. The
+# published log showed exactly that, 222 claims all answered
+#   cannot load checker: No such file or directory (os error 2)
+#   (/examples/certicom-ecdlp/checkers/ecc2k23_orbit_batch.py)
+# See launch/seed.service, "The bundle", for the long version.
+#
+# Taken from the same release as the binary, so the two agree. It needs no
+# checksum of its own: the node refuses any file that does not hash to the pin,
+# so a bad download costs liveness and cannot change what runs. A failed fetch
+# must not take the seed down either, since the log it holds and serves matters
+# more than the checks; the daemon says how many pins are unmet when it starts
+# (`verifier code: <n> servable, <m> unmet`).
+bundle=/var/lib/cairn/bundle
+install -d -o cairn -g cairn -m 0755 "$bundle"
+if curl -fsSL "https://github.com/aburan28/cairn/archive/refs/tags/v${ver}.tar.gz" \
+    | tar -xz -C "$bundle" --strip-components=1
+then
+  chown -R cairn:cairn "$bundle"
+else
+  log "bundle fetch failed; claims will answer unavailable until ${bundle} holds the repository"
+fi
+
+# A seed verifies objectives it did not write, so the code it now has the means
+# to run (the bundle, and anything a peer sends that hashes to a pin) runs
+# jailed or not at all: docs/configuration.md, "The two refusal switches".
+# Where the container cannot build the jail this fails closed, every claim
+# answers `unavailable`, and the daemon's startup line says `sandbox none`.
+# That is the old behaviour, not a new one; it is safe, and it is the
+# operator's call whether to relax it.
+export CAIRN_REQUIRE_SANDBOX=1
+if ! apt-get install -y -qq bubblewrap; then
+  log "bubblewrap did not install; claims will answer unavailable until a jail works"
+fi
+
 export CAIRN_DATA=/var/lib/cairn
 export CAIRN_LOG_LEVEL="${CAIRN_LOG_LEVEL:-info}"
 # Off while this pod is a seed: dialing the published list includes
@@ -70,7 +109,7 @@ cairn_loop() {
     # coincidence of --home.
     set +e
     runuser -u cairn --preserve-environment -- \
-      /usr/local/bin/cairn run --no-mcp \
+      /usr/local/bin/cairn --root "$bundle" run --no-mcp \
       --listen 0.0.0.0:9000 \
       --serve 0.0.0.0:8080
     code=$?

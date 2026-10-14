@@ -8,11 +8,57 @@
 #
 # On the seed host, with a release binary (it has the `ui` feature `run` needs):
 #
+#   sudo apt install python3 bubblewrap     # the checkers are Python; bwrap is the jail
 #   sudo useradd --system --home /var/lib/cairn --create-home cairn
 #   sudo install -m 755 cairn /usr/local/bin/cairn
+#   sudo -u cairn git clone --depth 1 https://github.com/aburan28/cairn \
+#        /var/lib/cairn/bundle                 # the --root below; see "The bundle"
 #   sudo install -m 644 seed.service /etc/systemd/system/cairn-seed.service
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now cairn-seed
+#
+# The bundle
+# ----------
+# A node runs an objective's pinned checker from a file it finds under --root,
+# and it hashes that file against the objective's pin before it runs a byte of
+# it. --root defaults to the working directory, which on this host holds the
+# identity, the log and the queue and none of the repository -- so a seed
+# started without one cannot load any checker and answers every claim
+# `unavailable`, which is "this node could not check", never "rejected". That
+# is not hypothetical: on 2026-10-11 the published log held 222 claims on the
+# ECC2K-23 piecework objective and every verdict was
+#   unavailable: cannot load checker: No such file or directory (os error 2)
+#   (/examples/certicom-ecdlp/checkers/ecc2k23_orbit_batch.py); no local copy
+#   of verifier code 0ba12ff6...
+# so nothing on the network had been checked, let alone paid.
+#
+# Two things to know about the directory:
+#
+#  * It is only a source of files, not a trust anchor. A file that does not
+#    hash to the pin is refused (`InvalidSpec`), so a stale or tampered clone
+#    costs liveness and cannot make the seed run different code.
+#  * It must be writable by the service user: the node keeps the verifier code
+#    it is sent by peers under <root>/.cairn/blobs. It is under /var/lib/cairn
+#    on purpose, because ReadWritePaths below covers that tree and
+#    ProtectHome hides /home.
+#
+# A clone covers every checker that lives in this repository
+# (examples/certicom-ecdlp/checkers/ecc2k23_orbit_batch.py, ...). A checker
+# that does not -- the ECC2K-130 objective pins
+# challenges/ecc2k-130-23c4c5f3/checker.py, which is not in the repository --
+# has to be copied in under the same relative path by whoever has it, or
+# published to the node's blob store from a machine that does. Hash-check the
+# result with the line the daemon logs at start:
+#
+#   journalctl -u cairn-seed -n 200 | grep 'verifier code'
+#   verifier code: <n> servable, <m> unmet
+#
+# `unmet` is the number of pinned files this node cannot obtain. It should be 0;
+# anything above that is a claim someone can submit that this seed will answer
+# `unavailable` to.
+#
+# Update the clone when a checker lands in the repository:
+#   sudo -u cairn git -C /var/lib/cairn/bundle pull --ff-only
 #
 # then open 9000/tcp (p2p) and 8080/tcp (HTTP) inbound in the security group --
 # a group that does not admit them *drops* rather than refuses, so a closed
@@ -49,10 +95,20 @@ Environment=CAIRN_BEACON_PORT=off
 Environment=CAIRN_PORTMAP=off
 # What this node is for, on GET /network: it holds and serves the log.
 Environment=CAIRN_ROLES=relay
+# A seed verifies objectives it did not write, and the bundle above (plus any
+# code a peer sends that hashes to a pin) is code it will now run. Run it
+# jailed or not at all: with this set, a host that cannot build the jail
+# answers `unavailable` instead of executing the checker. See
+# docs/configuration.md, "The two refusal switches". The startup line
+# `verifiers: ... sandbox bwrap` confirms the jail works; `sandbox none` means
+# every claim will be answered `unavailable` until it does.
+Environment=CAIRN_REQUIRE_SANDBOX=1
+# --root is a global flag, so it goes before `run`; see "The bundle" above for
+# what it points at and why a seed without it verifies nothing.
 # --no-mcp: stdin belongs to systemd, and closing MCP's stdin stops the node.
 # The wildcard binds are the point of a seed; the HTTP half is public by design
 # and node-sync.yml reads it at port 8080.
-ExecStart=/usr/local/bin/cairn run --no-mcp \
+ExecStart=/usr/local/bin/cairn --root /var/lib/cairn/bundle run --no-mcp \
     --listen 0.0.0.0:9000 \
     --serve 0.0.0.0:8080
 Restart=always
