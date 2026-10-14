@@ -15,6 +15,16 @@ const preview: PayoutPreview = {
 };
 
 describe("external bounty preview", () => {
+  it("addresses the node with a literal digest prefix", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => String(url).endsWith("/payouts/sha256:example")
+      ? new Response(JSON.stringify(preview)) : new Response("unknown objective", { status: 404 });
+    try {
+      expect(await fetchPayoutPreview("http://127.0.0.1:52977", preview.objective_id)).toEqual(preview);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
   it("uses integer arithmetic and leaves unearned and rounded funds unallocated", () => {
     const result = quotePayouts(preview, "101");
     expect(result.rows.map((row) => row.amount)).toEqual([50n, 25n]);

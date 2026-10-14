@@ -64,8 +64,10 @@ const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 /** The list this site publishes, or an empty one. Never throws: a site with no
  *  seed list behaves exactly as it did before there was one. */
 export async function loadSeeds(url: string = `${BASE_PATH}/seeds.json`): Promise<SeedList> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3_000);
   try {
-    const response = await fetch(url, { cache: "no-store" });
+    const response = await fetch(url, { cache: "no-store", signal: controller.signal });
     if (!response.ok) return { version: 0, seeds: [] };
     const body = expectFields<SeedList>(await response.json(), ["seeds"], url);
     return {
@@ -75,6 +77,8 @@ export async function loadSeeds(url: string = `${BASE_PATH}/seeds.json`): Promis
     };
   } catch {
     return { version: 0, seeds: [] };
+  } finally {
+    clearTimeout(timer);
   }
 }
 

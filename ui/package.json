@@ -11,7 +11,8 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:browser": "node scripts/ux-smoke.mjs"
   },
   "dependencies": {
     "next": "^15.5.27",
@@ -22,6 +23,7 @@
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
+    "playwright": "^1.64.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.7.0",
     "vitest": "^4.1.11"
