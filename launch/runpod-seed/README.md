@@ -160,6 +160,38 @@ curl -fsS "http://IP:KEY_PORT/entry.txt"    # transport=<64 hex>
 Port 8090 is reached by IP because the key download happens before you
 need the name. p2p and the node HTTP port are what the hostname is for.
 
+`ok` says the node is up. It does not say the node can **verify**, and a
+seed that cannot answers `ok` all the same: it relays the log and answers
+every claim `unavailable`. `boot.sh` therefore fetches the repository at the
+pinned release into `/var/lib/cairn/bundle` and starts the node with
+`--root` pointing at it, because a node runs an objective's pinned checker
+from a path under `--root` (default: the working directory, which in a
+container is usually `/`). If that download fails the seed stays up, says so in the
+pod log, and verifies nothing until the directory is filled. Because that
+makes the pod able to run checker code, `boot.sh` also installs `bubblewrap`
+and sets `CAIRN_REQUIRE_SANDBOX=1` (docs/configuration.md says to on any node
+that verifies objectives it did not write), so a pod that cannot build the jail
+answers `unavailable` rather than running it unconfined. Whether a Runpod
+container permits unprivileged user namespaces is not something this
+repository can promise: read `verifiers: ... sandbox <bwrap|none>` in the pod
+log after the first start. Two ways to see it from where you are:
+
+```sh
+# every verdict in the log, and how many of them were "could not check"
+curl -fsS "http://HOST:HTTP_PORT/log" | grep -c '"kind":"verdict"'
+curl -fsS "http://HOST:HTTP_PORT/log" | grep -c '"status":"unavailable"'
+
+# in the pod log, once per start: the second number should be 0
+#   verifier code: <n> servable, <m> unmet
+```
+
+The bundle is a clone of this repository, so it covers the checkers that
+live here. An objective that pins a checker that does not (the ECC2K-130
+objective pins `challenges/ecc2k-130-23c4c5f3/checker.py`) counts as
+`unmet` until that file is put in the same relative path under the bundle,
+or published to the node's blob store with `cairn blob publish` from a
+machine that has it.
+
 ## Publish
 
 `launch/runpod-seed/out/` (gitignored) holds `<transport>.key` and
