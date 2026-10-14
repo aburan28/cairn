@@ -130,6 +130,16 @@ than left for a reader to negate. `settlement` is `{claim_id, submitter,
 reward}` for a settled certificate and `null` otherwise -- a ratchet's payouts
 are many, and `frontier.paid_cumulative` carries them.
 
+`GET /payouts/{objective_id}` is a read-only attribution preview for an
+external bounty. It lists each contributor identity and its earned units as
+decimal strings, using the full log's settlement weights even when the
+displayed objective is only one part of that log. The reader's External
+bounties page can illustrate an outside-asset split with integer arithmetic.
+It does not attest that an external bounty was deposited, that a receiving
+address belongs to an identity, or that a transfer happened. An actual escrow
+and address binding remain the separate phases in
+[external-payouts.md](design/external-payouts.md).
+
 ## Progress: what a search looks like while it runs
 
 A piecework objective pays for a search that takes a fleet months, and the

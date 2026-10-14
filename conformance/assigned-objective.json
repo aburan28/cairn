@@ -1,0 +1,19 @@
+{
+  "_comment": "Independent assigned-objective vector: canonical text and SHA-256 calculated with Python json.dumps(sort_keys=True, separators=(comma, colon), ensure_ascii=False) and hashlib.sha256. Frozen vectors.json is unchanged.",
+  "canonical": "{\"assignee\":\"31debe55d37c722768b137131caa6087080b2e0b60b94bd785d14575cfa498bc\",\"created_at\":\"2026-07-28T00:00:00+00:00\",\"deadline\":\"2026-07-28T00:00:00+00:00\",\"funder\":\"treasury\",\"goal\":\"assigned-research\",\"reward\":0,\"statement\":\"Deliver one metered research assignment\",\"type\":\"objective\",\"verifier\":{\"kind\":\"lean\",\"statement\":\"theorem assigned : True\"}}",
+  "id": "sha256:64b34b8780a101a6014e889eae0823bc1f5d5606c358dd2f4051f2d59680dc15",
+  "record": {
+    "assignee": "31debe55d37c722768b137131caa6087080b2e0b60b94bd785d14575cfa498bc",
+    "created_at": "2026-07-28T00:00:00+00:00",
+    "deadline": "2026-07-28T00:00:00+00:00",
+    "funder": "treasury",
+    "goal": "assigned-research",
+    "reward": 0,
+    "statement": "Deliver one metered research assignment",
+    "type": "objective",
+    "verifier": {
+      "kind": "lean",
+      "statement": "theorem assigned : True"
+    }
+  }
+}

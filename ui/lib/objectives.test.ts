@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type Objective, type Ratchet, overspent, poolFraction, ratchetProgress } from "./objectives";
+import { type Objective, type Ratchet, overspent, paidOut, poolFraction, ratchetProgress, remainingPool } from "./objectives";
 
 const objective = (reward: number, paid: number, remaining: number): Objective => ({
   id: "sha256:o",
@@ -41,6 +41,9 @@ describe("overspent", () => {
 });
 
 describe("poolFraction", () => {
+  it("includes a divided search's remaining pool", () => {
+    expect(poolFraction(piecework())).toBe(0.6);
+  });
   it("is the remaining pool against what was funded", () => {
     expect(poolFraction(objective(1_000, 250, 750))).toBe(0.75);
   });
@@ -52,6 +55,44 @@ describe("poolFraction", () => {
   it("is null with no frontier or no reward", () => {
     expect(poolFraction({ ...objective(1_000, 0, 0), frontier: undefined })).toBeNull();
     expect(poolFraction(objective(0, 0, 0))).toBeNull();
+  });
+});
+
+const piecework = (): Objective => ({
+  ...objective(1_000, 0, 0),
+  frontier: undefined,
+  piecework: { unit_price: 10, paid_units: 40, paid_total: 400, pool_remaining: 600 },
+});
+
+describe("objective payment summaries", () => {
+  it("reads each payment mode's published standing", () => {
+    const certificate = { ...objective(1_000, 0, 0), frontier: undefined,
+      settled: true, open: false,
+      settlement: { claim_id: "sha256:c", submitter: "alice", reward: 1_000 } };
+    const open = { ...certificate, settled: false, open: true, settlement: null };
+    const rows = [certificate, objective(1_000, 250, 750), piecework(), open];
+    expect(rows.map(paidOut)).toEqual([1_000, 250, 400, 0]);
+    expect(rows.map(remainingPool)).toEqual([0, 750, 600, 1_000]);
+    expect(rows.reduce((total, row) => total + paidOut(row), 0)).toBe(1_650);
+    expect(rows.reduce((total, row) => total + remainingPool(row), 0)).toBe(2_350);
+  });
+
+  it("does not invent a remaining reward when a divided search is exhausted", () => {
+    const row = piecework();
+    row.piecework!.paid_total = 1_000;
+    row.piecework!.pool_remaining = 0;
+    row.settled = true;
+    row.open = false;
+    expect(paidOut(row)).toBe(1_000);
+    expect(remainingPool(row)).toBe(0);
+    expect(poolFraction(row)).toBe(0);
+  });
+
+  it("flags an over-accounted divided search as well as a ratchet", () => {
+    const row = piecework();
+    expect(overspent(row)).toBe(false);
+    row.piecework!.pool_remaining = 601;
+    expect(overspent(row)).toBe(true);
   });
 });
 

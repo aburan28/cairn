@@ -42,6 +42,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::op::{Body, EntryRef, Outcome, PathMode, Policy, Role};
 use super::store::{order_key, Bits, Lab, Roster};
+use super::LabError;
 use crate::canonical::Value;
 
 /// When and by whom an entry was written.
@@ -462,6 +463,30 @@ impl State {
             .collect()
     }
 
+    /// The live files under `prefix`, refusing any unresolved input conflict.
+    ///
+    /// [`State::list`] selects checkout winners so a person can inspect the
+    /// space. Execution must not turn that display choice into an algorithm
+    /// choice. Identical blobs from multiple writers are still one value;
+    /// a deletion concurrent with content is a conflict too.
+    pub fn list_unambiguous(&self, prefix: &str) -> Result<Vec<(&str, &FileValue)>, LabError> {
+        for (path, values) in &self.files {
+            if !prefix.is_empty() && !under(path, prefix) {
+                continue;
+            }
+            if let Some(first) = values.first() {
+                if values.iter().any(|value| value.blob != first.blob) {
+                    return Err(LabError::Refused(format!(
+                        "input {path:?} has unresolved concurrent versions; resolve it with \
+                         `cairn lab resolve` or publish the chosen variant under a separate \
+                         path before running"
+                    )));
+                }
+            }
+        }
+        Ok(self.list(prefix))
+    }
+
     /// Every register holding more than one distinct value.
     pub fn conflicts(&self) -> Vec<Conflict> {
         let mut out = Vec::new();
@@ -531,14 +556,14 @@ impl State {
             .collect()
     }
 
-    /// The doc fields with exactly one current value, as a plain object;
+    /// The doc fields with exactly one distinct current value, as a plain object;
     /// conflicted fields are left out and listed by [`State::conflicts`].
     pub fn doc(&self, doc: &str) -> Option<Value> {
         let keys = self.docs.get(doc)?;
         let mut map = BTreeMap::new();
         for (key, values) in keys {
             if let Some(first) = values.first() {
-                if !first.value.is_null() {
+                if !first.value.is_null() && values.iter().all(|v| v.value == first.value) {
                     map.insert(key.clone(), first.value.clone());
                 }
             }

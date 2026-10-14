@@ -1,0 +1,28 @@
+{
+  "artifact_schema": {
+    "additionalProperties": false,
+    "description": "The unique discrete logarithm k of the deterministic secp256k1 target relative to the SEC 2 generator.",
+    "properties": {
+      "k": {
+        "description": "k with [k]G = Q, zero-padded to exactly 64 lowercase hexadecimal characters.",
+        "maxLength": 64,
+        "minLength": 64,
+        "type": "string"
+      }
+    },
+    "required": ["k"],
+    "type": "object"
+  },
+  "created_at": "2026-10-10T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-secp256k1-full-dlog",
+  "reward": 40960000000,
+  "statement": "Solve one full-order secp256k1 discrete logarithm: find the unique scalar k in [1,n) such that [k]G = Q. Q is deterministically derived inside the pinned verifier by SHA-256 try-and-increment from the fixed public seed `cairn/crypto-goals/secp256k1/full-dlog/v1`; the target is never created as a known scalar multiple. Submit k as exactly 64 lowercase hexadecimal characters. The curve, generator, and prime subgroup order are the SEC 2 secp256k1 parameters. Finding a logarithm is believed to require generic work on the order of 2^128 group operations, while the checker verifies a proposed answer with a few scalar multiplications. This is a long-horizon cryptographic frontier objective, not an expectation of near-term settlement. Cairn's reward is a notional Stage 0 amount and does not represent a funded external prize.",
+  "verifier": {
+    "checker": "examples/crypto-goals/secp256k1-dlog/checkers/secp256k1_dlog.py",
+    "checker_sha256": "d7118cabdb3c42fd8492a34b7b68357e8881d12771252c32b6a203e6e2085646",
+    "entrypoint": "check",
+    "kind": "certificate",
+    "timeout_seconds": 30
+  }
+}

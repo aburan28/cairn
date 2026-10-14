@@ -104,7 +104,7 @@ export default function Page() {
 function Coordination() {
   const params = useSearchParams();
   const id = params.get("id") ?? "";
-  return id ? <Search id={id} /> : <Overview />;
+  return id ? <Search key={id} id={id} /> : <Overview />;
 }
 
 // -- the overview: launch, and what is running ------------------------------------
@@ -419,6 +419,7 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
 // -- one search ---------------------------------------------------------------------
 
 function Search({ id }: { id: string }) {
+  const requestVersion = useRef(0);
   const base = useNode();
   const [partitions, setPartitions] = useState<number>(16);
   const [assignment, setAssignment] = useState<Assignment | null>(null);
@@ -431,6 +432,8 @@ function Search({ id }: { id: string }) {
 
   const load = useCallback(async () => {
     if (base === null) return;
+    const version = ++requestVersion.current;
+    let missingLeases = false;
     try {
       // The assignment is asked for as a reader -- the name is immaterial,
       // the answer is a pure function -- and the leases route may be newer
@@ -440,19 +443,22 @@ function Search({ id }: { id: string }) {
         fetchProgress(id, base),
         fetchLeases(id, base).catch((cause: unknown) => {
           if (cause instanceof RouteMissing) {
-            setLeasesMissing(true);
+            missingLeases = true;
             return null;
           }
           throw cause;
         }),
       ]);
+      if (version !== requestVersion.current) return;
       setAssignment(nextAssignment);
       setProgress(nextProgress);
       setLeases(nextLeases);
+      setLeasesMissing(missingLeases);
       setReadAt(new Date());
       setError(null);
       setNotFound(false);
     } catch (cause) {
+      if (version !== requestVersion.current) return;
       if (cause instanceof ObjectiveNotFound) setNotFound(true);
       else setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -769,7 +775,7 @@ function PartitionStrip({ cells, partitions }: { cells: PartitionCell[]; partiti
             cell.holders.length === 0 ? "bg-surface-3" : cell.holders.length === 1 ? "bg-accent/70" : "bg-ink-2/70";
           const ring = cell.leased.length > 0 ? "ring-2 ring-inset ring-accent" : "";
           const title = [
-            `slice ${cell.index}: pieces ${cell.first.toLocaleString("en-US")}–${cell.end.toLocaleString("en-US")}`,
+            cell.end > cell.first ? `slice ${cell.index}: pieces ${cell.first.toLocaleString("en-US")}–${(cell.end - 1).toLocaleString("en-US")}` : `slice ${cell.index}: no pieces`,
             cell.holders.length > 0 ? `on it: ${cell.holders.join(", ")}` : "nobody on it",
             cell.leased.length > 0 ? `task taken by ${cell.leased.join(", ")}` : "",
           ]
@@ -780,8 +786,26 @@ function PartitionStrip({ cells, partitions }: { cells: PartitionCell[]; partiti
       </div>
       <p className="text-[11px] text-ink-3">
         <span className="text-accent">Green</span>: one machine on it. <span className="text-ink-2">Dark</span>: more
-        than one. Light: nobody yet. Ringed: a machine has taken it as a task. Hover for names.
+        than one. Light: nobody yet. Ringed: a machine has taken it as a task. Open slice details for ranges and names.
       </p>
+      <Disclosure summary="Slice details">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[30rem] text-left text-[12px]">
+            <thead><tr className="border-b border-edge">
+              <th scope="col" className="px-2 py-2">Slice</th>
+              <th scope="col" className="px-2 py-2">Pieces (inclusive)</th>
+              <th scope="col" className="px-2 py-2">Machines reporting</th>
+              <th scope="col" className="px-2 py-2">Task leases</th>
+            </tr></thead>
+            <tbody>{cells.map((cell) => <tr key={cell.index} className="border-b border-edge">
+              <th scope="row" className="mono px-2 py-2 font-normal">{cell.index}</th>
+              <td className="mono px-2 py-2">{cell.end > cell.first ? `${cell.first.toLocaleString("en-US")}–${(cell.end - 1).toLocaleString("en-US")}` : "No pieces"}</td>
+              <td className="mono px-2 py-2">{cell.holders.join(", ") || "Nobody"}</td>
+              <td className="mono px-2 py-2">{cell.leased.join(", ") || "None"}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      </Disclosure>
     </div>
   );
 }

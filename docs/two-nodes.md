@@ -208,6 +208,14 @@ the site's `/node/` mirror goes green on the first five-minute run after it
 answers. Nothing in this repository can restart it; a `nc -vz` from somewhere
 else is the test.
 
+A seed that answers is not yet a seed that verifies. The node runs each
+objective's pinned checker from a path under `--root`, which defaults to the
+working directory, so a seed started without a copy of the repository there
+(`launch/seed.service` and `launch/runpod-seed/` now pass one) answers
+`/health` with `ok` and every claim with `unavailable`. The first is not
+evidence of the second: count the `unavailable` verdicts in its `/log`, or
+read `verifier code: <n> servable, <m> unmet` in its startup output.
+
 ## What the fields mean, read together
 
 | `external.status` | `inbound_from_public_at` | the Network page says |
