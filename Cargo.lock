@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "cairn"
-version = "9.0.0"
+version = "9.1.0"
 dependencies = [
  "argon2",
  "bls12_381",
