@@ -1,5 +1,18 @@
 # Changelog
 
+## [9.1.0](https://github.com/aburan28/cairn/compare/v9.0.0...v9.1.0) (2026-10-14)
+
+
+### Features
+
+* **examples:** add Certicom ECC2-131 challenge ([#289](https://github.com/aburan28/cairn/issues/289)) ([cfb8a60](https://github.com/aburan28/cairn/commit/cfb8a60c455bfee1031eaeab2c4b6e173fea480c))
+* **ui:** add resource sharing and challenge scheduling ([#298](https://github.com/aburan28/cairn/issues/298)) ([c538ba7](https://github.com/aburan28/cairn/commit/c538ba72ef190c4d3a750f0c8055dc832ac22f34))
+
+
+### Fixes
+
+* **launch:** give both seed deployments a bundle root and a verifier jail ([5a58ec3](https://github.com/aburan28/cairn/commit/5a58ec31d04913941bdc0fa137678a6f9ee11244))
+
 ## [9.0.0](https://github.com/aburan28/cairn/compare/v8.0.0...v9.0.0) (2026-10-12)
 
 
