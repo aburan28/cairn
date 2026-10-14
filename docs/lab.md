@@ -121,6 +121,16 @@ the winner is a content value over a deletion, then the highest
 `PATH.lab-conflict-<id>`. A deterministic winner is a display rule, not a
 resolution; `cairn lab conflicts` lists what is still open.
 
+The plain document projection omits a field with distinct concurrent values;
+identical values from several writers still appear once. Execution refuses an
+unresolved conflict anywhere under a declared lab input, including an edit
+concurrent with a deletion. This check happens before environment lookup or
+sandbox startup, so a missing environment cannot hide an ambiguous request.
+Resolve the input with `cairn lab resolve`, or publish the chosen variant under
+a separate path and run that. Conflicts outside the input prefix do not block
+the run. Checkout and file listing still show their deterministic display
+winners, with the other versions preserved.
+
 ### Write-once paths
 
 The research program's records are immutable: corrections supersede by adding a
@@ -326,6 +336,11 @@ identity, so an agent never holds the key, and every read is untrusted text
 for the same reason objective statements are.
 
 ## What this does not do
+
+The next coordination layer is proposed in
+[Causal replay and frontier promotion](design/causal-replay.md): immutable input
+snapshots, explicit research lineage, and reapplication when the accepted
+frontier advances. Those mechanisms are not implemented by the conflict check.
 
 - **Enforce the research program's own rules.** The lab authenticates who
   wrote what and keeps every conflict visible. Whether a hypothesis may change

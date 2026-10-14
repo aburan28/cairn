@@ -20,6 +20,7 @@ import { type LogRecord, fetchLog } from "@/lib/log";
 import { type LogEvent, eventsFor, indexObjectives } from "@/lib/events";
 import { following, onFollowingChange } from "@/lib/follow";
 import { goalSlug, objectiveTitle } from "@/lib/title";
+import { paidOut } from "@/lib/objectives";
 import { EventRow } from "@/components/events";
 import { useNode } from "@/components/hooks";
 import { type NetworkResponse, fetchNetwork, primaryRole } from "@/lib/network";
@@ -80,13 +81,7 @@ export default function Page() {
   // record exists", which a ratchet satisfies from its first paid slice.
   const open = objectives.filter((o) => o.open);
   const pool = objectives.reduce((sum, o) => sum + o.reward, 0);
-  // A ratchet's payouts are summed in its frontier and its `settlement` is
-  // null; a certificate has no frontier and one `settlement`. Adding both
-  // therefore never counts a payment twice, and leaving either out did.
-  const paid = objectives.reduce(
-    (sum, o) => sum + (o.frontier?.paid_cumulative ?? 0) + (o.settlement?.reward ?? 0),
-    0,
-  );
+  const paid = objectives.reduce((sum, o) => sum + paidOut(o), 0);
 
   // While a request is in flight the page shows the snapshot, and says
   // "reading…" rather than labelling it as the snapshot: the label is a claim

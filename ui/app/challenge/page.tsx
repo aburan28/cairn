@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { type Objective, loadObjective, progress, resolveNode, short, units } from "@/lib/site";
+import { type Objective, loadObjective, progress, short, units } from "@/lib/site";
+import { paidOut, remainingPool } from "@/lib/objectives";
+import { useEvery, useNode } from "@/components/hooks";
 import { type Participant, ago, eventsFor, indexObjectives, participants } from "@/lib/events";
 import { type LogRecord, fetchLog } from "@/lib/log";
 import { type ProgressResponse, fetchProgress } from "@/lib/progress";
@@ -18,6 +20,8 @@ import {
   Badge,
   Box,
   Hash,
+  LiveStamp,
+  Note,
   PageHeader,
   Progress,
   Skeleton,
@@ -46,35 +50,55 @@ export default function Page() {
         </div>
       }
     >
-      <Challenge />
+      <SelectedChallenge />
     </Suspense>
   );
 }
 
-function Challenge() {
+function SelectedChallenge() {
   const params = useSearchParams();
   const id = params.get("id") ?? "";
+  return <Challenge key={id} id={id} />;
+}
+
+function Challenge({ id }: { id: string }) {
   const [objective, setObjective] = useState<Objective | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "missing">("loading");
   const [live, setLive] = useState(false);
   const [origin, setOrigin] = useState("");
-  const [base, setBase] = useState<string | null>(null);
+  const base = useNode();
+  const inFlight = useRef(false);
+  const [readAt, setReadAt] = useState<Date | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [followed, setFollowed] = useState(false);
 
-  useEffect(() => {
+  const load = useCallback(async () => {
     if (!id) {
       setState("missing");
       return;
     }
-    void resolveNode().then(async (url) => {
-      setBase(url);
-      const r = await loadObjective(id, url);
+    if (base === null || inFlight.current) return;
+    inFlight.current = true;
+    try {
+      const r = await loadObjective(id, base);
+      // A failed refresh must not replace a node's frontier with the older
+      // launch snapshot while the page still advertises itself as live.
+      if (live && !r.live) {
+        setError("Could not refresh this node. Showing the last successful read; retry before choosing what to cite.");
+        return;
+      }
       setObjective(r.objective);
       setLive(r.live);
       setOrigin(r.origin);
       setState(r.objective ? "ready" : "missing");
-    });
-  }, [id]);
+      setReadAt(r.live ? new Date() : null);
+      setError(null);
+    } finally {
+      inFlight.current = false;
+    }
+  }, [id, base, live]);
+
+  useEvery(load, 20, base !== null);
 
   useEffect(() => {
     if (!id) return;
@@ -120,8 +144,8 @@ function Challenge() {
   const verifier = objective.record?.verifier ?? {};
   const checker = text(verifier.checker) ?? text(verifier.evaluator);
   const checkerHash = text(verifier.checker_sha256) ?? text(verifier.evaluator_sha256);
-  const paid = frontier?.paid_cumulative ?? objective.settlement?.reward ?? 0;
-  const remaining = frontier?.pool_remaining ?? (objective.settled ? 0 : objective.reward);
+  const paid = paidOut(objective);
+  const remaining = remainingPool(objective);
   const slug = goalSlug(objective.goal);
 
   return (
@@ -140,21 +164,30 @@ function Challenge() {
           </>
         }
         actions={
-          <button
-            type="button"
-            className={`btn btn-sm ${followed ? "btn-primary" : ""}`}
-            aria-pressed={followed}
-            title={
-              followed
-                ? "Stop following. This only changes this browser."
-                : "Keep this page's activity live, and list it on the Overview. Stored in this browser only."
-            }
-            onClick={() => setFollowed(setFollowing(objective.id, !followed))}
-          >
-            {followed ? "Following" : "Follow"}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {live && <LiveStamp at={readAt} error={error} />}
+            <button type="button" className="btn btn-sm" onClick={() => void load()}>Refresh</button>
+            <Link href={`/payouts?id=${encodeURIComponent(objective.id)}`} className="btn btn-sm btn-ghost">
+              External bounty split
+            </Link>
+            <button
+              type="button"
+              className={`btn btn-sm ${followed ? "btn-primary" : ""}`}
+              aria-pressed={followed}
+              title={
+                followed
+                  ? "Stop following. This only changes this browser."
+                  : "Keep this page's activity live, and list it on the Overview. Stored in this browser only."
+              }
+              onClick={() => setFollowed(setFollowing(objective.id, !followed))}
+            >
+              {followed ? "Following" : "Follow"}
+            </button>
+          </div>
         }
       />
+
+      {error && <div className="mb-4"><Note title="This challenge could not be refreshed" tone="bad">{error}</Note></div>}
 
       <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
         <Stat label="Bounty" value={units(ratchet?.reward ?? objective.reward)} tone="accent" />
@@ -168,7 +201,7 @@ function Challenge() {
           <Stat
             label="Status"
             value={objective.settled ? "Settled" : "Open"}
-            from={objective.settled ? "nothing left to win" : "first accepted answer wins"}
+            from={objective.settled ? "nothing left to win" : objective.piecework ? "paid per new verified piece" : "first accepted answer wins"}
           />
         )}
         <Stat label="Paid out" value={units(paid)} tone="accent" />
@@ -452,12 +485,9 @@ function Activity({
   }, [base, id]);
 
   useEffect(() => {
-    if (!live) return;
-    void refresh();
-    if (!followed) return;
-    const timer = setInterval(() => void refresh(), FOLLOW_REFRESH_MS);
-    return () => clearInterval(timer);
+    if (live && !followed) void refresh();
   }, [live, followed, refresh]);
+  useEvery(refresh, FOLLOW_REFRESH_MS / 1000, live && followed);
 
   const index = useMemo(() => indexObjectives([objective]), [objective]);
   const events = useMemo(

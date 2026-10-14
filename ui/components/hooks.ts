@@ -60,11 +60,56 @@ export function useEvery(read: () => void | Promise<void>, seconds: number, enab
       }
     };
     void latest.current();
-    start();
+    if (document.visibilityState === "visible") start();
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       if (timer) clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [seconds, enabled, key]);
+}
+
+/** Native modal dialogs make the background inert and return focus to the
+ * opener. Share the scroll lock too, so a touch gesture cannot move the page
+ * beneath a contribution sheet or command palette. */
+export function useModalDialog() {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const element = dialog.current;
+    if (!element) return;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const overflow = document.documentElement.style.overflow;
+    element.showModal();
+    document.documentElement.style.overflow = "hidden";
+    // At either end Chromium can send Tab to browser chrome. Wrap inside
+    // the panel so returning from a field is predictable in the native app
+    // as well, where there is no address bar to receive that focus.
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const controls = [...element.querySelectorAll<HTMLElement>("a[href], button, input, select, textarea, [tabindex]")]
+        .filter((control) => control.tabIndex >= 0 && !control.matches(":disabled") && control.getClientRects().length > 0);
+      const first = controls[0];
+      const last = controls.at(-1);
+      if (!first) {
+        event.preventDefault();
+        element.focus();
+      } else if (event.shiftKey && (document.activeElement === first || document.activeElement === element)) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    element.addEventListener("keydown", onKey);
+    return () => {
+      element.removeEventListener("keydown", onKey);
+      element.close();
+      // React removes a dialog before passive cleanup runs; at that point
+      // the browser's automatic focus restoration has already lost it.
+      if (opener?.isConnected) opener.focus({ preventScroll: true });
+      document.documentElement.style.overflow = overflow;
+    };
+  }, []);
+  return dialog;
 }
