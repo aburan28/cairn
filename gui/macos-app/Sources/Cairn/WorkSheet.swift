@@ -2,8 +2,9 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Node → Work on This Mac…: put this Mac to work on one objective with a
-/// solver of your own, without a terminal.
+/// Node → Share this Mac…: choose an objective first, then put this Mac to
+/// work. The solver is an advanced escape hatch because the protocol still
+/// needs a search program for objectives that do not ship one.
 ///
 /// The fields are `cairn work`'s flags and nothing else, so what this sheet
 /// starts is exactly what the Contribute page used to print for a terminal.
@@ -52,7 +53,7 @@ struct WorkSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label("Work on this Mac", systemImage: "cpu").font(.headline)
+            Label("Share this Mac", systemImage: "cpu").font(.headline)
             Text("Choose an objective and the resources this Mac may use. Cairn assigns a new slice each round and keeps pending answers moving while paused or stopping. The objective's checker decides what is paid.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -115,22 +116,15 @@ struct WorkSheet: View {
     private var form: some View {
         Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 10) {
             GridRow {
-                Text("Node").gridColumnAlignment(.trailing)
-                TextField("http://host:port", text: $address)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.body.monospaced())
-                    .disabled(worker.isRunning)
-            }
-            GridRow {
-                Text("Objective").gridColumnAlignment(.trailing)
+                Text("Challenge").gridColumnAlignment(.trailing)
                 HStack {
-                    Picker("Objective", selection: $objective) {
+                    Picker("Challenge", selection: $objective) {
                         if objectives.isEmpty {
-                            Text(loadingObjectives ? "Reading the node…" : "No open objective on that node").tag("")
+                            Text(loadingObjectives ? "Reading open challenges…" : "No open challenges on this node").tag("")
                         } else {
-                            Text("Choose…").tag("")
+                            Text("Choose a challenge…").tag("")
                             ForEach(objectives) { o in
-                                Text(o.title).tag(o.id)
+                                Text("\(o.title) · \(o.workerLabel)").tag(o.id)
                             }
                         }
                     }
@@ -140,6 +134,21 @@ struct WorkSheet: View {
                         .controlSize(.small)
                         .disabled(loadingObjectives || worker.isRunning)
                 }
+            }
+            if let selected = objectives.first(where: { $0.id == objective }) {
+                GridRow {
+                    Text("").gridColumnAlignment(.trailing)
+                    Text("\(selected.workerLabel) · needs \(selected.resourceLabel)")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            GridRow {
+                Text("Node").gridColumnAlignment(.trailing)
+                TextField("http://host:port", text: $address)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.body.monospaced())
+                    .disabled(worker.isRunning)
             }
             if let objectivesProblem {
                 GridRow {
@@ -194,6 +203,7 @@ struct WorkSheet: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                .disabled(worker.isRunning)
             }
             GridRow {
                 Text("CPU cores").gridColumnAlignment(.trailing)

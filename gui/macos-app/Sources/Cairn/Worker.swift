@@ -1,6 +1,6 @@
 import Foundation
 
-/// What one `cairn work` is started with: the Work on This Mac… sheet's
+/// What one `cairn work` is started with: the Share this Mac… sheet's
 /// fields, as the command line they become.
 ///
 /// Until this existed the Contribute page's answer to "put this machine to
@@ -122,6 +122,8 @@ struct WorkObjective: Identifiable, Equatable {
     let id: String
     let title: String
     let open: Bool
+    let workerLabel: String
+    let resourceLabel: String
 
     /// The open objectives, as the reader's Objectives page would list
     /// them. Settled ones are left out: a worker on one is refused every
@@ -132,9 +134,24 @@ struct WorkObjective: Identifiable, Equatable {
         return rows.compactMap { row in
             guard let id = row["id"] as? String, PageRequest.isObjectiveId(id) else { return nil }
             let open = (row["open"] as? Bool) ?? !((row["settled"] as? Bool) ?? false)
+            let capabilities = row["capabilities"] as? [String: Any]
+            let worker = capabilities?["worker"] as? [String: Any]
+            let workerMode = worker?["mode"] as? String
+            let workerId = worker?["id"] as? String
+            let workerLabel = workerMode == "built_in"
+                ? "Cairn worker\(workerId.map { ": \($0)" } ?? "")"
+                : "external worker"
+            let resources = capabilities?["resources"] as? [String: Any] ?? [:]
+            let resourceLabel = [
+                (resources["cpus"] as? Int).map { "\($0) CPU\($0 == 1 ? "" : "s")" },
+                (resources["memory_mb"] as? Int).map { "\(max(1, $0 / 1024)) GB memory" },
+                (resources["gpus"] as? Int).map { "\($0) GPU\($0 == 1 ? "" : "s")" },
+            ].compactMap { $0 }.joined(separator: ", ")
             return WorkObjective(id: id, title: title(goal: row["goal"] as? String,
                                                       statement: row["statement"] as? String, id: id),
-                                 open: open)
+                                 open: open,
+                                 workerLabel: workerLabel,
+                                 resourceLabel: resourceLabel.isEmpty ? "the node's offer" : resourceLabel)
         }
     }
 

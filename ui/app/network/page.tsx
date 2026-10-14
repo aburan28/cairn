@@ -26,6 +26,7 @@ import {
 } from "@/lib/network";
 import { type NodeEvent, absorb, fetchEvents } from "@/lib/journal";
 import { formatAge, formatMagnitude, formatRate } from "@/lib/progress";
+import { resourceSummary, workerModeLabel } from "@/lib/scheduling";
 import { type Bridge, appBridge } from "@/lib/draft";
 import { AgentConnect, AgentStatus } from "@/components/agents";
 import { useEvery, useNode } from "@/components/hooks";
@@ -618,6 +619,35 @@ function TechnicalDetails({ network }: { network: NetworkResponse }) {
           </dd>
           <dt>submissions</dt>
           <dd className="text-[12.5px]">{node.accepts_submissions ? "accepted, then admitted by the rules" : "refused: read-only"}</dd>
+          <dt>shared capacity</dt>
+          <dd className="text-[12.5px]">{node.resources ? resourceSummary(node.resources) : "not shared"}</dd>
+          {(network.compute.assignments?.length ?? 0) > 0 && (
+            <>
+              <dt>compatible</dt>
+              <dd className="text-[12px] text-ink-2">
+                <div className="text-[11.5px] text-ink-3">
+                  Open challenges this node considers compatible with a reported offer; a routing hint, never a
+                  reservation.
+                </div>
+                <ul className="mt-1 flex flex-col gap-0.5">
+                  {(network.compute.assignments ?? []).slice(0, 8).map((edge) => (
+                    <li key={`${edge.host}-${edge.objective_id}`}>
+                      <span className="text-accent">{edge.host}</span> <span aria-hidden="true">→</span>{" "}
+                      <span className="mono" title={edge.objective_id}>
+                        {edge.objective_id.slice(0, 14)}…
+                      </span>{" "}
+                      <span className="text-ink-3">({workerModeLabel(edge.worker)})</span>
+                    </li>
+                  ))}
+                </ul>
+                {(network.compute.assignments?.length ?? 0) > 8 && (
+                  <div className="text-[11px] text-ink-3">
+                    +{(network.compute.assignments?.length ?? 0) - 8} more compatible assignments
+                  </div>
+                )}
+              </dd>
+            </>
+          )}
           {node.fleet && (
             <>
               <dt>fleet</dt>

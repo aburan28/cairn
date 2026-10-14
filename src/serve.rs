@@ -77,6 +77,7 @@ use crate::partition::{assignment_for, epoch_of, epoch_seconds};
 use crate::piecework::Piecework;
 use crate::progress::{self, Board, Heartbeat};
 use crate::records::{Claim, Commitment, Objective};
+use crate::scheduling::{self, ObjectiveCapabilities, ResourceOffer};
 use crate::secrets;
 
 /// Largest request body accepted, in bytes.
@@ -460,6 +461,9 @@ pub struct Serving {
     roles: Result<Roles, network::RolesError>,
     /// This machine, probed once. A request handler does not read `/proc`.
     hardware: Hardware,
+    /// This node's optional offer for challenge work. It is enabled by the
+    /// operator, held in process memory, and never treated as evidence.
+    resource_offer: Option<ResourceOffer>,
     /// The address the listener actually bound, set by [`serve_on`]. What
     /// `GET /network` reports as `node.reach`, so the reader can tell an
     /// operator whether a second machine can dial this one at all.
@@ -533,6 +537,8 @@ impl Serving {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
             .join("deposits");
+        let hardware = Hardware::probe();
+        let resource_offer = resource_offer_from_env(&hardware);
         Serving {
             log,
             root: root.into(),
@@ -545,7 +551,8 @@ impl Serving {
             hosts: Mutex::new(hosts::Roster::default()),
             sessions: None,
             roles: Roles::from_env(),
-            hardware: Hardware::probe(),
+            hardware,
+            resource_offer,
             bound: None,
             fleet: None,
             peers_policy: None,
@@ -1355,6 +1362,7 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             progress_of(stream, serving, &path["/progress/".len()..], &request)
         }
         ("GET", "/work_assignment") => work_assignment(stream, serving, &request),
+        ("GET", "/assignments") => assignments(stream, serving, &request),
         ("GET", "/goals") => goals_index(stream, serving, &request),
         ("GET", path) if path.starts_with("/goals/") => {
             goal_of(stream, serving, &path["/goals/".len()..])
@@ -1630,6 +1638,37 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 
 // -- handlers ---------------------------------------------------------------
 
+/// Read the operator's opt-in resource offer once when the server starts.
+/// Resource dimensions are deliberately independent of the node's verifier
+/// limits: a person may allow one checker eight cores while offering only two
+/// cores to shared challenge work.
+fn resource_offer_from_env(hardware: &Hardware) -> Option<ResourceOffer> {
+    let enabled = std::env::var("CAIRN_SHARE_RESOURCES")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        });
+    if !enabled {
+        return None;
+    }
+    let read = |name: &str, fallback: Option<u64>| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .or(fallback)
+    };
+    Some(ResourceOffer {
+        cpus: read("CAIRN_RESOURCE_CPUS", hardware.cpus),
+        memory_mb: read("CAIRN_RESOURCE_MEMORY_MB", hardware.memory_mb),
+        gpus: read("CAIRN_RESOURCE_GPUS", None),
+        storage_mb: read("CAIRN_RESOURCE_STORAGE_MB", None),
+        concurrency: read("CAIRN_RESOURCE_CONCURRENCY", Some(1)),
+    })
+}
+
 fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     let writable = serving.spool.is_some();
     let body = Value::object([
@@ -1648,6 +1687,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /frontier/{id}"),
                 Value::string("GET /progress/{id}"),
                 Value::string("GET /work_assignment?objective_id=&node_id="),
+                Value::string("GET /assignments?host="),
                 Value::string("GET /leases"),
                 Value::string("GET /leases/{id}"),
                 Value::string("GET /hosts"),
@@ -1947,6 +1987,10 @@ fn objectives(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 "verifier_kind",
                 Value::string(objective.verifier_kind().unwrap_or("?")),
             ),
+            (
+                "capabilities",
+                crate::scheduling::ObjectiveCapabilities::for_objective(&objective).to_value(),
+            ),
             ("reward", Value::Int(i128::from(objective.reward))),
             ("funder", Value::string(objective.funder.clone())),
         ];
@@ -1982,6 +2026,10 @@ fn one_objective(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Res
     let mut fields = vec![
         ("id", Value::string(id)),
         ("record", objective.to_value()),
+        (
+            "capabilities",
+            crate::scheduling::ObjectiveCapabilities::for_objective(objective).to_value(),
+        ),
         (
             "statements_are_untrusted",
             Value::string(
@@ -2444,6 +2492,18 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .summary(now);
+    let mut compute = compute_value(&fleet, &objectives, &registered);
+    if let Value::Object(fields) = &mut compute {
+        fields.insert(
+            "assignments".to_string(),
+            Value::Array(assignment_edges(
+                &node,
+                &objectives,
+                &registered,
+                serving.resource_offer.as_ref(),
+            )),
+        );
+    }
     let pick = |key: &str| readiness.get(key).cloned().unwrap_or(Value::Null);
     json(
         stream,
@@ -2460,6 +2520,13 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                         Value::array(warnings.into_iter().map(Value::string)),
                     ),
                     ("hardware", serving.hardware.to_value()),
+                    (
+                        "resources",
+                        match &serving.resource_offer {
+                            Some(offer) => offer.to_value(),
+                            None => Value::Null,
+                        },
+                    ),
                     (
                         "verifiers",
                         Value::object([
@@ -2551,7 +2618,7 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 ]),
             ),
             ("peers", peers),
-            ("compute", compute_value(&fleet, &objectives, &registered)),
+            ("compute", compute),
             ("roles", network::evidenced(&node)),
             (
                 "note",
@@ -2676,6 +2743,63 @@ fn render_prompt(
             json_error(stream, status, &why)
         }
     }
+}
+
+/// Capability-specific edges visible from this node: a live host offer to an
+/// open objective whose declared minimums it satisfies. The edge is a routing
+/// suggestion only; the host report is unverified and the objective's checker
+/// still decides payment.
+fn assignment_edges(
+    node: &Node,
+    objectives: &BTreeMap<String, Objective>,
+    hosts: &Value,
+    local_offer: Option<&ResourceOffer>,
+) -> Vec<Value> {
+    let mut offers: Vec<(String, ResourceOffer)> = Vec::new();
+    if let Some(offer) = local_offer {
+        offers.push(("this-node".to_string(), offer.clone()));
+    }
+    if let Some(rows) = hosts.get("hosts").and_then(Value::as_array) {
+        for row in rows {
+            if row.get("status").and_then(Value::as_str) != Some("live") {
+                continue;
+            }
+            let Some(host) = row.get("host").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(resources) = row.get("resources") else {
+                continue;
+            };
+            if let Ok(offer) = ResourceOffer::from_value(resources) {
+                offers.push((host.to_string(), offer));
+            }
+        }
+    }
+    let mut edges = Vec::new();
+    for (host, offer) in offers {
+        for (objective_id, objective) in objectives {
+            if node.objective_is_closed(objective) {
+                continue;
+            }
+            let capabilities = ObjectiveCapabilities::for_objective(objective);
+            if !scheduling::matches(&capabilities.resources, &offer) {
+                continue;
+            }
+            edges.push(Value::object([
+                ("host", Value::string(host.clone())),
+                ("objective_id", Value::string(objective_id.clone())),
+                (
+                    "assignment",
+                    Value::string(capabilities.assignment.as_str()),
+                ),
+                ("worker", capabilities.worker.to_value()),
+            ]));
+            if edges.len() >= 256 {
+                return edges;
+            }
+        }
+    }
+    edges
 }
 
 /// The fleet summed by device, by device class and by objective, with the
@@ -3778,6 +3902,108 @@ fn work_assignment(stream: &mut TcpStream, serving: &Serving, request: &Request)
                      one artifact per batch, and ask again when the epoch turns -- the slice \
                      rotates every epoch so no region can be squatted. Overlap with another \
                      node costs duplicated compute and nothing else.",
+                ),
+            ),
+        ]),
+    )
+}
+
+/// List open challenges this node can recommend to one resource offer.
+///
+/// This is intentionally a read-only assignment decision. It does not reserve
+/// a slice, start a process, or claim that a host ran anything. A dispatcher
+/// can later turn the same capability match into a queued job without changing
+/// the reader contract or making an unverified host report authoritative.
+fn assignments(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    let now = crate::time::unix_seconds();
+    let requested_host = request.query.get("host").filter(|host| !host.is_empty());
+    let (host, offer) = match requested_host {
+        Some(host) if host == "this-node" => match &serving.resource_offer {
+            Some(offer) => ("this-node".to_string(), offer.clone()),
+            None => return json_error(stream, 409, "this node is not sharing resources"),
+        },
+        Some(host) => {
+            let roster = serving
+                .hosts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(row) = roster
+                .list(now)
+                .into_iter()
+                .find(|row| row.registration.host == *host)
+            else {
+                return json_error(stream, 404, "no host with that name is registered here");
+            };
+            if row.status != progress::Liveness::Live {
+                return json_error(stream, 409, "that host is not live");
+            }
+            (host.clone(), row.registration.resources)
+        }
+        None => match &serving.resource_offer {
+            Some(offer) => ("this-node".to_string(), offer.clone()),
+            None => {
+                return json_error(
+                    stream,
+                    409,
+                    "this node is not sharing resources; enable sharing or provide host=NAME",
+                )
+            }
+        },
+    };
+
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let mut rows = Vec::new();
+    for (id, objective) in node.objectives() {
+        if node.objective_is_closed(&objective) {
+            continue;
+        }
+        let capabilities = ObjectiveCapabilities::for_objective(&objective);
+        let eligible = scheduling::matches(&capabilities.resources, &offer);
+        rows.push((
+            !eligible,
+            std::cmp::Reverse(objective.reward),
+            id.clone(),
+            Value::object([
+                ("objective_id", Value::string(id.clone())),
+                ("goal", Value::string(objective.goal.clone())),
+                ("statement", Value::string(objective.statement.clone())),
+                ("reward", Value::Int(i128::from(objective.reward))),
+                ("eligible", Value::Bool(eligible)),
+                (
+                    "reason",
+                    Value::string(if eligible {
+                        "This offer meets the declared resource minimums."
+                    } else {
+                        "This offer does not meet the declared resource minimums."
+                    }),
+                ),
+                ("capabilities", capabilities.to_value()),
+            ]),
+        ));
+    }
+    rows.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    let assignments: Vec<Value> = rows.into_iter().map(|row| row.3).collect();
+    json(
+        stream,
+        200,
+        &Value::object([
+            ("host", Value::string(host)),
+            ("resources", offer.to_value()),
+            ("assignments", Value::Array(assignments)),
+            (
+                "note",
+                Value::string(
+                    "Read-only challenge matching. A resource offer is an operator's current \
+                     report, not proof that a host ran work. Matching does not reserve a slice \
+                     or start a process; the objective's pinned verifier still decides what is \
+                     accepted and paid.",
                 ),
             ),
         ]),

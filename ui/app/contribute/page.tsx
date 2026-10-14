@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { type NetworkResponse, fetchNetwork, primaryRole } from "@/lib/network";
 import { type Objective, loadObjectives } from "@/lib/site";
 import { type Underserved, fetchGoals } from "@/lib/goals";
+import { type ChallengeAssignment, fetchAssignments, resourceSummary, workerModeLabel } from "@/lib/scheduling";
 import {
   type AppRole,
   type AppSheet,
@@ -21,7 +22,7 @@ import { objectiveTitle } from "@/lib/title";
 import { AgentConnect } from "@/components/agents";
 import { WorkPanel } from "@/components/WorkPanel";
 import { useNode } from "@/components/hooks";
-import { Badge, Note, PageHeader, Sheet } from "@/components/ui";
+import { Badge, Box, Note, PageHeader, Sheet } from "@/components/ui";
 
 /**
  * Ways to take part, what each pays, and -- one click away -- doing it.
@@ -142,6 +143,14 @@ export default function Page() {
         </div>
       )}
 
+      <SharedChallenges
+        base={base}
+        shared={network?.node.resources != null}
+        bridge={bridge}
+        busy={restarting !== null}
+        onOpen={(name, objective) => void sheet(name, objective)}
+      />
+
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {ROLES.map((info) => (
           <RoleCard
@@ -206,6 +215,99 @@ export default function Page() {
         </Sheet>
       )}
     </>
+  );
+}
+
+/**
+ * Open challenges whose declared minimums this node's shared capacity meets.
+ * A suggestion only: it reserves nothing, and the pinned checker alone decides
+ * what is paid.
+ */
+function SharedChallenges({
+  base,
+  shared,
+  bridge,
+  busy,
+  onOpen,
+}: {
+  base: string | null;
+  shared: boolean;
+  bridge: Bridge | null;
+  busy: boolean;
+  onOpen: (sheet: AppSheet, objective?: string) => void;
+}) {
+  const [assignments, setAssignments] = useState<ChallengeAssignment[]>([]);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (base === null || !shared) {
+      setAssignments([]);
+      setProblem(null);
+      return;
+    }
+    let cancelled = false;
+    void fetchAssignments(base)
+      .then((response) => {
+        if (!cancelled) {
+          setAssignments(response.assignments.filter((assignment) => assignment.eligible));
+          setProblem(null);
+        }
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setProblem(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [base, shared]);
+
+  if (!shared) return null;
+  return (
+    <div className="mb-4">
+      <Box
+        title="Challenges this Mac can take"
+        aside={<span className="text-[11px] font-normal text-ink-3">from this node&rsquo;s offer</span>}
+      >
+        {problem ? (
+          <p className="text-[12.5px] text-warn">The node could not match its offer to challenges yet: {problem}</p>
+        ) : assignments.length === 0 ? (
+          <p className="text-[12.5px] text-ink-3">No open challenge currently matches the resources shared in Settings.</p>
+        ) : (
+          <ul className="grid gap-2 sm:grid-cols-2">
+            {assignments.slice(0, 8).map((assignment) => (
+              <li key={assignment.objective_id} className="rounded-lg border border-edge bg-surface-2 p-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-[13px] font-medium text-ink" title={assignment.statement}>
+                      {assignment.goal || assignment.statement}
+                    </div>
+                    <div className="mt-1 text-[11.5px] text-ink-3">
+                      {workerModeLabel(assignment.capabilities.worker)} · {assignment.capabilities.assignment} ·{" "}
+                      {resourceSummary(assignment.capabilities.resources)}
+                    </div>
+                  </div>
+                  <span className="shrink-0 text-[12px] text-ink-2">{assignment.reward.toLocaleString("en-US")}</span>
+                </div>
+                {bridge && (
+                  <button
+                    type="button"
+                    className="btn btn-sm mt-2"
+                    onClick={() => onOpen("work", assignment.objective_id)}
+                    disabled={busy}
+                  >
+                    Share this Mac…
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="mt-3 text-[11.5px] text-ink-3">
+          These matches are a scheduling suggestion based on reported capacity. A worker still has to run, submit, and
+          pass the objective&rsquo;s pinned checker before anything is paid.
+        </p>
+      </Box>
+    </div>
   );
 }
 

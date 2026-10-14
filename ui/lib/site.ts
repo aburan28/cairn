@@ -24,6 +24,7 @@ import { readCheckpoint } from "./checkpoint";
 import { loadSeeds, readableEndpoints } from "./seeds";
 import snapshot from "./snapshot.json";
 import { ShapeMismatch, expectFields } from "./shape";
+import type { ObjectiveCapabilities } from "./scheduling";
 
 export type Frontier = {
   claim_id: string;
@@ -53,6 +54,7 @@ export type Objective = {
   reward: number;
   funder: string;
   verifier_kind: string;
+  capabilities?: ObjectiveCapabilities;
   /**
    * No longer payable. The node decides this, and it is the only thing that
    * does: for a certificate, a settlement exists; for a ratchet, the frontier
@@ -130,6 +132,25 @@ export const SNAPSHOT = snapshot as unknown as Snapshot;
  *  actually reads. Still exported because every page uses it as the initial
  *  value of its URL box, before resolution has finished. */
 export const NODE_URL = process.env.NEXT_PUBLIC_CAIRN_NODE ?? "";
+
+/** Whether a URL points back to the page's own local node. */
+export function isLocalNodeUrl(value: string, pageOrigin?: string): boolean {
+  if (!value) return true;
+  try {
+    const url = new URL(value, pageOrigin || "http://this-node.invalid");
+    const host = url.hostname.toLowerCase();
+    if (["localhost", "127.0.0.1", "::1"].includes(host) || host.startsWith("127.")) return true;
+    return Boolean(pageOrigin && url.origin === new URL(pageOrigin).origin);
+  } catch {
+    return false;
+  }
+}
+
+/** Human-facing source label. Keep addresses available to advanced controls,
+ * but don't make a transport endpoint the identity of the product. */
+export function readableNode(value: string, pageOrigin?: string): string {
+  return isLocalNodeUrl(value, pageOrigin) ? "this node" : value;
+}
 
 /**
  * Which node to read, decided once per page load.
@@ -260,7 +281,7 @@ export type Sourced<T> = {
 /** The label every stat carries. One function so the wording cannot drift
  *  between the places it is rendered. */
 export function provenance(sourced: { live: boolean; origin: string }): string {
-  return sourced.live ? `live from ${sourced.origin}` : "from the bundled snapshot";
+  return sourced.live ? `live on ${readableNode(sourced.origin)}` : "from the bundled snapshot";
 }
 
 /**
