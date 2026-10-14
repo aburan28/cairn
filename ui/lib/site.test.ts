@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   SNAPSHOT,
   forgetResolvedNode,
+  loadObjectives,
+  nodeAnswers,
   progress,
   provenance,
   resolveNode,
@@ -114,6 +116,7 @@ describe("resolveNode", () => {
   afterEach(() => {
     forgetResolvedNode();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   /** `ok` at `<base>/health`, and 404 everywhere else. */
@@ -193,6 +196,37 @@ describe("resolveNode", () => {
     const [a, b, c] = await Promise.all([resolveNode(), resolveNode(), resolveNode()]);
     expect([a, b, c]).toEqual(["", "", ""]);
     expect(asked).toEqual(["/health"]);
+  });
+
+  it("continues discovery when a health response stalls", async () => {
+    vi.useFakeTimers();
+    const asked: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, options: RequestInit) => {
+      asked.push(url);
+      if (url === "/health") {
+        return { ok: true, text: () => new Promise((_, reject) => {
+          options.signal!.addEventListener("abort", () => reject(new Error("timed out")), { once: true });
+        }) };
+      }
+      if (url.endsWith("/seeds.json")) return { ok: true, json: async () => ({
+        version: 1, seeds: [{ http: "https://b.example" }],
+      }) };
+      return { ok: true, text: async () => "ok" };
+    }));
+    const result = resolveNode();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(await result).toBe("https://b.example");
+    expect(asked).toEqual(["/health", "/seeds.json", "https://b.example/health"]);
+  });
+
+  it("does not advertise a static HTML page as a live node", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, text: async () => "<html>" })));
+    expect(await nodeAnswers("")).toBe(false);
+  });
+
+  it("keeps an empty live node empty instead of substituting launch bounties", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ objectives: [] }) })));
+    expect(await loadObjectives("")).toEqual({ objectives: [], live: true, origin: "this node" });
   });
 });
 
