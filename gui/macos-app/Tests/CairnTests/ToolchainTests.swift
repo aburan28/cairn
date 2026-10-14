@@ -67,13 +67,15 @@ final class ToolchainTests: XCTestCase {
     }
 
     func testTheNodesPathReachesElanHomebrewAndTheSystem() {
-        let env = Node.childEnvironment(NodeSettings.current())
+        let settings = NodeSettings.current()
+        let env = Node.childEnvironment(settings)
         let path = Toolchains.searchPath(env)
         XCTAssertEqual(path.first, NSHomeDirectory() + "/.elan/bin")
         XCTAssertTrue(path.contains("/opt/homebrew/bin"))
         XCTAssertTrue(path.contains("/usr/bin"))
         // Both or neither: a binary without its granted root is one the jail may refuse.
         XCTAssertEqual(env["CAIRN_LEAN"] == nil, env["CAIRN_LEAN_ROOT"] == nil)
+        XCTAssertEqual(env["TMPDIR"], settings.dataFolder.appendingPathComponent("tmp").path)
     }
 
     func testTheNodesVerifierReportIsRead() throws {

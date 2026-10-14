@@ -31,6 +31,9 @@ export type DerivedWorker = {
   claims_paid: number;
   claims: number;
   rejected: number;
+  /** Absent on nodes that predate separate verdict counts. */
+  unavailable?: number;
+  invalid_spec?: number;
   in_flight: number;
   elements: number;
   units_paid: number;
@@ -56,6 +59,9 @@ export type Derived = {
   claims_paid: number;
   claims: number;
   rejected: number;
+  /** Absent on nodes that predate separate verdict counts. */
+  unavailable?: number;
+  invalid_spec?: number;
   in_flight: number;
   elements: number;
   units_paid: number;

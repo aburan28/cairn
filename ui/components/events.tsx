@@ -14,6 +14,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { type LogEvent, ago } from "@/lib/events";
+import { KIND_LABEL, type NodeEvent } from "@/lib/journal";
 import type { LogRecord } from "@/lib/log";
 import { Hash } from "@/components/ui";
 
@@ -145,4 +146,50 @@ function FieldRow({ label, value }: { label: string; value: string }) {
 /** A 64-hex key reads as `a1b2c3d4…ef01`; a pseudonym reads as itself. */
 export function shortActor(actor: string): string {
   return /^[0-9a-f]{40,}$/i.test(actor) ? `${actor.slice(0, 8)}…${actor.slice(-4)}` : actor;
+}
+
+const RING: Record<NodeEvent["tone"], string> = {
+  neutral: "border-ink-3",
+  good: "border-accent",
+  bad: "border-bad",
+  warn: "border-warn",
+};
+
+/**
+ * One thing the node saw happen, beside the records. Drawn as a ring where a
+ * record is a dot, and labelled, because it is not a record: it is this
+ * process's memory, gone on restart, and nothing pays on it.
+ */
+export function NodeEventRow({ event, now }: { event: NodeEvent; now: number }) {
+  const label = KIND_LABEL[event.kind as keyof typeof KIND_LABEL] ?? event.kind;
+  return (
+    <li className="contain-rows">
+      <div className="flex items-start gap-3 px-4 py-2.5">
+        <span className={`mt-[6px] h-2.5 w-2.5 shrink-0 rounded-full border-2 ${RING[event.tone]}`} aria-hidden />
+        <span className="min-w-0 flex-1 text-[13px] leading-relaxed [overflow-wrap:anywhere]">
+          <span className="text-ink">{event.text}</span>
+          {event.subject && /^sha256:[0-9a-f]{16,}$/.test(event.subject) && (
+            <>
+              {" "}
+              <Link
+                href={`/challenge?id=${encodeURIComponent(event.subject)}`}
+                className="text-[12px] text-ink-3 underline decoration-edge-strong underline-offset-2 hover:text-ink"
+              >
+                open
+              </Link>
+            </>
+          )}
+        </span>
+        <span
+          className="shrink-0 rounded border border-edge px-1.5 py-px text-[10.5px] text-ink-3"
+          title="Seen by this node and held in its memory; not a record in the log"
+        >
+          {label}
+        </span>
+        <span className="w-20 shrink-0 text-right text-[11.5px] whitespace-nowrap text-ink-3" title={event.at}>
+          {ago(event.at, now)}
+        </span>
+      </div>
+    </li>
+  );
 }

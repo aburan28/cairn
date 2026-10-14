@@ -169,9 +169,64 @@ export function describeUnderserved(row: Underserved): string {
   return `${row.open_reward.toLocaleString("en-US")} units across ${objectives}, ${workers}`;
 }
 
-/** What an angle path reads as on a page. */
-export function angleLabel(path: string): string {
-  return path === "" ? "no particular approach" : path;
+/**
+ * What an angle reads as on a page.
+ *
+ * A named angle is its path -- `rho/gpu-kernel` says what it is. An unnamed
+ * one, every objective whose goal handle carries no `/<angle>`, used to read
+ * "no particular approach", which told a reader nothing and could not be told
+ * apart from the next goal's. It is now `Approach <n> · <tag>`: `n` its place
+ * among the goal's angles, and `tag` the first characters of the first
+ * objective funded under it -- stable across reloads (the node lists angles
+ * and objectives in a fixed order), and the same characters the objective's
+ * own id starts with, so a reader can match it to the challenge it came from.
+ */
+export function angleLabel(angle: Pick<Angle, "path" | "objectives">, index = 0): string {
+  if (angle.path !== "") return angle.path;
+  const first = angle.objectives[0]?.id ?? "";
+  const tag = first.replace(/^sha256:/, "").slice(0, 6);
+  return tag ? `Approach ${index + 1} · ${tag}` : `Approach ${index + 1}`;
+}
+
+/**
+ * The method families `docs/goals.md` names, in a sentence each -- what a
+ * reader sees when they open an angle to ask what it is about. Keyed on the
+ * first segment, which is the family; documentation, and the node accepts any
+ * path whether or not it is here.
+ */
+export const ANGLE_FAMILIES: Record<string, string> = {
+  rho: "Pollard rho and its engineering: a random walk that many machines share, paid per distinguished point, and the work that makes that walk faster.",
+  kangaroo: "The kangaroo (lambda) method: a random walk for an exponent known to lie in an interval.",
+  bsgs: "Baby-step giant-step: a time-memory trade-off, for a bounded exponent or as a baseline.",
+  "index-calculus": "Index calculus: collect relations over a factor base, then solve a large linear system.",
+  reduction: "Move the problem to a group where it is easier — Weil descent, covering curves.",
+  hardware: "Purpose-built walkers on FPGAs or ASICs, with their cost.",
+  formal: "A theorem about the problem or an algorithm for it, checked by the Lean kernel.",
+  theory: "A bound, a precise conjecture, or a counterexample.",
+};
+
+/** Sentences describing an angle: what its name means, and what is funded under it. */
+export function describeAngle(angle: Angle): string[] {
+  const out: string[] = [];
+  if (angle.path === "") {
+    out.push(
+      "Its funders named no method: these objectives pay for results on the problem however they are reached.",
+    );
+  } else {
+    const family = ANGLE_FAMILIES[angle.segments[0] ?? ""];
+    if (family) out.push(family);
+    if (angle.parent) out.push(`A refinement of ${angle.parent}.`);
+  }
+  const kinds = [...new Set(angle.objectives.map((o) => o.verifier_kind))];
+  const reward = angle.objectives.reduce((sum, o) => sum + o.reward, 0);
+  out.push(
+    `${angle.objectives.length} objective${angle.objectives.length === 1 ? "" : "s"} (${angle.open} open), ` +
+      `${reward.toLocaleString("en-US")} units funded in all, answers checked by ${kinds.join(", ") || "—"}.`,
+  );
+  if (angle.live_workers > 0) {
+    out.push(`${angle.live_workers} machine${angle.live_workers === 1 ? " is" : "s are"} working on it now.`);
+  }
+  return out;
 }
 
 /**

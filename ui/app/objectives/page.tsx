@@ -2,23 +2,24 @@
 
 import { goalSlug, objectiveTitle } from "@/lib/title";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   type Objective,
   type ObjectiveDetail,
-  NODE_URL,
   amount,
   fetchObjectiveDetail,
   fetchObjectives,
   overspent,
+  paidOut,
   poolFraction,
   ratchetProgress,
+  remainingPool,
   short,
 } from "@/lib/objectives";
 import {
   Badge,
   EmptyState,
-  NodePicker,
+  LiveStamp,
   Note,
   PageHeader,
   Progress,
@@ -26,7 +27,7 @@ import {
   Skeleton,
   Stat,
 } from "@/components/ui";
-import { resolveNode } from "@/lib/site";
+import { useEvery, useNode } from "@/components/hooks";
 
 /**
  * What this node will pay for, and how far each question has got.
@@ -47,7 +48,10 @@ import { resolveNode } from "@/lib/site";
 type Sort = "reward" | "progress" | "goal";
 
 export default function Page() {
-  const [base, setBase] = useState(NODE_URL);
+  const base = useNode();
+  const inFlight = useRef(false);
+  const detailCache = useRef<Record<string, ObjectiveDetail>>({});
+  const [readAt, setReadAt] = useState<Date | null>(null);
   const [objectives, setObjectives] = useState<Objective[] | null>(null);
   const [details, setDetails] = useState<Record<string, ObjectiveDetail>>({});
   const [error, setError] = useState<string | null>(null);
@@ -58,52 +62,37 @@ export default function Page() {
   const [kind, setKind] = useState("all");
   const [sort, setSort] = useState<Sort>("reward");
 
-  const load = useCallback(async (url: string) => {
+  const load = useCallback(async () => {
+    if (base === null || inFlight.current) return;
+    inFlight.current = true;
     setLoading(true);
-    setError(null);
     try {
-      const list = await fetchObjectives(url);
+      const list = await fetchObjectives(base);
       setObjectives(list);
+      setReadAt(new Date());
+      setError(null);
       // Detail is an enhancement, so it is fetched after the list is already on
       // screen and a failure leaves the summary standing rather than blanking
       // the page.
       const fetched = await Promise.all(
         list.map(async (objective) => {
-          const detail = await fetchObjectiveDetail(url, objective.id);
+          const detail = detailCache.current[objective.id] ?? await fetchObjectiveDetail(base, objective.id);
           return [objective.id, detail] as const;
         }),
       );
       const next: Record<string, ObjectiveDetail> = {};
       for (const [id, detail] of fetched) if (detail) next[id] = detail;
+      detailCache.current = next;
       setDetails(next);
     } catch (cause) {
-      setObjectives(null);
-      setDetails({});
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      inFlight.current = false;
       setLoading(false);
     }
-  }, []);
+  }, [base]);
 
-  useEffect(() => {
-    // Ask which node to read before reading it. Same-origin when one answers --
-    // the daemon serves this page at /ui/, so that is the common case and it
-    // costs one /health -- and otherwise the first seed from the published list
-    // that is up. On the public site there is no same-origin node at all, and
-    // before this the box showed github.io and every request 404'd into the
-    // snapshot.
-    //
-    // Shown *and* used, which is the part worth being careful about: the box
-    // has to name the origin the numbers below came from, or a reader comparing
-    // two nodes is comparing one node against a label. Empty stays empty for
-    // fetching -- relative requests survive a tunnel or a proxy on an unknown
-    // path -- and becomes this page's own origin for display, because nobody
-    // can retype "" after clearing the box.
-    void resolveNode().then((url) => {
-      setBase(url || window.location.origin);
-      void load(url);
-    });
-  }, [load]);
+  useEvery(load, 20, base !== null);
 
   const kinds = useMemo(
     () => [...new Set((objectives ?? []).map((o) => o.verifier_kind))].sort(),
@@ -128,11 +117,9 @@ export default function Page() {
     ranked.sort((a, b) => {
       if (sort === "goal") return objectiveTitle(a).localeCompare(objectiveTitle(b));
       if (sort === "reward") return b.reward - a.reward;
-      // "progress": how much of the pool is still payable, largest first —
-      // which is the ordering somebody deciding what to work on wants.
-      const left = poolFraction(a) ?? (a.settled ? 0 : 1);
-      const right = poolFraction(b) ?? (b.settled ? 0 : 1);
-      return right - left;
+      // "Most left to earn" compares amounts: 90% of a tiny pool can still
+      // pay less than 10% of a large one.
+      return remainingPool(b) - remainingPool(a);
     });
     return ranked;
   }, [objectives, query, showSettled, kind, sort]);
@@ -146,12 +133,12 @@ export default function Page() {
 
   const pool = (objectives ?? []).reduce((sum, o) => sum + o.reward, 0);
   const remaining = (objectives ?? []).reduce(
-    (sum, o) => sum + (o.frontier?.pool_remaining ?? (o.settled ? 0 : o.reward)),
+    (sum, o) => sum + remainingPool(o),
     0,
   );
 
-  const paidOut = (objectives ?? []).reduce(
-    (sum, o) => sum + (o.frontier?.paid_cumulative ?? o.settlement?.reward ?? 0),
+  const paid = (objectives ?? []).reduce(
+    (sum, o) => sum + paidOut(o),
     0,
   );
   const openCount = (objectives ?? []).filter((o) => o.open).length;
@@ -162,12 +149,18 @@ export default function Page() {
         title="Objectives"
         subtitle="Every question this node knows about, and what is still payable on it. The node derived all of it from its log."
         actions={
-          <NodePicker
-            value={base}
-            onChange={setBase}
-            onRead={() => void load(base)}
-            loading={loading}
-          />
+          <>
+            <LiveStamp at={readAt} error={error} />
+            <button type="button" className="btn btn-sm" disabled={loading || base === null} onClick={() => void load()}>
+              {loading ? "Refreshing…" : "Refresh"}
+            </button>
+            <Link href="/goals" className="btn btn-sm">
+              Goals
+            </Link>
+            <Link href="/submit" className="btn btn-sm btn-primary">
+              Post a challenge
+            </Link>
+          </>
         }
       />
 
@@ -180,13 +173,13 @@ export default function Page() {
             from={openCount ? "worth working on" : "all settled"}
           />
           <Stat label="Still payable" value={amount(remaining)} from={`of ${amount(pool)} funded`} tone="accent" />
-          <Stat label="Paid out" value={amount(paidOut)} tone="accent" />
+          <Stat label="Paid out" value={amount(paid)} tone="accent" />
         </div>
       )}
 
       {error && (
         <div className="mb-4">
-          <Note title="could not read objectives" tone="bad">
+          <Note title={objectives ? "Could not refresh objectives; showing the last read" : "Could not read objectives"} tone="bad">
             {error}
           </Note>
         </div>
@@ -260,13 +253,16 @@ export default function Page() {
             </Link>
           }
         >
-          Fund one from this page, or with{" "}
-          <code className="mono">cairn post &lt;objective.json&gt;</code>.
+          Post a challenge to give contributors a goal to work on.
         </EmptyState>
       )}
 
       {objectives && objectives.length > 0 && shown.length === 0 && (
-        <EmptyState title="Nothing matches those filters.">
+        <EmptyState title="Nothing matches those filters." action={
+          <button type="button" className="btn" onClick={() => { setQuery(""); setKind("all"); setShowSettled(true); }}>
+            Clear filters
+          </button>
+        }>
           {objectives.length} objective{objectives.length === 1 ? "" : "s"} on this
           node, none of them matching.
         </EmptyState>
@@ -414,7 +410,7 @@ function ObjectiveRow({
                 <span className="mono font-semibold text-accent">
                   {amount(objective.piecework.paid_total)}
                 </span>
-                <span className="text-ink-3"> paid per unit</span>
+                <span className="text-ink-3"> paid out</span>
               </span>
               <span className="text-[11px] text-ink-3">
                 {amount(objective.piecework.pool_remaining)} left

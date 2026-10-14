@@ -207,6 +207,13 @@
     text-rendering: optimizeLegibility;
   }
 
+  /* Sliders and checkboxes in the theme's colour rather than the
+     browser's blue, which is the one thing on a page that is not a token. */
+  input[type="range"],
+  input[type="checkbox"] {
+    accent-color: var(--accent);
+  }
+
   ::selection {
     background: var(--accent-soft);
     color: var(--ink);
@@ -481,6 +488,46 @@
     @apply flex gap-1 border-b border-edge px-2;
   }
 
+  /* A folded section: details a person may want, not on first read. */
+  .disclosure {
+    @apply min-w-0 rounded-[var(--radius-card)] border border-edge bg-surface;
+  }
+
+  .disclosure > summary {
+    @apply flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 text-[12.5px]
+           font-medium text-ink-2 select-none hover:text-ink;
+  }
+
+  .disclosure > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .disclosure > summary::before {
+    content: "▸";
+    @apply text-[10px] text-ink-3 transition-transform duration-150;
+  }
+
+  .disclosure[open] > summary::before {
+    transform: rotate(90deg);
+  }
+
+  .disclosure-body {
+    @apply border-t border-edge px-4 py-3;
+  }
+
+  /* A choice among a few, as one row of pills: the role filter, the policy. */
+  .segmented {
+    @apply inline-flex rounded-lg border border-edge bg-surface-2 p-0.5;
+  }
+
+  .segmented > button {
+    @apply cursor-pointer rounded-md px-2.5 py-1 text-[12px] text-ink-2 transition-colors hover:text-ink;
+  }
+
+  .segmented > button[aria-pressed="true"] {
+    @apply bg-surface font-medium text-ink shadow-sm;
+  }
+
   .tab {
     @apply -mb-px cursor-pointer border-b-2 border-transparent px-2.5 py-2 text-[12.5px]
            text-ink-2 hover:text-ink;
@@ -587,7 +634,39 @@
   }
 
   .prose-page ul.plain {
-    @apply list-none p-0;
+    @apply mb-4 flex max-w-[68ch] list-none flex-col gap-2 p-0 text-[14px] leading-[1.7] text-ink-2;
+  }
+
+  .prose-page ul.plain a {
+    @apply text-accent underline decoration-accent-line underline-offset-[3px] hover:decoration-current;
+  }
+
+  /* The three-step summary at the top of /how-it-works. */
+  .prose-page .steps3 {
+    @apply mb-5 grid max-w-[62rem] gap-3 sm:grid-cols-3;
+  }
+
+  .prose-page .steps3 > div {
+    @apply rounded-[var(--radius-card)] border border-edge bg-surface p-4;
+  }
+
+  .prose-page .steps3 .n {
+    @apply mb-2 flex h-6 w-6 items-center justify-center rounded-full bg-accent-soft font-mono
+           text-[12px] text-accent;
+  }
+
+  .prose-page .steps3 b {
+    @apply block text-[14px] text-ink;
+  }
+
+  .prose-page .steps3 p {
+    @apply mt-1 text-[13px] leading-relaxed text-ink-2;
+  }
+
+  /* The four kinds of evidence, numbered, as the Knowledge page shows them. */
+  .prose-page ol.ladder {
+    @apply mb-4 flex max-w-[68ch] list-decimal flex-col gap-1 pl-5 text-[14px] leading-[1.7] text-ink-2
+           marker:text-accent;
   }
 
   .prose-page ul.docList > li {
@@ -623,19 +702,23 @@
     @apply mb-4 overflow-x-auto rounded-[var(--radius-card)] border border-edge;
   }
 
-  .prose-page table.grid {
+  .prose-page table.data {
     @apply w-full border-collapse text-left text-[12.5px];
   }
 
-  .prose-page table.grid th {
+  .prose-page table.data th {
     @apply border-b border-edge bg-surface-2 px-3 py-2 font-medium text-ink-2;
   }
 
-  .prose-page table.grid td {
+  .prose-page table.data td {
     @apply border-b border-edge px-3 py-2 align-top text-ink-2;
   }
 
-  .prose-page table.grid tr:last-child td {
+  .prose-page table.data a {
+    @apply text-accent underline decoration-accent-line underline-offset-[3px] hover:decoration-current;
+  }
+
+  .prose-page table.data tr:last-child td {
     @apply border-b-0;
   }
 }

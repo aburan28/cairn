@@ -9,6 +9,7 @@ struct AgentsSheet: View {
     @State private var arrangement: AgentArrangement = .runNode
     @State private var client: AgentClient = .claudeCode
     @State private var identityBusy = false
+    @State private var installConfirmation = false
     @State private var message: (ok: Bool, text: String)?
 
     private var binary: String {
@@ -49,6 +50,20 @@ struct AgentsSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             stanza
+            Button("Add to \(client.title)…") {
+                message = nil
+                installConfirmation = true
+            }
+            .confirmationDialog(
+                "Allow Cairn to update \(client.configURL().path)?",
+                isPresented: $installConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Add Cairn to \(client.title)") { installClient() }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("Cairn will add its MCP entry, keep other settings, and save a backup if this file already exists. It will not change \(client.title)'s sandbox or file permissions.")
+            }
             identityRow
 
             if let message {
@@ -129,6 +144,20 @@ struct AgentsSheet: View {
                     .disabled(identityBusy || node.isAttached)
             }
             Spacer()
+        }
+    }
+
+    private func installClient() {
+        do {
+            switch try AgentStanza.install(inputs) {
+            case let .installed(url, backup):
+                let suffix = backup.map { " Backup: \($0.path)." } ?? ""
+                message = (ok: true, text: "Added Cairn to \(url.path). Restart \(client.title) to load it.\(suffix)")
+            case let .alreadyConfigured(url):
+                message = (ok: false, text: "Cairn is already configured in \(url.path); the file was left unchanged.")
+            }
+        } catch {
+            message = (ok: false, text: error.localizedDescription)
         }
     }
 

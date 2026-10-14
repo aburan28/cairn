@@ -7,7 +7,6 @@ import {
   type CheckpointFacts,
   type Feed,
   type Sourced,
-  REPO,
   SNAPSHOT,
   loadChain,
   loadCheckpoint,
@@ -21,12 +20,14 @@ import { type LogRecord, fetchLog } from "@/lib/log";
 import { type LogEvent, eventsFor, indexObjectives } from "@/lib/events";
 import { following, onFollowingChange } from "@/lib/follow";
 import { goalSlug, objectiveTitle } from "@/lib/title";
+import { paidOut } from "@/lib/objectives";
 import { EventRow } from "@/components/events";
+import { useNode } from "@/components/hooks";
+import { type NetworkResponse, fetchNetwork, primaryRole } from "@/lib/network";
 import {
   Badge,
   Box,
   Card,
-  CopyButton,
   Hash,
   Note,
   PageHeader,
@@ -80,13 +81,7 @@ export default function Page() {
   // record exists", which a ratchet satisfies from its first paid slice.
   const open = objectives.filter((o) => o.open);
   const pool = objectives.reduce((sum, o) => sum + o.reward, 0);
-  // A ratchet's payouts are summed in its frontier and its `settlement` is
-  // null; a certificate has no frontier and one `settlement`. Adding both
-  // therefore never counts a payment twice, and leaving either out did.
-  const paid = objectives.reduce(
-    (sum, o) => sum + (o.frontier?.paid_cumulative ?? 0) + (o.settlement?.reward ?? 0),
-    0,
-  );
+  const paid = objectives.reduce((sum, o) => sum + paidOut(o), 0);
 
   // While a request is in flight the page shows the snapshot, and says
   // "reading…" rather than labelling it as the snapshot: the label is a claim
@@ -138,28 +133,17 @@ export default function Page() {
             Browse objectives
           </Link>
         </div>
-        <div className="relative mt-5 max-w-[46rem]">
-          <pre className="code pr-9">
-            {`curl -fsSL ${REPO}/releases/latest/download/install.sh | sh`}
-          </pre>
-          <div className="absolute top-2 right-2">
-            <CopyButton value={`curl -fsSL ${REPO}/releases/latest/download/install.sh | sh`} />
-          </div>
-        </div>
         <p className="hint max-w-[46rem]">
-          Linux and macOS, amd64 and arm64. The download&rsquo;s sha256 only catches
-          corruption; the check that means something is re-deriving the log, below.
-          On a phone, Add to Home Screen or use the native reader.
+          Open a node in Cairn.app to run a worker and see its activity. On a phone,
+          Add to Home Screen to read the network.
         </p>
       </section>
 
       <div className="app-only">
-        <PageHeader
-          title="Overview"
-          subtitle={objectivesFrom}
-          actions={<Link href="/network" className="btn btn-sm">Network topology →</Link>}
-        />
+        <PageHeader title="Overview" subtitle={objectivesFrom} />
       </div>
+
+      <YourNode />
 
       <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
         <Stat label="Objectives" value={String(objectives.length)} from={objectivesFrom} />
@@ -306,10 +290,7 @@ export default function Page() {
 
       <section className="site-only mt-10">
         <SectionHeading>Three ways in</SectionHeading>
-        {/* The three roles the protocol actually has, with the one command each
-            starts from. Anything longer belongs on /how-it-works or in the
-            repository — a landing page that tries to be the manual stops being
-            readable and starts going stale. */}
+        {/* The three roles the protocol actually has. */}
         <ul className="grid gap-3 lg:grid-cols-3">
           <Card as="li" className="card-pad flex flex-col gap-2">
             <h3 className="text-[14px] font-semibold">Fund a question</h3>
@@ -319,11 +300,7 @@ export default function Page() {
               posts a <i>different</i> objective, and claims against the original stop
               resolving.
             </p>
-            <pre className="code mt-auto">cairn scaffold my-challenge --kind certificate</pre>
-            <p className="hint">
-              Or <Link href="/submit" className="text-accent hover:underline">post one from
-              this page</Link>, signed by a wallet.
-            </p>
+            <Link href="/submit" className="mt-auto text-[12.5px] text-accent hover:underline">Post a challenge →</Link>
           </Card>
           <Card as="li" className="card-pad flex flex-col gap-2">
             <h3 className="text-[14px] font-semibold">Solve one</h3>
@@ -333,11 +310,7 @@ export default function Page() {
               is free and runs the same pinned verifier that decides payment, so every
               objective is an eval with a ground-truth reward signal.
             </p>
-            <pre className="code mt-auto">cairn run</pre>
-            <p className="hint">
-              One stdio MCP server, live on the network. Agent setup is available
-              in the project's developer documentation.
-            </p>
+            <Link href="/contribute#agent" className="mt-auto text-[12.5px] text-accent hover:underline">Start solving →</Link>
           </Card>
           <Card as="li" className="card-pad flex flex-col gap-2">
             <h3 className="text-[14px] font-semibold">Run a node</h3>
@@ -347,10 +320,7 @@ export default function Page() {
               the write lock. Readers fetch the log and re-derive everything themselves,
               which is the point: they need not trust the server that served it.
             </p>
-            <pre className="code mt-auto">cairn run</pre>
-            <p className="hint">
-              Loopback by default; add a peer to join the network.
-            </p>
+            <Link href="/network" className="mt-auto text-[12.5px] text-accent hover:underline">See the network →</Link>
           </Card>
         </ul>
       </section>
@@ -362,5 +332,59 @@ export default function Page() {
         doing in the first sentence on this page.
       </p>
     </>
+  );
+}
+
+/**
+ * The node serving this page, in one line: what it is and what is connected
+ * to it. Only when the page *is* served by a node (same-origin): on the public
+ * site the reader may be talking to somebody's seed, and calling that "your
+ * node" would be a claim about the visitor that is false.
+ */
+function YourNode() {
+  const base = useNode();
+  const [network, setNetwork] = useState<NetworkResponse | null>(null);
+  useEffect(() => {
+    if (base !== "") return;
+    fetchNetwork(base)
+      .then(setNetwork)
+      .catch(() => setNetwork(null));
+  }, [base]);
+  if (!network) return null;
+  const role = primaryRole(network.node);
+  const mcp = network.node.mcp;
+  const agent = mcp?.serving && mcp.client ? mcp.client.name : "none attached";
+  const hosts = network.compute.hosts?.registered ?? 0;
+  return (
+    <Link
+      href="/network"
+      className="card card-pad mb-5 flex flex-wrap items-center gap-x-8 gap-y-3 transition-colors hover:border-edge-strong hover:bg-surface-2"
+    >
+      <div>
+        <div className="text-[11px] font-semibold tracking-[0.08em] text-ink-3 uppercase">Your node</div>
+        <div className="flex items-center gap-2 text-[20px] font-semibold text-ink">
+          <span className="h-2 w-2 rounded-full bg-accent" aria-hidden />
+          {role.title}
+        </div>
+      </div>
+      <NodeFact label="Agent" value={agent} />
+      <NodeFact
+        label="Machines working"
+        value={String(network.compute.live)}
+        hint={hosts > 0 ? `${hosts} registered with it` : undefined}
+      />
+      <NodeFact label="Other nodes connected" value={network.peers.available ? String(network.peers.reached) : "not syncing"} />
+      <span className="ml-auto text-[12.5px] text-accent">Network →</span>
+    </Link>
+  );
+}
+
+function NodeFact({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[11.5px] text-ink-3">{label}</div>
+      <div className="truncate text-[14px] font-medium text-ink">{value}</div>
+      {hint && <div className="text-[11px] text-ink-3">{hint}</div>}
+    </div>
   );
 }

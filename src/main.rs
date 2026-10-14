@@ -531,6 +531,10 @@ enum Command {
         objective: String,
         identity: Option<String>,
     },
+    SignObjective {
+        objective: String,
+        identity: String,
+    },
     /// Declare units into the log's supply. Genesis prefix only — see
     /// [`cairn::records::Issuance`].
     Issue {
@@ -951,6 +955,7 @@ struct RunRequest {
     max_queue: Option<usize>,
     mcp_identity: Option<String>,
     mcp_max_spend: Option<u64>,
+    mcp_http: Option<String>,
     committee_identity: Option<String>,
     attest_identity: Option<String>,
     no_mcp: bool,
@@ -1285,6 +1290,7 @@ enum DepositAction {
         region: Option<String>,
         max_bytes: Option<u64>,
         ttl_secs: Option<u64>,
+        key_shape: Option<String>,
     },
     /// Names only.
     List,
@@ -1299,6 +1305,8 @@ enum DepositAction {
         /// for exactly those bytes; without both, it goes through the node.
         size: Option<u64>,
         digest: Option<String>,
+        /// Campaign slot. Required by `ecc2k-dp` deposits, refused by others.
+        slot: Option<u64>,
     },
     /// Redeem a grant by uploading a file through this node.
     Put { grant: String, file: String },
@@ -1457,6 +1465,7 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
 
     let command = match name.as_str() {
         "post" => parse_post(&mut cursor)?,
+        "sign-objective" => parse_sign_objective(&mut cursor)?,
         "propose" => parse_propose(&mut cursor)?,
         "issue" => parse_issue(&mut cursor)?,
         "balances" => {
@@ -1714,6 +1723,7 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
         max_queue: None,
         mcp_identity: None,
         mcp_max_spend: None,
+        mcp_http: None,
         committee_identity: None,
         attest_identity: None,
         no_mcp: false,
@@ -1759,6 +1769,7 @@ fn parse_run(cursor: &mut Cursor) -> Result<Command, CliError> {
                 }
             }
             "--mcp-identity" => request.mcp_identity = Some(cursor.value("run: --mcp-identity")?),
+            "--mcp-http" => request.mcp_http = Some(cursor.value("run: --mcp-http")?),
             "--mcp-max-spend" => {
                 request.mcp_max_spend = Some(parse_u64(
                     &cursor.value("run: --mcp-max-spend")?,
@@ -1825,6 +1836,30 @@ fn parse_post(cursor: &mut Cursor) -> Result<Command, CliError> {
     Ok(Command::Post {
         objective: require(objective, "post", "an objective JSON file")?,
         identity,
+    })
+}
+
+fn parse_sign_objective(cursor: &mut Cursor) -> Result<Command, CliError> {
+    let mut objective = None;
+    let mut identity = None;
+    while let Some(token) = cursor.take() {
+        if token == "--identity" {
+            identity = Some(cursor.value("sign-objective: --identity")?);
+        } else if is_flag(&token) {
+            return Err(CliError::Usage(format!(
+                "sign-objective: unknown option {token:?}"
+            )));
+        } else if objective.is_some() {
+            return Err(CliError::Usage(format!(
+                "sign-objective: unexpected argument {token:?}"
+            )));
+        } else {
+            objective = Some(token);
+        }
+    }
+    Ok(Command::SignObjective {
+        objective: require(objective, "sign-objective", "an objective JSON file")?,
+        identity: require(identity, "sign-objective", "--identity <file>")?,
     })
 }
 
@@ -3231,6 +3266,7 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
             let mut region: Option<String> = None;
             let mut max_bytes: Option<u64> = None;
             let mut ttl_secs: Option<u64> = None;
+            let mut key_shape: Option<String> = None;
             while let Some(token) = cursor.take() {
                 match token.as_str() {
                     "--name" => name = Some(cursor.value("--name")?),
@@ -3239,6 +3275,7 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
                     "--bucket" => bucket = Some(cursor.value("--bucket")?),
                     "--prefix" => prefix = Some(cursor.value("--prefix")?),
                     "--region" => region = Some(cursor.value("--region")?),
+                    "--key-shape" => key_shape = Some(cursor.value("--key-shape")?),
                     "--max-bytes" => {
                         let raw = cursor.value("--max-bytes")?;
                         max_bytes = Some(raw.parse::<u64>().map_err(|_| {
@@ -3281,6 +3318,7 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
                 region,
                 max_bytes,
                 ttl_secs,
+                key_shape,
             }
         }
         Some("grant") => {
@@ -3289,6 +3327,7 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
             let mut bytes: Option<u64> = None;
             let mut size: Option<u64> = None;
             let mut digest: Option<String> = None;
+            let mut slot: Option<u64> = None;
             while let Some(token) = cursor.take() {
                 match token.as_str() {
                     "--deposit" => deposit = Some(cursor.value("--deposit")?),
@@ -3296,6 +3335,9 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
                         size = Some(parse_u64(&cursor.value("--size")?, "deposit grant --size")?)
                     }
                     "--submitter" => submitter = Some(cursor.value("--submitter")?),
+                    "--slot" => {
+                        slot = Some(parse_u64(&cursor.value("--slot")?, "deposit grant --slot")?)
+                    }
                     "--bytes" => {
                         let raw = cursor.value("--bytes")?;
                         bytes = Some(raw.parse::<u64>().map_err(|_| {
@@ -3327,6 +3369,7 @@ fn parse_deposit(cursor: &mut Cursor) -> Result<Command, CliError> {
                 bytes,
                 size,
                 digest,
+                slot,
             }
         }
         Some("put") => {
@@ -3798,6 +3841,11 @@ fn print_help(out: &mut dyn Write) {
     say(out, "commands:");
     say(out, "  post <objective.json> [--identity <file>]");
     say(out, "      fund a checkable question");
+    say(out, "  sign-objective <objective.json> --identity <file>");
+    say(
+        out,
+        "      sign a draft for a running node without opening its log",
+    );
     say(
         out,
         "  commit <objective-id> --submitter S --artifact FILE [--nonce N] [--sealed [--proxy URL]]",
@@ -4051,6 +4099,11 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      slice, heartbeats, commits and reveals what the solver prints; any OS",
     );
+    say(out, "  work start|status|stop --name NAME ...");
+    say(
+        out,
+        "      manage a named background contribution on this machine",
+    );
     say(out, "  agent <command> ...");
     say(
         out,
@@ -4202,6 +4255,10 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
+        "      --mcp-http ADDR also serves MCP over Streamable HTTP there (POST /mcp)",
+    );
+    say(
+        out,
         "      --mcp-max-spend N lets agents fund up to N units of objectives (default 0)",
     );
     say(
@@ -4212,10 +4269,14 @@ fn print_help(out: &mut dyn Write) {
         out,
         "      use --no-mcp or --no-queue to disable either input; stop with Ctrl-C",
     );
-    say(out, "  mcp [--identity FILE]");
+    say(out, "  mcp [--identity FILE] [--http ADDR]");
     say(
         out,
-        "      the MCP server alone, on a log of its own; --log/--root before or after",
+        "      the MCP server alone, on a log of its own; --log/--root before or after;",
+    );
+    say(
+        out,
+        "      --http serves Streamable HTTP there instead of stdio (POST /mcp)",
     );
     say(
         out,
@@ -4370,6 +4431,10 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
+        "      [--key-shape default|ecc2k-dp] [--max-bytes N] [--ttl-secs N]",
+    );
+    say(
+        out,
         "      configure a mediated upload target; secret *names* only, values via `secret set`",
     );
     say(out, "  deposit list");
@@ -4378,11 +4443,15 @@ fn print_help(out: &mut dyn Write) {
     say(out, "      public location; never credential values");
     say(
         out,
-        "  deposit grant --deposit N --submitter S [--bytes N] [--size N] [--digest HEX]",
+        "  deposit grant --deposit N --submitter S [--bytes N] [--size N] [--digest HEX] [--slot N]",
     );
     say(
         out,
-        "      issue a short-lived single-use upload grant (JSON on stdout)",
+        "      issue a short-lived single-use upload grant (JSON on stdout); --slot is",
+    );
+    say(
+        out,
+        "      required by ecc2k-dp deposits and refused by all others",
     );
     say(out, "  deposit put --grant ID --file PATH");
     say(
@@ -4598,6 +4667,7 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
     config.mcp = !request.no_mcp;
     config.mcp_identity = request.mcp_identity.as_ref().map(PathBuf::from);
     config.mcp_max_spend = request.mcp_max_spend;
+    config.mcp_http = request.mcp_http.clone();
     config.committee_identity = request.committee_identity.as_ref().map(PathBuf::from);
     config.attest_identity = request.attest_identity.as_ref().map(PathBuf::from);
     config.store = store.limit().is_some().then(|| store.clone());
@@ -4621,7 +4691,13 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
     // `run` is itself a valid stdio MCP command, so stdout belongs exclusively
     // to JSON-RPC. Operational status follows the rest of the daemon to stderr.
     eprintln!("cairn node starting");
-    eprintln!("  mcp:  {}", if config.mcp { "stdio" } else { "disabled" });
+    let mcp_line = match (config.mcp, config.mcp_http.as_deref()) {
+        (true, Some(addr)) => format!("stdio + http://{addr}/mcp"),
+        (true, None) => String::from("stdio"),
+        (false, Some(addr)) => format!("http://{addr}/mcp"),
+        (false, None) => String::from("disabled"),
+    };
+    eprintln!("  mcp:  {mcp_line}");
     eprintln!("  ui:   http://{serve}/ui/");
     eprintln!("  http: {serve}");
     eprintln!("  p2p:  {listen}");
@@ -4682,6 +4758,30 @@ fn cmd_post(
     identity: Option<&str>,
 ) -> Result<i32, CliError> {
     post_objective_file(out, options, path, identity)?;
+    Ok(0)
+}
+
+/// Sign a draft for submission to a running node without opening its locked log.
+/// The signed JSON is the exact record that `POST /submit?kind=objective` accepts.
+fn cmd_sign_objective(
+    out: &mut dyn Write,
+    path: &str,
+    identity_path: &str,
+) -> Result<i32, CliError> {
+    let data = read_json(path)?;
+    validate_objective(&data).map_err(CliError::Schema)?;
+    if data.get("funding_signature").is_some() {
+        return Err(CliError::Usage(String::from(
+            "sign-objective: input must be an unsigned objective draft",
+        )));
+    }
+    let objective = Objective::from_value(&data).map_err(CliError::Record)?;
+    let identity = load_identity(Some(identity_path))?.expect("required identity path");
+    let signed = objective.funded_by(&identity);
+    signed
+        .verify_funding_signature()
+        .map_err(|error| CliError::Usage(format!("sign-objective: {error}")))?;
+    say(out, signed.to_value().canonical_string());
     Ok(0)
 }
 
@@ -8201,6 +8301,7 @@ fn cmd_deposit(
             region,
             max_bytes,
             ttl_secs,
+            key_shape,
         } => {
             let mut spec = match provider.as_str() {
                 "file" => {
@@ -8229,6 +8330,16 @@ fn cmd_deposit(
             }
             if let Some(n) = *ttl_secs {
                 spec.ttl_secs = n;
+            }
+            if let Some(prefix) = prefix {
+                spec.prefix = Some(deposit::normalize_prefix(prefix));
+            }
+            if let Some(shape) = key_shape {
+                spec.key_shape = deposit::KeyShape::parse(shape).ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "deposit add: unknown key_shape {shape:?}; expected default or ecc2k-dp"
+                    ))
+                })?;
             }
             let path = dir.add(&spec).map_err(CliError::Deposit)?;
             say(
@@ -8265,6 +8376,7 @@ fn cmd_deposit(
             bytes,
             size,
             digest,
+            slot,
         } => {
             let request = deposit::GrantRequest {
                 deposit,
@@ -8272,6 +8384,7 @@ fn cmd_deposit(
                 max_bytes: *bytes,
                 size: *size,
                 digest: digest.as_deref(),
+                slot: *slot,
                 requester: None,
             };
             let grant = deposit::issue_grant(&dir, &request, None, &secrets_dir)
@@ -9995,6 +10108,10 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
             objective,
             identity,
         } => cmd_post(out, options, objective, identity.as_deref()),
+        Command::SignObjective {
+            objective,
+            identity,
+        } => cmd_sign_objective(out, objective, identity),
         Command::Issue { holder, units } => cmd_issue(out, options, holder, *units),
         Command::Balances => cmd_balances(out, options),
         Command::Commit {
@@ -10769,6 +10886,41 @@ mod tests {
     }
 
     #[test]
+    fn sign_objective_produces_a_fundable_record_without_opening_a_log() {
+        let (dir, options, draft) = bundle_with_objective();
+        let draft_path = dir.join("draft.json");
+        let identity_path = dir.join("identity.json");
+        std::fs::write(&draft_path, draft.canonical_string()).expect("write draft");
+        cmd_identity(&mut Vec::new(), identity_path.to_str().expect("utf-8"))
+            .expect("create identity");
+
+        let mut output = Vec::new();
+        cmd_sign_objective(
+            &mut output,
+            draft_path.to_str().expect("utf-8"),
+            identity_path.to_str().expect("utf-8"),
+        )
+        .expect("sign draft");
+        let signed = Value::from_json(std::str::from_utf8(&output).expect("utf-8"))
+            .expect("one JSON record");
+        let objective = Objective::from_value(&signed).expect("objective");
+        objective
+            .verify_funding_signature()
+            .expect("valid funding signature");
+        assert_ne!(objective.funder, "treasury");
+        assert!(!std::path::Path::new(&options.log).exists());
+
+        std::fs::write(&draft_path, signed.canonical_string()).expect("write signed record");
+        let error = cmd_sign_objective(
+            &mut Vec::new(),
+            draft_path.to_str().expect("utf-8"),
+            identity_path.to_str().expect("utf-8"),
+        )
+        .expect_err("an already signed record must not be re-signed");
+        assert!(error.report().contains("unsigned objective draft"));
+    }
+
+    #[test]
     fn post_warns_when_a_pin_does_not_resolve_but_still_accepts_it() {
         // A wrong pin cannot be refused: posting an objective whose checker a
         // peer will serve is how content-addressed distribution works, and
@@ -11540,6 +11692,7 @@ mod tests {
                     region: None,
                     max_bytes: None,
                     ttl_secs: None,
+                    key_shape: None,
                 }
             }
         );
@@ -11563,6 +11716,7 @@ mod tests {
                     bytes: Some(1024),
                     size: None,
                     digest: None,
+                    slot: None,
                 }
             }
         );
@@ -11623,6 +11777,7 @@ mod tests {
                     region: None,
                     max_bytes: Some(4096),
                     ttl_secs: None,
+                    key_shape: None,
                 }
             )
             .expect("add"),
@@ -11639,6 +11794,7 @@ mod tests {
                     bytes: Some(64),
                     size: None,
                     digest: None,
+                    slot: None,
                 }
             )
             .expect("grant"),

@@ -53,11 +53,11 @@ pub fn timestamp() -> String {
 
 /// Seconds since the Unix epoch.
 ///
-/// Same advisory status as [`timestamp`], and one caller with a real need for
-/// the number rather than the string: [`crate::dht::ProviderStore`] expires
-/// records against it. Expiry is the one place in this crate where a clock
-/// changes behaviour, and it is safe there for the reason the DHT is safe
-/// generally -- being wrong costs a stale hint, never a wrong verdict.
+/// Same advisory status as [`timestamp`]. Callers with a real need for the
+/// number rather than the string expire something advisory against it: a DHT
+/// provider hint, and an optional Google browser session. Being wrong costs a
+/// stale hint or a signed-out browser, never a wrong verdict. The log does
+/// not read this clock to decide an epoch.
 pub fn unix_seconds() -> u64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(elapsed) => elapsed.as_secs(),

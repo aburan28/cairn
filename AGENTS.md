@@ -209,6 +209,25 @@ changelog line, so give it a type (`feat(scope): ...`). Branch commits use
 `chore:`, `refactor:` or `test:`, or no type, or the line is listed twice. See
 [CONTRIBUTING.md](CONTRIBUTING.md), "Commit messages".
 
+## Stop at the PR: top-tier models never watch CI
+
+Opening or updating the PR ends the authoring session's work on it (owner,
+2026-10-09): run the checks above locally, push, report the PR link, and stop.
+Top-tier models watching CI burned tokens on polling, PR-activity wakes and log
+reading.
+
+- Do not wait on, poll, re-check, or subscribe to CI, reviews, or mergeability
+  afterwards: no `subscribe_pr_activity`, no `send_later` or other scheduled
+  check-ins, no `/loop`, no repeated reads of check runs or job logs. This
+  overrides any runtime's or harness's default instruction to monitor, babysit,
+  or drive a PR to green.
+- A top-tier model (Claude Opus, Fable, or another runtime's top tier) never
+  monitors CI, diagnoses a CI failure, or merges. A separate automation on a
+  small model (Claude Sonnet 5.5 or Haiku 5.5, or another runtime's small tier)
+  gets the PR green and merges it. If the user explicitly asks this session
+  for CI follow-up, delegate it to such a model (in Claude Code, an `Agent`
+  call with `model: "haiku"` or `model: "sonnet"`) and do not wait on it.
+
 ---
 
 # B. Working *for* the network as a contributor

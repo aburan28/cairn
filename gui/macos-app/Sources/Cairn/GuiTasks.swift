@@ -12,6 +12,23 @@ struct GuiTask: Identifiable, Equatable {
 }
 
 enum GuiTasks {
+    /// The digest is the posted objective's identity, not a keyword taken
+    /// from its untrusted statement. Only this exact objective gets the
+    /// bundled search program.
+    static let bundledOrbitObjective = "sha256:223a649828de7d0f031a28383b444d29e0481a54a2a26b6b45501ec9ab7f0d44"
+
+    static func bundledWork(for objective: String, python: URL?, count: Int) -> (solver: String, arguments: [String])? {
+        guard objective == bundledOrbitObjective, (1...16).contains(count),
+              let library, let python, FileManager.default.isExecutableFile(atPath: python.path)
+        else { return nil }
+        let root = library.appendingPathComponent("examples/certicom-ecdlp")
+        let script = root.appendingPathComponent("tools/orbit_solver.py")
+        let walker = root.appendingPathComponent("tools/orbit_dp.py")
+        let job = root.appendingPathComponent("jobs/ecc2k-23.json")
+        guard [script, walker, job].allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else { return nil }
+        return (python.path, [script.path, "--job", job.path, "--count", String(count)])
+    }
+
     static let all: [GuiTask] = [
         GuiTask(
             id: "ecc2k130-orbit",

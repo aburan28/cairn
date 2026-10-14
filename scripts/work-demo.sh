@@ -138,4 +138,86 @@ for line in sys.stdin:
 fi
 echo "  garage was paid $PAID"
 
+rule "a managed worker stops after its current round and drains its commitment"
+# Begin just after an epoch opens so its four-second round commits before the
+# boundary. Stop while the solver is active, then require the reveal to land.
+sleep "$(python3 -c 'import os,time; n=int(os.environ["CAIRN_EPOCH_SECONDS"]); print(n - time.time() % n + 0.2)')"
+"$RUST" work start --name demo --state-dir "$WORK/managed" \
+  --node "$BASE" --objective "$OID" --worker managed-demo --heartbeat 1 \
+  -- "$WORK/solver.sh" >"$WORK/start.out"
+grep -q 'started demo' "$WORK/start.out" || fail "managed worker did not start"
+for _ in $(seq 1 40); do
+  STATUS_LINE=$("$RUST" work status --name demo --state-dir "$WORK/managed")
+  case "$STATUS_LINE" in *'demo: running;'*) break ;; esac
+  sleep 0.1
+done
+case "$STATUS_LINE" in *'demo: running;'*) ;; *) fail "managed worker did not report running" ;; esac
+LIVE=0
+for _ in $(seq 1 30); do
+  LIVE=$(curl -s "$BASE/progress/$OID" | python3 -c '
+import json,sys
+workers=json.load(sys.stdin)["reported"]["workers"]
+print(sum(1 for w in workers if w["worker"]=="managed-demo" and w["status"]=="live"))')
+  [ "$LIVE" = "1" ] && break
+  sleep 0.1
+done
+[ "$LIVE" = "1" ] || fail "managed worker never started its solver"
+"$RUST" work stop --name demo --state-dir "$WORK/managed" >"$WORK/stop.out"
+grep -q 'stopping demo' "$WORK/stop.out" || fail "managed worker did not accept stop"
+for _ in $(seq 1 400); do
+  STATUS_LINE=$("$RUST" work status --name demo --state-dir "$WORK/managed")
+  case "$STATUS_LINE" in *'demo: done;'*) break ;; esac
+  sleep 0.1
+done
+case "$STATUS_LINE" in *'demo: done;'*) ;; *) fail "managed worker did not stop" ;; esac
+grep -q 'committed a candidate' "$WORK/managed/demo/worker.log" || fail "managed worker lost its round"
+grep -q 'revealed the candidate' "$WORK/managed/demo/worker.log" || fail "managed stop stranded a commitment"
+echo "  $STATUS_LINE"
+
+rule "a paused worker reveals pending work, resumes, then stops safely"
+sleep "$(python3 -c 'import os,time; n=int(os.environ["CAIRN_EPOCH_SECONDS"]); print(n - time.time() % n + 0.2)')"
+"$RUST" work --node "$BASE" --objective "$OID" --worker pause-demo \
+  --heartbeat 1 --margin 2 --pause-file "$WORK/pause" --stop-file "$WORK/stop" \
+  -- "$WORK/solver.sh" >"$WORK/pause-worker.log" 2>&1 &
+WORKER_PID=$!
+LIVE=0
+for _ in $(seq 1 40); do
+  LIVE=$(curl -s "$BASE/progress/$OID" | python3 -c '
+import json,sys
+print(sum(1 for w in json.load(sys.stdin)["reported"]["workers"] if w["worker"]=="pause-demo" and w["status"]=="live"))')
+  [ "$LIVE" = "1" ] && break
+  sleep 0.1
+done
+[ "$LIVE" = "1" ] || { cat "$WORK/pause-worker.log" >&2; fail "pause worker never started its solver"; }
+printf 'pause' >"$WORK/pause"
+PAUSED=0
+for _ in $(seq 1 80); do
+  if grep -q 'work paused:' "$WORK/pause-worker.log"; then PAUSED=1; break; fi
+  sleep 0.1
+done
+[ "$PAUSED" = "1" ] || { cat "$WORK/pause-worker.log" >&2; fail "worker did not pause after its round"; }
+REVEALED=0
+for _ in $(seq 1 300); do
+  if grep -q 'revealed the candidate' "$WORK/pause-worker.log"; then REVEALED=1; break; fi
+  sleep 0.1
+done
+[ "$REVEALED" = "1" ] || { cat "$WORK/pause-worker.log" >&2; fail "pause stranded a commitment"; }
+rm "$WORK/pause"
+RESUMED=0
+for _ in $(seq 1 50); do
+  if grep -q 'work resumed:' "$WORK/pause-worker.log"; then RESUMED=1; break; fi
+  sleep 0.1
+done
+[ "$RESUMED" = "1" ] || { cat "$WORK/pause-worker.log" >&2; fail "worker did not resume"; }
+printf 'stop' >"$WORK/stop"
+for _ in $(seq 1 400); do
+  kill -0 "$WORKER_PID" 2>/dev/null || break
+  sleep 0.1
+done
+kill -0 "$WORKER_PID" 2>/dev/null && { cat "$WORK/pause-worker.log" >&2; fail "resumed worker did not stop"; }
+wait "$WORKER_PID" || { cat "$WORK/pause-worker.log" >&2; fail "resumed worker exited non-zero"; }
+WORKER_PID=""
+grep -q 'done:' "$WORK/pause-worker.log" || fail "worker did not finish its safe stop"
+echo "  paused, revealed, resumed and stopped"
+
 printf '\n\033[32mok\033[0m: a worker that shares nothing with the node but its address took work, showed up, and was paid\n'

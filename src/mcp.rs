@@ -90,12 +90,14 @@
 //! and the failure looks like a client bug.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Map, Value as Json};
@@ -117,7 +119,14 @@ use crate::verifiers::VerifierRegistry;
 
 /// Protocol versions this server implements. The first is the default when a
 /// client asks for something unrecognised.
-const SUPPORTED_PROTOCOLS: &[&str] = &["2025-06-18", "2024-11-05"];
+///
+/// Four entries rather than one because the version is negotiated per
+/// connection: Claude Code, Codex and OpenCode each pin the newest version
+/// they shipped against, and answering "our newest" to a version we do not
+/// speak would be making one up. Echoing the client's version when it is in
+/// this list keeps an older client on its own dialect instead of forcing it
+/// onto ours.
+const SUPPORTED_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 const SERVER_NAME: &str = "cairn";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -196,6 +205,93 @@ impl SpendCeiling {
     }
 }
 
+/// Who is attached to this node over MCP, for `GET /network`.
+///
+/// Only the daemon's own session has one: a standalone `cairn mcp` serves no
+/// HTTP, so there is no page to tell. Everything here is this process's
+/// account of its stdio session -- the client's name is whatever the client
+/// called itself in `initialize`, unchecked, the same standing as a worker's
+/// device name.
+#[derive(Debug, Default)]
+pub(crate) struct Presence {
+    /// `clientInfo` from the last `initialize`: name and version.
+    client: Option<(String, String)>,
+    connected_at: Option<u64>,
+    last_call_at: Option<u64>,
+    calls: u64,
+    /// Tool calls that appended something and were admitted.
+    writes: u64,
+    last_tool: Option<String>,
+    /// The key submissions are signed with, when there is one.
+    signs_as: Option<String>,
+    /// What `post_objective` may spend in total. See [`SpendCeiling`].
+    spend_limit: u64,
+}
+
+pub(crate) type SharedPresence = Arc<Mutex<Presence>>;
+
+impl Presence {
+    pub(crate) fn shared() -> SharedPresence {
+        Arc::new(Mutex::new(Presence::default()))
+    }
+
+    pub(crate) fn to_value(&self) -> Value {
+        let iso = |at: Option<u64>| match at {
+            Some(at) => Value::string(crate::time::format_iso8601_utc(
+                i64::try_from(at).unwrap_or(i64::MAX),
+            )),
+            None => Value::Null,
+        };
+        Value::object([
+            ("serving", Value::Bool(true)),
+            ("transport", Value::string("stdio")),
+            (
+                "client",
+                match &self.client {
+                    Some((name, version)) => Value::object([
+                        ("name", Value::string(name.clone())),
+                        ("version", Value::string(version.clone())),
+                    ]),
+                    None => Value::Null,
+                },
+            ),
+            ("connected_at", iso(self.connected_at)),
+            ("last_call_at", iso(self.last_call_at)),
+            ("calls", Value::Int(i128::from(self.calls))),
+            ("writes", Value::Int(i128::from(self.writes))),
+            (
+                "last_tool",
+                match &self.last_tool {
+                    Some(tool) => Value::string(tool.clone()),
+                    None => Value::Null,
+                },
+            ),
+            (
+                "signs_as",
+                match &self.signs_as {
+                    Some(key) => Value::string(key.clone()),
+                    None => Value::Null,
+                },
+            ),
+            ("spend_limit", Value::Int(i128::from(self.spend_limit))),
+            (
+                "prompts",
+                Value::array(
+                    crate::prompts::ALL
+                        .iter()
+                        .map(|definition| Value::string(definition.name)),
+                ),
+            ),
+        ])
+    }
+}
+
+/// What the daemon hands its MCP session so the HTTP half can see it.
+struct Attachment {
+    presence: SharedPresence,
+    journal: crate::journal::Shared,
+}
+
 /// Run `cairn mcp`: the standalone stdio server, owning its own ledger.
 ///
 /// [`crate::daemon`] uses the same protocol engine with the daemon's
@@ -213,6 +309,7 @@ pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
     let mut identity_path: Option<PathBuf> = None;
     let mut key_file: Option<PathBuf> = globals.key_file;
     let mut max_spend: Option<u64> = None;
+    let mut http: Option<String> = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -236,6 +333,10 @@ pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
                 Some(Ok(units)) => max_spend = Some(units),
                 _ => fail("--max-spend needs a whole number of units"),
             },
+            "--http" => match args.next() {
+                Some(v) => http = Some(v),
+                None => fail("--http needs an address, e.g. 127.0.0.1:8001"),
+            },
             "--help" | "-h" => {
                 eprintln!(
                     "cairn mcp — MCP server over stdio, on a log of its own\n\n\
@@ -248,7 +349,10 @@ pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
                                  CLI's own, so a sealed log opens with no flag)\n\
                      --max-spend total reward agents may fund through post_objective\n\
                                  while this server runs (default 0: unfunded objectives\n\
-                                 only; also CAIRN_MCP_MAX_SPEND)\n\n\
+                                 only; also CAIRN_MCP_MAX_SPEND)\n\
+                     --http      serve Streamable HTTP MCP on this address instead of\n\
+                                 stdio, e.g. 127.0.0.1:8001. POST JSON-RPC to /mcp.\n\
+                                 Plain HTTP: bind loopback, or tunnel it.\n\n\
                      For an agent whose work should reach peers live, configure the\n\
                      client to launch `cairn run` instead: same protocol, one node.\n"
                 );
@@ -307,8 +411,718 @@ pub fn standalone(args: Vec<String>, globals: crate::cli::Globals) -> i32 {
         root.display()
     );
     report_identity(&server, "--identity");
+    if let Some(addr) = http {
+        return serve_http(server, &addr);
+    }
     serve_stdio(server);
     0
+}
+
+/// Start MCP over Streamable HTTP on a daemon's ledger, sharing the daemon's
+/// one rules engine rather than opening a second writer.
+///
+/// Unlike [`start_shared_stdio`] this returns no completion handle: stdio has
+/// one client whose departure ends the process's supervision, while HTTP
+/// clients come and go and the listener never finishes.
+pub(crate) fn start_shared_http(
+    state: Arc<Mutex<crate::daemon::State>>,
+    identity_path: Option<&Path>,
+    log: &Path,
+    key_path: &Path,
+    spend: Arc<Mutex<SpendCeiling>>,
+    addr: &str,
+) -> Result<(), String> {
+    let identity = identity_path.map(load_identity).transpose()?;
+    let cipher = pending_cipher(log, key_path)?;
+    let server = Server::new_shared(state, identity, cipher).with_shared_spend_ceiling(&spend);
+    let listener = bind_http(addr)?;
+    eprintln!(
+        "cairn mcp {SERVER_VERSION}: sharing daemon ledger {}, Streamable HTTP on {}",
+        log.display(),
+        listener
+            .local_addr()
+            .map_or_else(|_| addr.to_string(), |bound| bound.to_string())
+    );
+    report_identity(&server, "--mcp-identity");
+    let hub = Arc::new(Mutex::new(HttpHub::new(server)));
+    thread::Builder::new()
+        .name(String::from("cairn-mcp-http"))
+        .spawn(move || accept_loop(listener, hub))
+        .map_err(|error| format!("cannot start HTTP thread: {error}"))?;
+    Ok(())
+}
+
+// -- Streamable HTTP ----------------------------------------------------------
+//
+// The same protocol engine as stdio (`Server::handle_line`), behind the MCP
+// Streamable HTTP transport: one POST /mcp per JSON-RPC message, sessions
+// carried in the `Mcp-Session-Id` header. This is what a client that cannot
+// spawn a subprocess speaks -- a remote Claude Code, an agent on another
+// machine -- where stdio is only ever local.
+//
+// Deliberately POST-only: this server sends no server-initiated messages
+// (`tools.listChanged` is false and stays false), so there is nothing a GET
+// SSE stream would carry, and 405 is the spec's answer for not offering one.
+// Responses are single JSON documents rather than SSE streams, which the spec
+// allows and which keeps one request on one connection with no framing beyond
+// content-length.
+//
+// Plain HTTP/1.1, hand-rolled like `serve.rs` and for the same reason: no HTTP
+// crate enters this dependency tree. And plain HTTP, not HTTPS: `cipher_policy`
+// refuses TLS crates, so a remote client reaches this through an SSH tunnel
+// or a proxy that can reach the loopback listener. The listener itself refuses
+// a non-loopback bind and browser origins.
+
+/// Largest MCP request body read, in bytes.
+///
+/// `serve.rs` caps claims at 1 MiB; MCP carries the same artifacts plus
+/// base64-friendly room, and the check happens before anything is allocated.
+const MCP_MAX_BODY_BYTES: u64 = 8 << 20;
+
+/// Longest request line or header line, in bytes. See `serve.rs`: an
+/// unbounded `read_line` once aborted the whole process on allocation failure.
+const MCP_MAX_LINE_BYTES: u64 = 8 * 1024;
+
+/// Most header lines read before a request is refused.
+const MCP_MAX_HEADERS: usize = 100;
+
+/// How long a request may take to arrive. A slow-loris holding sockets is the
+/// cheapest attack on a thread-per-connection server; this is the cheapest
+/// answer. There is deliberately no *write* timeout: a tool call runs to
+/// completion however long its verifier takes, exactly as on stdio.
+const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Connections served at once; past this a connection is answered 503 rather
+/// than queued with no thread to serve it.
+const MCP_MAX_CONCURRENT: u64 = 64;
+
+/// Sessions held at once. Each is three small maps, but an `initialize` that
+/// always minted would let a stranger grow the map without bound.
+const MCP_MAX_SESSIONS: usize = 1024;
+
+/// One HTTP client's citation-provenance state: what this server showed *that*
+/// client through a structured field, and the capabilities proving it.
+///
+/// The hub swaps the caller's views into the shared [`Server`] before each
+/// request and back out after, so capabilities stay per-session the way
+/// stdio's single client gets them per-process. What is deliberately NOT here:
+/// the pending commitments, which are keyed by submitter and artifact and
+/// shared across sessions like a reconnect, and the spend ceiling, which is
+/// the operator's per-run budget and not per-client.
+#[derive(Default)]
+struct SessionViews {
+    offered: BTreeSet<String>,
+    citation_capabilities: BTreeMap<String, String>,
+    tainted: BTreeSet<String>,
+}
+
+impl Server {
+    fn take_views(&mut self) -> SessionViews {
+        SessionViews {
+            offered: std::mem::take(&mut self.offered),
+            citation_capabilities: std::mem::take(&mut self.citation_capabilities),
+            tainted: std::mem::take(&mut self.tainted),
+        }
+    }
+
+    fn put_views(&mut self, views: SessionViews) {
+        self.offered = views.offered;
+        self.citation_capabilities = views.citation_capabilities;
+        self.tainted = views.tainted;
+    }
+}
+
+/// One [`Server`] behind a session table: the engine one HTTP listener serves,
+/// from any number of connection threads through one mutex.
+struct HttpHub {
+    server: Server,
+    sessions: BTreeMap<String, SessionViews>,
+}
+
+/// What one POST /mcp becomes: a status, an optional JSON-RPC frame, and the
+/// session id to answer with (the caller's, or a freshly minted one).
+struct HttpAnswer {
+    status: u16,
+    body: Option<String>,
+    session: Option<String>,
+}
+
+impl HttpHub {
+    fn new(server: Server) -> HttpHub {
+        HttpHub {
+            server,
+            sessions: BTreeMap::new(),
+        }
+    }
+
+    fn mint_session() -> String {
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// Run one POST /mcp body. `presented` is the `Mcp-Session-Id` header, if
+    /// the client sent one.
+    ///
+    /// `initialize` always opens a fresh session, even when the client
+    /// presented an id it already holds: re-initializing mid-session is a new
+    /// handshake, and the response carries the id to use from here on. The old
+    /// session lingers until the cap -- sessions are small maps, and refusing
+    /// a new handshake because an old one exists would be stranger.
+    fn handle(&mut self, presented: Option<&str>, body: &str) -> HttpAnswer {
+        let request: Json = match serde_json::from_str(body) {
+            Ok(request) => request,
+            Err(error) => {
+                return HttpAnswer {
+                    status: 400,
+                    body: Some(
+                        error_response(
+                            Json::Null,
+                            code::PARSE_ERROR,
+                            &format!("invalid JSON: {error}"),
+                        )
+                        .to_string(),
+                    ),
+                    session: presented.map(str::to_string),
+                };
+            }
+        };
+        let is_initialize = request.get("method").and_then(Json::as_str) == Some("initialize")
+            && request.get("id").is_some();
+        if is_initialize {
+            if self.sessions.len() >= MCP_MAX_SESSIONS {
+                return HttpAnswer {
+                    status: 503,
+                    body: Some(
+                        error_response(
+                            Json::Null,
+                            code::SERVER_FULL,
+                            "too many sessions, try again",
+                        )
+                        .to_string(),
+                    ),
+                    session: None,
+                };
+            }
+            let id = Self::mint_session();
+            self.server.put_views(SessionViews::default());
+            let out = self.server.handle_line(body);
+            let views = self.server.take_views();
+            self.sessions.insert(id.clone(), views);
+            return HttpAnswer {
+                status: 200,
+                body: out,
+                session: Some(id),
+            };
+        }
+        let Some(key) = presented else {
+            return HttpAnswer {
+                status: 400,
+                body: Some(
+                    error_response(
+                        Json::Null,
+                        code::NO_SESSION,
+                        "missing Mcp-Session-Id: POST initialize first",
+                    )
+                    .to_string(),
+                ),
+                session: None,
+            };
+        };
+        let Some(views) = self.sessions.remove(key) else {
+            return HttpAnswer {
+                status: 404,
+                body: Some(
+                    error_response(
+                        Json::Null,
+                        code::NO_SESSION,
+                        "unknown Mcp-Session-Id: POST initialize to open one",
+                    )
+                    .to_string(),
+                ),
+                session: None,
+            };
+        };
+        // Removed and reinserted rather than borrowed: the engine borrows the
+        // whole server mutably while it runs.
+        self.server.put_views(views);
+        let out = self.server.handle_line(body);
+        let views = self.server.take_views();
+        self.sessions.insert(key.to_string(), views);
+        match out {
+            // A notification gets no frame; 202 is what says it was heard.
+            None => HttpAnswer {
+                status: 202,
+                body: None,
+                session: Some(key.to_string()),
+            },
+            Some(frame) => HttpAnswer {
+                status: 200,
+                body: Some(frame),
+                session: Some(key.to_string()),
+            },
+        }
+    }
+
+    /// Forget a session. `false` is unknown-or-absent, which DELETE answers
+    /// 404: confirming only what the caller already holds would be an oracle,
+    /// but session ids are 256-bit random and there is nothing to enumerate.
+    fn terminate(&mut self, presented: Option<&str>) -> bool {
+        presented.is_some_and(|key| self.sessions.remove(key).is_some())
+    }
+
+    #[cfg(test)]
+    fn test_capability(&mut self, session: &str, claim_id: &str) -> Option<String> {
+        let views = self.sessions.remove(session)?;
+        self.server.put_views(views);
+        let capability = self.server.offer(claim_id);
+        let views = self.server.take_views();
+        self.sessions.insert(session.to_string(), views);
+        Some(capability)
+    }
+
+    #[cfg(test)]
+    fn test_has(&self, session: &str, claim_id: &str) -> bool {
+        self.sessions
+            .get(session)
+            .is_some_and(|views| views.citation_capabilities.contains_key(claim_id))
+    }
+}
+
+/// Serve Streamable HTTP MCP instead of stdio. Returns only on a startup
+/// failure the operator has to fix.
+fn serve_http(server: Server, addr: &str) -> i32 {
+    let listener = match bind_http(addr) {
+        Ok(listener) => listener,
+        Err(error) => fail(&error),
+    };
+    eprintln!(
+        "cairn mcp {SERVER_VERSION}: Streamable HTTP on {}, POST JSON-RPC to /mcp",
+        listener
+            .local_addr()
+            .map_or_else(|_| addr.to_string(), |bound| bound.to_string())
+    );
+    accept_loop(listener, Arc::new(Mutex::new(HttpHub::new(server))));
+    // The accept loop never returns; this is for the type, not the control flow.
+    0
+}
+
+fn bind_http(addr: &str) -> Result<TcpListener, String> {
+    let socket: SocketAddr = addr
+        .parse()
+        .map_err(|_| format!("--http {addr:?} is not a host:port address"))?;
+    // This endpoint acts as the operator's identity and can set secrets. A
+    // warning cannot protect a non-loopback plaintext bind from other hosts.
+    // Remote clients must tunnel to this loopback listener.
+    if !socket.ip().is_loopback() {
+        return Err(format!(
+            "--http {addr} must bind to loopback; tunnel remote MCP clients to 127.0.0.1"
+        ));
+    }
+    TcpListener::bind(socket).map_err(|error| format!("cannot listen on {addr}: {error}"))
+}
+
+fn accept_loop(listener: TcpListener, hub: Arc<Mutex<HttpHub>>) {
+    let live = Arc::new(Mutex::new(0u64));
+    for stream in listener.incoming() {
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            // One failed accept is not a reason to stop serving.
+            Err(_) => continue,
+        };
+        let admitted = match live.lock() {
+            Ok(mut live) if *live < MCP_MAX_CONCURRENT => {
+                *live += 1;
+                true
+            }
+            _ => false,
+        };
+        if !admitted {
+            let _ = http_respond(
+                &mut stream,
+                503,
+                "application/json",
+                br#"{"error":"busy"}"#,
+                &[],
+            );
+            continue;
+        }
+        let hub = Arc::clone(&hub);
+        let live = Arc::clone(&live);
+        thread::spawn(move || {
+            let _guard = ConnectionGuard { live };
+            let _ = handle_http_conn(&mut stream, &hub);
+            http_linger(&mut stream);
+        });
+    }
+}
+
+/// One admitted connection's hold on the concurrency count, released on drop
+/// so a handler that panics still frees its slot.
+struct ConnectionGuard {
+    live: Arc<Mutex<u64>>,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut live) = self.live.lock() {
+            *live = live.saturating_sub(1);
+        }
+    }
+}
+
+struct HttpRequest {
+    method: String,
+    path: String,
+    content_length: u64,
+    content_type: Option<String>,
+    session: Option<String>,
+    host: Option<String>,
+    origin: Option<String>,
+}
+
+fn handle_http_conn(stream: &mut TcpStream, hub: &Arc<Mutex<HttpHub>>) -> io::Result<()> {
+    stream.set_read_timeout(Some(MCP_REQUEST_TIMEOUT))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let request = match read_http_request(&mut reader) {
+        Ok(request) => request,
+        Err(message) => {
+            let frame = error_response(Json::Null, code::INVALID_REQUEST, &message).to_string();
+            http_respond(stream, 400, "application/json", frame.as_bytes(), &[])?;
+            return Ok(());
+        }
+    };
+    // A malicious webpage can reach a loopback socket through DNS rebinding
+    // or CORS. Native MCP clients and SSH tunnels send the loopback authority
+    // and no Origin; no browser origin is entrusted with the node's identity.
+    let local_port = stream.local_addr()?.port();
+    if !http_authority_allowed(
+        request.host.as_deref(),
+        request.origin.as_deref(),
+        local_port,
+    ) {
+        let frame =
+            error_response(Json::Null, code::INVALID_REQUEST, "untrusted HTTP origin").to_string();
+        http_respond(stream, 403, "application/json", frame.as_bytes(), &[])?;
+        return Ok(());
+    }
+    // One request per connection: like `serve.rs`, this answers once and
+    // closes, so there is no keep-alive state to get wrong.
+    match (request.method.as_str(), request.path.as_str()) {
+        ("OPTIONS", _) => {
+            http_respond(stream, 204, "application/json", b"", &[])?;
+        }
+        ("POST", "/mcp") => {
+            if request.content_type.as_deref() != Some("application/json") {
+                let frame = error_response(
+                    Json::Null,
+                    code::INVALID_REQUEST,
+                    "POST /mcp needs content-type application/json",
+                )
+                .to_string();
+                http_respond(stream, 415, "application/json", frame.as_bytes(), &[])?;
+                return Ok(());
+            }
+            let mut body = vec![0u8; request.content_length as usize];
+            reader.read_exact(&mut body).map_err(|_| {
+                io::Error::new(io::ErrorKind::UnexpectedEof, "could not read the body")
+            })?;
+            let text = match String::from_utf8(body) {
+                Ok(text) => text,
+                Err(_) => {
+                    let frame =
+                        error_response(Json::Null, code::PARSE_ERROR, "the body is not UTF-8")
+                            .to_string();
+                    http_respond(stream, 400, "application/json", frame.as_bytes(), &[])?;
+                    return Ok(());
+                }
+            };
+            if text.trim().is_empty() {
+                let frame =
+                    error_response(Json::Null, code::INVALID_REQUEST, "empty body").to_string();
+                http_respond(stream, 400, "application/json", frame.as_bytes(), &[])?;
+                return Ok(());
+            }
+            let answer = match hub.lock() {
+                Ok(mut hub) => hub.handle(request.session.as_deref(), &text),
+                Err(_) => HttpAnswer {
+                    status: 503,
+                    body: Some(error_response(Json::Null, code::SERVER_FULL, "busy").to_string()),
+                    session: None,
+                },
+            };
+            let session_header = answer.session.clone();
+            let extra: Vec<(&str, &str)> = match session_header.as_deref() {
+                Some(id) => vec![("Mcp-Session-Id", id)],
+                None => vec![],
+            };
+            http_respond(
+                stream,
+                answer.status,
+                "application/json",
+                answer.body.as_deref().unwrap_or("").as_bytes(),
+                &extra,
+            )?;
+        }
+        ("DELETE", "/mcp") => {
+            let gone = match hub.lock() {
+                Ok(mut hub) => hub.terminate(request.session.as_deref()),
+                Err(_) => false,
+            };
+            if gone {
+                http_respond(stream, 204, "application/json", b"", &[])?;
+            } else {
+                let frame = error_response(
+                    Json::Null,
+                    code::NO_SESSION,
+                    "unknown Mcp-Session-Id: nothing to close",
+                )
+                .to_string();
+                http_respond(stream, 404, "application/json", frame.as_bytes(), &[])?;
+            }
+        }
+        ("GET", "/mcp") => {
+            // 405, not an empty stream: hanging a GET open to send nothing
+            // would hold a thread per client for no protocol purpose.
+            let frame = error_response(
+                Json::Null,
+                code::METHOD_NOT_FOUND,
+                "this server answers POST /mcp only; it sends no server-initiated messages",
+            )
+            .to_string();
+            http_respond(
+                stream,
+                405,
+                "application/json",
+                frame.as_bytes(),
+                &[("Allow", "POST, DELETE, OPTIONS")],
+            )?;
+        }
+        ("GET", "/") => {
+            let info = json!({
+                "name": SERVER_NAME,
+                "version": SERVER_VERSION,
+                "transport": "streamable-http",
+                "mcp": "POST JSON-RPC to /mcp",
+            })
+            .to_string();
+            http_respond(stream, 200, "application/json", info.as_bytes(), &[])?;
+        }
+        _ => {
+            let frame = error_response(Json::Null, code::INVALID_REQUEST, "POST JSON-RPC to /mcp")
+                .to_string();
+            http_respond(stream, 404, "application/json", frame.as_bytes(), &[])?;
+        }
+    }
+    Ok(())
+}
+
+/// The request line and the headers that decide anything, over HTTP/1.1.
+///
+/// The same deliberately minimal subset as `serve.rs`: what a client library
+/// emits for a small POST, with chunked bodies refused rather than decoded.
+fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, String> {
+    let mut line = String::new();
+    read_http_line(reader, &mut line)
+        .map_err(|why| why.unwrap_or_else(|| "could not read the request line".to_string()))?;
+    let mut parts = line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| "empty request".to_string())?
+        .to_string();
+    let target = parts
+        .next()
+        .ok_or_else(|| "no request target".to_string())?;
+    // Absolute-form targets (`POST http://host/mcp`) arrive from proxies; the
+    // path is what routes.
+    let path = target
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/').map(|(_, path)| format!("/{path}")))
+        .unwrap_or_else(|| target.to_string());
+    let path = path.split_once('?').map_or(path.as_str(), |(head, _)| head);
+
+    let mut content_length = 0u64;
+    let mut content_type = None;
+    let mut session = None;
+    let mut host = None;
+    let mut origin = None;
+    let mut headers = 0usize;
+    loop {
+        let mut header = String::new();
+        let read = read_http_line(reader, &mut header)
+            .map_err(|why| why.unwrap_or_else(|| "could not read headers".to_string()))?;
+        if read == 0 || header.trim().is_empty() {
+            break;
+        }
+        headers += 1;
+        if headers > MCP_MAX_HEADERS {
+            return Err(format!("more than {MCP_MAX_HEADERS} header lines"));
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "content-length" => {
+                    content_length = value
+                        .trim()
+                        .parse::<u64>()
+                        .map_err(|_| "content-length is not a number".to_string())?;
+                    if content_length > MCP_MAX_BODY_BYTES {
+                        return Err(format!("body larger than {MCP_MAX_BODY_BYTES} bytes"));
+                    }
+                }
+                "content-type" => {
+                    content_type = Some(
+                        value
+                            .split(';')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_ascii_lowercase(),
+                    );
+                }
+                "mcp-session-id" => {
+                    session = Some(value.trim().to_string());
+                }
+                "host" => {
+                    if host.replace(value.trim().to_string()).is_some() {
+                        return Err("more than one Host header".to_string());
+                    }
+                }
+                "origin" => origin = Some(value.trim().to_string()),
+                "transfer-encoding" if value.to_ascii_lowercase().contains("chunked") => {
+                    return Err("chunked bodies are not supported; send content-length".to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    // GET, DELETE and OPTIONS carry no body; a length on one is a client bug,
+    // refused rather than read and ignored.
+    if method != "POST" && content_length > 0 {
+        return Err(format!("{method} takes no body"));
+    }
+
+    Ok(HttpRequest {
+        method,
+        path: path.to_string(),
+        content_length,
+        content_type,
+        session,
+        host,
+        origin,
+    })
+}
+
+fn http_authority_allowed(host: Option<&str>, origin: Option<&str>, port: u16) -> bool {
+    if origin.is_some() {
+        return false;
+    }
+    let Some(host) = host else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case(&format!("localhost:{port}")) {
+        return true;
+    }
+    host.parse::<SocketAddr>()
+        .is_ok_and(|address| address.ip().is_loopback() && address.port() == port)
+}
+
+/// One line of at most [`MCP_MAX_LINE_BYTES`]. `Err(Some(why))` names a line
+/// that was too long; `Err(None)` is an I/O failure for the caller to word.
+fn read_http_line(
+    reader: &mut BufReader<TcpStream>,
+    line: &mut String,
+) -> Result<usize, Option<String>> {
+    let mut bytes = 0u64;
+    loop {
+        let mut byte = [0u8; 1];
+        match reader.read(&mut byte) {
+            Ok(0) => return Ok(line.len()),
+            Ok(_) => {}
+            Err(error) => {
+                if line.is_empty() && bytes == 0 {
+                    return Err(None);
+                }
+                let _ = error;
+                return Err(None);
+            }
+        }
+        bytes += 1;
+        if bytes > MCP_MAX_LINE_BYTES {
+            return Err(Some(format!(
+                "a line longer than {MCP_MAX_LINE_BYTES} bytes"
+            )));
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        line.push(byte[0] as char);
+    }
+    if line.ends_with('\r') {
+        line.pop();
+    }
+    Ok(line.len())
+}
+
+fn http_respond(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    extra: &[(&str, &str)],
+) -> io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        202 => "Accepted",
+        204 => "No Content",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        415 => "Unsupported Media Type",
+        503 => "Service Unavailable",
+        _ => "Error",
+    };
+    // No CORS headers: a webpage must not turn this local operator identity
+    // into a cross-origin tool endpoint.
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\
+         connection: close\r\n",
+        body.len()
+    );
+    for (name, value) in extra {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
+/// Close an answered connection without destroying the answer: shut the write
+/// side first so the response and a FIN go out, then drain what the client is
+/// still sending. Closing with unread input sends RST, which can discard the
+/// response still queued. Same shape as `serve.rs`, smaller bounds: an MCP
+/// client that is still sending past 1 MiB is not one that will read.
+fn http_linger(stream: &mut TcpStream) {
+    if stream.shutdown(Shutdown::Write).is_err() {
+        return;
+    }
+    let until = Instant::now() + Duration::from_secs(2);
+    let mut scratch = [0u8; 8 * 1024];
+    let mut drained = 0usize;
+    while drained < 1024 * 1024 {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+            return;
+        }
+        match stream.read(&mut scratch) {
+            Ok(0) | Err(_) => return,
+            Ok(read) => drained += read,
+        }
+    }
 }
 
 /// Start MCP on a daemon's stdio, sharing the daemon's one rules engine and
@@ -318,11 +1132,25 @@ pub(crate) fn start_shared_stdio(
     identity_path: Option<&Path>,
     log: &Path,
     key_path: &Path,
-    spend: SpendCeiling,
+    spend: Arc<Mutex<SpendCeiling>>,
+    presence: SharedPresence,
+    journal: crate::journal::Shared,
 ) -> Result<Receiver<()>, String> {
     let identity = identity_path.map(load_identity).transpose()?;
     let cipher = pending_cipher(log, key_path)?;
-    let server = Server::new_shared(state, identity, cipher).with_spend_ceiling(spend);
+    {
+        let mut shown = presence
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        shown.signs_as = identity.as_ref().map(Identity::submitter_id);
+        shown.spend_limit = spend
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .limit;
+    }
+    let server = Server::new_shared(state, identity, cipher)
+        .with_shared_spend_ceiling(&spend)
+        .attached(Attachment { presence, journal });
     eprintln!(
         "cairn mcp {SERVER_VERSION}: sharing daemon ledger {}, stdio ready",
         log.display()
@@ -354,7 +1182,7 @@ fn pending_cipher(
 }
 
 fn report_identity(server: &Server, flag: &str) {
-    match server.spend.limit {
+    match server.spend_limit() {
         0 => {
             eprintln!("post_objective: unfunded objectives only (no --max-spend / {MAX_SPEND_ENV})")
         }
@@ -756,8 +1584,15 @@ struct Server {
     /// `structuredContent` for the reason `call_tool` gives: a client may read
     /// the latter as the whole result, and these sit beside the text.
     meta: Option<Json>,
-    /// What `post_objective` may still commit. See [`SpendCeiling`].
-    spend: SpendCeiling,
+    /// What `post_objective` may still commit. Shared, not owned: one process
+    /// can serve stdio and HTTP at once (`cairn run --mcp-http`), and the
+    /// ceiling is the operator's per-run budget, not per-transport. Two
+    /// counters would let agents spend it twice.
+    spend: Arc<Mutex<SpendCeiling>>,
+    /// The daemon's presence board and journal, when this session is the
+    /// daemon's own. `None` for a standalone server and in every unit test,
+    /// which therefore narrate to nobody.
+    attachment: Option<Attachment>,
 }
 
 impl Server {
@@ -776,8 +1611,21 @@ impl Server {
 
     /// The operator's ceiling on what agents may fund. See [`SpendCeiling`].
     fn with_spend_ceiling(mut self, spend: SpendCeiling) -> Server {
-        self.spend = spend;
+        self.spend = Arc::new(Mutex::new(spend));
         self
+    }
+
+    /// Share one ceiling between two servers over one process. See [`Server::spend`].
+    fn with_shared_spend_ceiling(mut self, spend: &Arc<Mutex<SpendCeiling>>) -> Server {
+        self.spend = Arc::clone(spend);
+        self
+    }
+
+    fn spend_limit(&self) -> u64 {
+        self.spend
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .limit
     }
 
     fn new_shared(
@@ -803,8 +1651,93 @@ impl Server {
             pending,
             identity,
             meta: None,
-            spend: SpendCeiling::new(0),
+            spend: Arc::new(Mutex::new(SpendCeiling::new(0))),
+            attachment: None,
         }
+    }
+
+    fn attached(mut self, attachment: Attachment) -> Server {
+        self.attachment = Some(attachment);
+        self
+    }
+
+    /// The client's name for itself, for a sentence about what it did.
+    fn client_name(&self) -> String {
+        self.attachment
+            .as_ref()
+            .and_then(|a| {
+                a.presence
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .client
+                    .as_ref()
+                    .map(|(name, _)| name.clone())
+            })
+            .unwrap_or_else(|| "An agent".to_string())
+    }
+
+    /// Note a tool call on the presence board, and the ones that wrote
+    /// something in the journal. Reads are counted and not narrated: an agent
+    /// scores thousands of candidates, and a feed of them would bury the
+    /// three things that happened.
+    fn observe(
+        &self,
+        tool: &str,
+        args: &Json,
+        outcome: &Result<String, String>,
+        reason: Option<&str>,
+    ) {
+        let Some(attachment) = &self.attachment else {
+            return;
+        };
+        let now = crate::time::unix_seconds();
+        // A post, a commitment or a reveal. `already_committed` answers Ok
+        // and appends nothing, so it is a read here.
+        let wrote = outcome.is_ok()
+            && (tool == "post_objective"
+                || (tool == "submit_claim" && matches!(reason, Some("committed" | "revealed"))));
+        {
+            let mut presence = attachment
+                .presence
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            presence.calls += 1;
+            presence.last_call_at = Some(now);
+            presence.last_tool = Some(tool.to_string());
+            if wrote {
+                presence.writes += 1;
+            }
+        }
+        if !wrote {
+            return;
+        }
+        let who = self.client_name();
+        let objective = args.get("objective_id").and_then(Json::as_str);
+        let text = match (tool, outcome) {
+            ("post_objective", Ok(text)) => {
+                let id = text
+                    .strip_prefix("posted objective ")
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .unwrap_or("");
+                format!("{who} posted objective {}", crate::journal::short(id))
+            }
+            _ => format!(
+                "{who} {} an answer to {}",
+                if reason == Some("revealed") {
+                    "revealed"
+                } else {
+                    "committed"
+                },
+                objective.map_or_else(|| "an objective".to_string(), crate::journal::short),
+            ),
+        };
+        crate::journal::note(
+            &attachment.journal,
+            crate::journal::Kind::Agent,
+            crate::journal::Tone::Good,
+            &text,
+            objective,
+        );
     }
 
     /// Record a claim id the agent legitimately learned from this server.
@@ -933,6 +1866,12 @@ mod code {
     pub const INVALID_REQUEST: i64 = -32600;
     pub const METHOD_NOT_FOUND: i64 = -32601;
     pub const INVALID_PARAMS: i64 = -32602;
+    /// The HTTP hub is out of sessions, or momentarily cannot take the lock.
+    /// Only ever sent with an HTTP 503 beside it.
+    pub const SERVER_FULL: i64 = -32001;
+    /// A POST /mcp without a usable `Mcp-Session-Id`, answered 400 when the
+    /// header is missing and 404 when the session is unknown or closed.
+    pub const NO_SESSION: i64 = -32002;
 }
 
 impl Server {
@@ -978,11 +1917,12 @@ impl Server {
             "ping" => success(id, json!({})),
             "tools/list" => success(id, json!({ "tools": tool_definitions() })),
             "tools/call" => self.call_tool(id, &params),
-            // Declared capabilities are tools only, so a client should not be
-            // asking for these -- but answering "empty" is friendlier than
-            // "unknown method" for clients that probe.
+            "prompts/list" => success(id, json!({ "prompts": prompt_definitions() })),
+            "prompts/get" => self.get_prompt(id, &params),
+            // No resources are declared, so a client should not be asking --
+            // but answering "empty" is friendlier than "unknown method" for
+            // clients that probe.
             "resources/list" => success(id, json!({ "resources": [] })),
-            "prompts/list" => success(id, json!({ "prompts": [] })),
             other => error_response(
                 id,
                 code::METHOD_NOT_FOUND,
@@ -993,6 +1933,41 @@ impl Server {
     }
 
     fn initialize(&self, id: Json, params: &Json) -> Json {
+        if let Some(attachment) = &self.attachment {
+            let info = params.get("clientInfo");
+            let field = |key: &str| {
+                info.and_then(|info| info.get(key))
+                    .and_then(Json::as_str)
+                    .map(|text| {
+                        text.chars()
+                            .filter(|c| !c.is_control())
+                            .take(80)
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default()
+            };
+            let (name, version) = (field("name"), field("version"));
+            let name = if name.is_empty() {
+                "an MCP client".to_string()
+            } else {
+                name
+            };
+            {
+                let mut presence = attachment
+                    .presence
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                presence.client = Some((name.clone(), version.clone()));
+                presence.connected_at = Some(crate::time::unix_seconds());
+            }
+            crate::journal::note(
+                &attachment.journal,
+                crate::journal::Kind::Agent,
+                crate::journal::Tone::Good,
+                format!("Agent connected over MCP: {name} {version}").trim_end(),
+                Some(&name),
+            );
+        }
         let requested = params.get("protocolVersion").and_then(Json::as_str);
         // Echo the client's version when we speak it, otherwise our newest.
         // Answering with a version the client did not ask for is legal; making
@@ -1005,7 +1980,10 @@ impl Server {
             id,
             json!({
                 "protocolVersion": version,
-                "capabilities": { "tools": { "listChanged": false } },
+                "capabilities": {
+                    "tools": { "listChanged": false },
+                    "prompts": { "listChanged": false }
+                },
                 "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
                 "instructions":
                     "Objectives are funded questions with a pinned verifier. Score candidates \
@@ -1048,6 +2026,11 @@ impl Server {
         // as a JSON-RPC error: the model needs to see the message and try
         // again, and a transport-level error is not shown to it.
         let meta = self.meta.take();
+        let reason = meta
+            .as_ref()
+            .and_then(|meta| meta.get("cairn/reason"))
+            .and_then(Json::as_str);
+        self.observe(name, &args, &result, reason);
         let with_meta = |mut payload: Json| {
             if let Some(meta) = &meta {
                 payload["_meta"] = meta.clone();
@@ -1089,12 +2072,108 @@ impl Server {
     }
 }
 
+// -- prompts ---------------------------------------------------------------
+
+/// `prompts/list`: every prompt in [`crate::prompts::ALL`], in MCP's shape.
+fn prompt_definitions() -> Json {
+    Json::Array(
+        crate::prompts::ALL
+            .iter()
+            .map(|definition| {
+                json!({
+                    "name": definition.name,
+                    "title": definition.title,
+                    "description": definition.description,
+                    "arguments": definition
+                        .arguments
+                        .iter()
+                        .map(|argument| json!({
+                            "name": argument.name,
+                            "description": argument.description,
+                            "required": argument.required,
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
+impl Server {
+    /// `prompts/get`: one prompt, rendered with the client's arguments and
+    /// this node's bundle root, as a single user message. A bad argument is
+    /// a JSON-RPC error rather than a result: unlike a tool, a prompt that
+    /// failed has no model on the other end to read why -- the client shows
+    /// it to the person who typed the slash command.
+    fn get_prompt(&self, id: Json, params: &Json) -> Json {
+        let Some(name) = params.get("name").and_then(Json::as_str) else {
+            return error_response(id, code::INVALID_PARAMS, "prompts/get needs a name");
+        };
+        let arguments: BTreeMap<String, String> = params
+            .get("arguments")
+            .and_then(Json::as_object)
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(key, value)| match value {
+                        Json::String(text) => Some((key.clone(), text.clone())),
+                        Json::Number(number) => Some((key.clone(), number.to_string())),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let context = crate::prompts::Context {
+            root: Some(self.node.read().root().display().to_string()),
+        };
+        match crate::prompts::render(name, &arguments, &context) {
+            Ok(text) => {
+                let description = crate::prompts::ALL
+                    .iter()
+                    .find(|definition| definition.name == name)
+                    .map_or("", |definition| definition.title);
+                success(
+                    id,
+                    json!({
+                        "description": description,
+                        "messages": [{ "role": "user", "content": text_block(&text) }],
+                    }),
+                )
+            }
+            Err(why) => error_response(id, code::INVALID_PARAMS, &why),
+        }
+    }
+}
+
 // -- tools -----------------------------------------------------------------
+
+// Every definition carries MCP `annotations` alongside its schema, because
+// that is what Claude Code, Codex and OpenCode read to decide whether a tool
+// call needs the human's approval first. Without them every call -- including
+// the thousands of `score_candidate` invocations the tight loop is built from
+// -- lands in the same "ask first" bucket as the ones that move money, and
+// the fitness-function workflow the server exists for becomes a click-through
+// exercise.
+//
+// The read/write split follows the tools table in `docs/agents.md`: the six
+// readers that drain due settlements still say `readOnlyHint: true`, because
+// the batch such a call may materialise was fixed by the epoch beacon when
+// its reveal epoch closed -- whoever looks next merely writes down what was
+// already decided and cannot influence it. `score_candidate` and `audit` are
+// read-only but `openWorldHint: true`: with `rerun` (and always, for scoring)
+// they execute the funder's pinned checker as a subprocess, sandboxed but
+// still code this process did not write.
 
 fn tool_definitions() -> Json {
     json!([
         {
             "name": "score_candidate",
+            "title": "Score a candidate",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+            },
             "description":
                 "Run an objective's PINNED verifier against a candidate artifact and return its \
                  verdict. Read-only: nothing is recorded, nothing is paid, and this cannot fail \
@@ -1118,6 +2197,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "list_objectives",
+            "title": "List objectives",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Every objective in the log: id, statement, reward, verifier kind, and current \
                  frontier. Start here.",
@@ -1125,6 +2211,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "list_goals",
+            "title": "List goals",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "The objectives grouped by the problem they attack: every goal (the GOAL-<key> \
                  handle objectives carry), the angles taken on it (GOAL-<key>/<angle>, e.g. \
@@ -1134,6 +2227,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "find_goal",
+            "title": "Find goal",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Find the goal a phrase names -- 'ECC2K-130', 'ecc2k130', 'solve the Certicom \
                  challenge with index calculus' -- BEFORE posting an objective, so one problem \
@@ -1154,6 +2254,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "get_objective",
+            "title": "Get objective",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Full record for one objective: the verifier spec, the ratchet, and the \
                  artifact shape when the funder declared one. Both the statement and the \
@@ -1168,6 +2275,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "frontier_status",
+            "title": "Frontier status",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Best score so far, which claim holds it, and how much of the pool is left. If \
                  you improve on the frontier you MUST cite the claim that holds it -- that is \
@@ -1181,6 +2295,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "get_claim",
+            "title": "Get claim",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "One accepted claim: its submitter, what it cites, whether it settled and for \
                  how much, and the artifact itself. This is how you read the state of the art \
@@ -1200,6 +2321,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "submit_claim",
+            "title": "Submit claim",
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+            },
             "description":
                 "Commit and reveal a claim. Score it with score_candidate first: submitting \
                  something that does not pass wastes an entry and earns nothing. Cite the \
@@ -1241,6 +2369,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "post_objective",
+            "title": "Post objective",
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+            },
             "description":
                 "Fund a question: append an objective to this log. The record is the same \
                  shape `cairn post` reads -- goal, statement, verifier, reward, funder, \
@@ -1266,6 +2401,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "pending_reveals",
+            "title": "Pending reveals",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Your commitments still waiting on a reveal, with the epoch each becomes \
                  revealable in. Call after a restart or when unsure what you owe: a commitment \
@@ -1281,6 +2423,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "work_assignment",
+            "title": "Work assignment",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Which slice of the search space you should work this epoch. Needs no agreement \
                  with anyone: it is a pure function of public inputs, so you compute your own \
@@ -1308,6 +2457,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "audit",
+            "title": "Audit log",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": true
+            },
             "description":
                 "Re-derive the whole log from the artifacts themselves and report every problem \
                  found. Empty output means the log verifies. Pass rerun: true to also re-run \
@@ -1325,6 +2481,13 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "set_secret",
+            "title": "Set secret",
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+            },
             "description":
                 "Store a named operator secret on this machine (AWS keys, a campaign DATABASE_URL, \
                  …) under ~/.cairn/secrets/. The value is written and never returned — agents log \
@@ -1354,12 +2517,26 @@ fn tool_definitions() -> Json {
         },
         {
             "name": "list_secrets",
+            "title": "List secrets",
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            },
             "description":
                 "Names of operator secrets stored on this machine. Values are never returned.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "request_upload_grant",
+            "title": "Request upload grant",
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": true
+            },
             "description":
                 "Ask this node for a short-lived, single-use right to upload one object into a \
                  named deposit (an S3 prefix, a local directory, …). The response has a grant id, \
@@ -1367,7 +2544,9 @@ fn tool_definitions() -> Json {
                  PUT the bytes to put_url (or use cairn deposit put). Configure deposits with \
                  `cairn deposit add`; credentials stay in `cairn secret`. If this node cannot \
                  mint against the deposit it answers unavailable, the same way a missing \
-                 verifier does — that says nothing about your artifact.",
+                 verifier does — that says nothing about your artifact. Against an ecc2k-dp \
+                 deposit the key is a campaign object key and the response also carries the \
+                 commit marker to PUT after the body.",
             "inputSchema": {
                 "type": "object",
                 "required": ["deposit", "submitter"],
@@ -1395,6 +2574,12 @@ fn tool_definitions() -> Json {
                         "type": "string",
                         "description":
                             "Optional sha-256 hex of the body. When set, the PUT must match."
+                    },
+                    "slot": {
+                        "type": "integer",
+                        "description":
+                            "Campaign slot, required by ecc2k-dp deposits and refused by all \
+                             others: the minted key names which slot produced the object."
                     }
                 }
             }
@@ -2499,8 +3684,15 @@ impl Server {
             None => objective,
         };
         // Before the write, and spent only after it is admitted: a refused post
-        // must not use up the ceiling.
-        self.spend
+        // must not use up the ceiling. The guard is held across the admission,
+        // so two concurrent posts cannot both pass the check and spend the
+        // ceiling twice -- stdio never needed this (one client, one thread)
+        // and HTTP does.
+        let mut spend = self
+            .spend
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        spend
             .check(objective.reward)
             .map_err(|why| format!("post refused: {why}"))?;
         let id = self
@@ -2508,7 +3700,11 @@ impl Server {
             .write()
             .post_objective(&objective, &ts)
             .map_err(|violation| format!("post refused: {violation}. Nothing was recorded."))?;
-        self.spend.record(objective.reward);
+        spend.record(objective.reward);
+        // Released before anything else borrows the server: the admission is
+        // over, and holding the ceiling across the rendering below would
+        // serialize every post behind nothing.
+        drop(spend);
         // The statement is now prose this server has rendered back to an
         // agent, and any claim id planted in it must be refusable as a
         // citation -- the same rule `list_objectives` applies.
@@ -2565,6 +3761,7 @@ impl Server {
         let submitter = string_arg(args, "submitter")?;
         let max_bytes = args.get("max_bytes").and_then(Json::as_u64);
         let digest = args.get("digest").and_then(Json::as_str);
+        let slot = args.get("slot").and_then(Json::as_u64);
         let ledger_path = self.node.read().ledger().path().to_path_buf();
         let deposits = DepositDir::under_store(
             ledger_path
@@ -2579,6 +3776,7 @@ impl Server {
             max_bytes,
             size: args.get("size").and_then(Json::as_u64),
             digest,
+            slot,
             requester: None,
         };
         let grant = deposit::issue_grant(&deposits, &request, None, &secrets_dir)
@@ -2978,6 +4176,124 @@ mod tests {
     /// `score_candidate` dispatches to its verifier -- so the path is the same
     /// log the other tools read, not a side channel.
     #[test]
+    fn prompts_are_declared_listed_and_rendered_with_this_servers_root() {
+        let mut s = server();
+        let init = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18", "capabilities": {} }
+        })
+        .to_string();
+        let r: Json = serde_json::from_str(&s.handle_line(&init).unwrap()).unwrap();
+        assert!(r["result"]["capabilities"]["prompts"].is_object(), "{r}");
+
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "prompts/list" }).to_string();
+        let r: Json = serde_json::from_str(&s.handle_line(&list).unwrap()).unwrap();
+        let prompts = r["result"]["prompts"].as_array().unwrap();
+        assert_eq!(prompts[0]["name"], crate::prompts::COORDINATE_TASK);
+        assert_eq!(prompts[0]["arguments"][0]["name"], "description");
+        assert_eq!(prompts[0]["arguments"][0]["required"], true);
+
+        let get = json!({
+            "jsonrpc": "2.0", "id": 3, "method": "prompts/get",
+            "params": {
+                "name": "coordinate_task",
+                "arguments": { "description": "walk every seed below 2^20", "budget": 900 }
+            }
+        })
+        .to_string();
+        let r: Json = serde_json::from_str(&s.handle_line(&get).unwrap()).unwrap();
+        let message = &r["result"]["messages"][0];
+        assert_eq!(message["role"], "user");
+        let text = message["content"]["text"].as_str().unwrap();
+        assert!(text.contains("walk every seed below 2^20"), "{text}");
+        assert!(text.contains("at most 900 units"), "{text}");
+        let root = s.node.read().root().display().to_string();
+        assert!(text.contains(&format!("`{root}`")), "{text}");
+
+        // A prompt that cannot render is the person's error to read, not the
+        // model's, so it is a JSON-RPC error.
+        let bad = json!({
+            "jsonrpc": "2.0", "id": 4, "method": "prompts/get",
+            "params": { "name": "coordinate_task", "arguments": {} }
+        })
+        .to_string();
+        let r: Json = serde_json::from_str(&s.handle_line(&bad).unwrap()).unwrap();
+        assert_eq!(r["error"]["code"], code::INVALID_PARAMS, "{r}");
+    }
+
+    /// The daemon's session shows on `GET /network` and narrates what it
+    /// wrote; a read is counted and not narrated, and a server nobody attached
+    /// -- every other test here -- touches no board at all.
+    #[test]
+    fn an_attached_session_reports_its_client_and_journals_only_writes() {
+        let presence = Presence::shared();
+        let journal = crate::journal::Journal::shared(0);
+        let mut s = server().attached(Attachment {
+            presence: Arc::clone(&presence),
+            journal: Arc::clone(&journal),
+        });
+        let init = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": { "name": "claude-code", "version": "2.1.0" }
+            }
+        })
+        .to_string();
+        s.handle_line(&init).unwrap();
+        let _ = call(&mut s, "list_objectives", json!({}));
+        let posted = call(
+            &mut s,
+            "post_objective",
+            json!({
+                "objective": {
+                    "goal": "GOAL-attached",
+                    "statement": "Anything.",
+                    "verifier": {
+                        "kind": "certificate",
+                        "checker": "checkers/never.py",
+                        "checker_sha256": "00".repeat(32),
+                        "entrypoint": "check"
+                    },
+                    "reward": 0,
+                    "funder": "agent"
+                }
+            }),
+        );
+        assert!(posted.starts_with("posted objective"), "{posted}");
+
+        let shown = presence.lock().unwrap().to_value();
+        assert_eq!(
+            shown
+                .get("client")
+                .and_then(|c| c.get("name"))
+                .and_then(Value::as_str),
+            Some("claude-code")
+        );
+        assert_eq!(shown.get("calls").and_then(Value::as_u64), Some(2));
+        assert_eq!(shown.get("writes").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            shown.get("last_tool").and_then(Value::as_str),
+            Some("post_objective")
+        );
+
+        let feed = journal.lock().unwrap().to_value(0, 50);
+        let texts: Vec<String> = feed
+            .get("events")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.get("text").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(texts[0].contains("claude-code 2.1.0"), "{texts:?}");
+        assert!(
+            texts[1].starts_with("claude-code posted objective"),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
     fn post_objective_appends_and_the_other_tools_see_it() {
         let mut s = server();
         let out = call(
@@ -3132,6 +4448,121 @@ mod tests {
         assert!(s.handle_line(&line).is_none());
     }
 
+    fn http_init() -> String {
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2025-11-25" }
+        })
+        .to_string()
+    }
+
+    fn http_open(hub: &mut HttpHub) -> String {
+        let answer = hub.handle(None, &http_init());
+        assert_eq!(answer.status, 200);
+        let session = answer.session.expect("initialize mints a session");
+        assert_eq!(session.len(), 64, "a session id is 256 bits of hex");
+        let frame: Json = serde_json::from_str(&answer.body.unwrap()).unwrap();
+        assert_eq!(frame["result"]["protocolVersion"], json!("2025-11-25"));
+        session
+    }
+
+    #[test]
+    fn http_initialize_mints_a_fresh_session_per_handshake() {
+        let mut hub = HttpHub::new(server());
+        let first = http_open(&mut hub);
+        let second = http_open(&mut hub);
+        assert_ne!(first, second, "every handshake gets its own session");
+    }
+
+    #[test]
+    fn http_calls_need_a_session_first() {
+        let mut hub = HttpHub::new(server());
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }).to_string();
+        let missing = hub.handle(None, &list);
+        assert_eq!(missing.status, 400);
+        let unknown_id = "0".repeat(64);
+        let unknown = hub.handle(Some(&unknown_id), &list);
+        assert_eq!(unknown.status, 404);
+        let session = http_open(&mut hub);
+        let answer = hub.handle(Some(&session), &list);
+        assert_eq!(answer.status, 200);
+        assert_eq!(answer.session.as_deref(), Some(session.as_str()));
+        let frame: Json = serde_json::from_str(&answer.body.unwrap()).unwrap();
+        assert!(frame["result"]["tools"].as_array().unwrap().len() >= 15);
+    }
+
+    #[test]
+    fn http_notifications_are_accepted_not_answered() {
+        let mut hub = HttpHub::new(server());
+        let session = http_open(&mut hub);
+        let line = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string();
+        let answer = hub.handle(Some(&session), &line);
+        assert_eq!(answer.status, 202);
+        assert!(answer.body.is_none());
+    }
+
+    #[test]
+    fn http_sessions_do_not_share_citation_capabilities() {
+        // The capability is the citation's provenance: a client may only cite
+        // what this server showed *it* through a structured field. If two HTTP
+        // sessions shared the maps, a capability leaked from one transcript
+        // would authorize a citation in another.
+        let mut hub = HttpHub::new(server());
+        let a = http_open(&mut hub);
+        let b = http_open(&mut hub);
+        let claim = format!("sha256:{}", "c".repeat(64));
+        hub.test_capability(&a, &claim).expect("offer in A");
+        assert!(hub.test_has(&a, &claim));
+        assert!(!hub.test_has(&b, &claim));
+        // And interleaved calls on B do not disturb A's views on their way
+        // through the shared server.
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }).to_string();
+        assert_eq!(hub.handle(Some(&b), &list).status, 200);
+        assert!(hub.test_has(&a, &claim));
+        assert!(!hub.test_has(&b, &claim));
+    }
+
+    #[test]
+    fn http_terminate_forgets_the_session() {
+        let mut hub = HttpHub::new(server());
+        let session = http_open(&mut hub);
+        assert!(!hub.terminate(None));
+        assert!(!hub.terminate(Some(&"0".repeat(64))));
+        assert!(hub.terminate(Some(&session)));
+        assert!(!hub.terminate(Some(&session)));
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }).to_string();
+        assert_eq!(hub.handle(Some(&session), &list).status, 404);
+    }
+
+    #[test]
+    fn http_malformed_json_is_a_400_not_a_panic() {
+        let mut hub = HttpHub::new(server());
+        let answer = hub.handle(None, "{");
+        assert_eq!(answer.status, 400);
+        let frame: Json = serde_json::from_str(&answer.body.unwrap()).unwrap();
+        assert_eq!(frame["error"]["code"], json!(code::PARSE_ERROR));
+    }
+
+    #[test]
+    fn http_refuses_browser_origins_and_nonlocal_authorities() {
+        assert!(http_authority_allowed(Some("127.0.0.1:8001"), None, 8001));
+        assert!(http_authority_allowed(Some("localhost:8001"), None, 8001));
+        assert!(http_authority_allowed(Some("[::1]:8001"), None, 8001));
+        assert!(!http_authority_allowed(
+            Some("attacker.example:8001"),
+            None,
+            8001
+        ));
+        assert!(!http_authority_allowed(Some("127.0.0.1:8002"), None, 8001));
+        assert!(!http_authority_allowed(
+            Some("127.0.0.1:8001"),
+            Some("https://attacker.example"),
+            8001
+        ));
+        assert!(!http_authority_allowed(None, None, 8001));
+        assert!(bind_http("0.0.0.0:0").is_err());
+    }
+
     #[test]
     fn malformed_input_does_not_take_the_server_down() {
         let mut s = server();
@@ -3166,12 +4597,22 @@ mod tests {
     }
 
     #[test]
-    fn every_advertised_tool_has_a_schema_and_a_handler() {
+    fn every_advertised_tool_has_a_schema_a_handler_and_annotations() {
         let mut s = server();
         let line = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string();
         let r: Json = serde_json::from_str(&s.handle_line(&line).unwrap()).unwrap();
         let tools = r["result"]["tools"].as_array().unwrap();
         assert!(!tools.is_empty());
+        // Only these four append anything anywhere: the ledger for the first
+        // two, the operator's secret store and the deposit book for the rest.
+        // Everything else only reads, so a client can tell the tight scoring
+        // loop from the calls that move money without parsing prose.
+        let writers = [
+            "submit_claim",
+            "post_objective",
+            "set_secret",
+            "request_upload_grant",
+        ];
         for tool in tools {
             let name = tool["name"].as_str().unwrap();
             assert!(
@@ -3181,6 +4622,34 @@ mod tests {
             assert!(
                 tool["description"].as_str().unwrap().len() > 20,
                 "{name} needs a real description"
+            );
+            assert!(
+                !tool["title"].as_str().unwrap_or("").is_empty(),
+                "{name} needs a title for the client's tool picker"
+            );
+            // Claude Code, Codex and OpenCode read these to decide whether a
+            // call needs the human's approval first. A missing block puts the
+            // tool in the ask-first bucket by default.
+            for hint in [
+                "readOnlyHint",
+                "destructiveHint",
+                "idempotentHint",
+                "openWorldHint",
+            ] {
+                assert!(
+                    tool["annotations"][hint].is_boolean(),
+                    "{name} needs annotations.{hint} so clients can approve the scoring loop unattended"
+                );
+            }
+            assert_eq!(
+                tool["annotations"]["destructiveHint"],
+                json!(false),
+                "{name}: nothing here deletes, so nothing may claim to"
+            );
+            assert_eq!(
+                tool["annotations"]["readOnlyHint"] == json!(true),
+                !writers.contains(&name),
+                "{name} is on the wrong side of the read/write split"
             );
             // Dispatch must know it. An advertised tool that errors as unknown
             // is worse than one that is not advertised.

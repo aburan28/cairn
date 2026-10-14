@@ -1,80 +1,33 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { type Objective, loadObjective, progress, resolveNode, short, units } from "@/lib/site";
+import { type Objective, loadObjective, progress, short, units } from "@/lib/site";
+import { paidOut, remainingPool } from "@/lib/objectives";
+import { useEvery, useNode } from "@/components/hooks";
 import { type Participant, ago, eventsFor, indexObjectives, participants } from "@/lib/events";
 import { type LogRecord, fetchLog } from "@/lib/log";
 import { type ProgressResponse, fetchProgress } from "@/lib/progress";
 import { isFollowing, onFollowingChange, setFollowing } from "@/lib/follow";
 import { goalSlug, objectiveTitle } from "@/lib/title";
-import { openSheet, workCommand } from "@/lib/contribute";
+import { openSheet } from "@/lib/contribute";
+import { AgentConnect } from "@/components/agents";
+import { WorkPanel } from "@/components/WorkPanel";
 import { type Bridge, appBridge } from "@/lib/draft";
 import { EventRow, shortActor } from "@/components/events";
 import {
   Badge,
   Box,
-  CopyButton,
   Hash,
+  LiveStamp,
+  Note,
   PageHeader,
   Progress,
   Skeleton,
   Stat,
   StatusPill,
 } from "@/components/ui";
-
-/**
- * The Claude Code stanza from docs/agents.md, with placeholder paths. The
- * other two clients spell the same three arguments differently and the doc
- * has them; one copy here is enough to get someone started, and three would
- * be three things to keep in step with the doc.
- */
-const MCP_STANZA = `{
-  "mcpServers": {
-    "cairn": {
-      "command": "/abs/path/to/cairn",
-      "args": ["--log", "/abs/path/to/cairn.jsonl", "--root", "/abs/path/to/repo", "mcp"]
-    }
-  }
-}`;
-
-/**
- * The tool calls, with this objective's id filled in.
- *
- * `cites` is included only when there is a frontier to cite, and then with
- * the claim id the node published -- a submission against a ratcheted
- * objective that omits it is refused, and that is the rule an agent most
- * often trips over. The capability half is deliberately left as a
- * placeholder: it is session-local proof the id came from a server field,
- * and this page cannot mint one.
- */
-function mcpCalls(id: string, mustCite: string | undefined): string {
-  const cite = mustCite
-    ? `,\n  "cites": [{ "claim_id": "${mustCite}", "capability": "<from frontier_status>" }]`
-    : "";
-  return `get_objective   { "objective_id": "${id}" }
-score_candidate { "objective_id": "${id}", "artifact": { … } }
-submit_claim    { "objective_id": "${id}", "submitter": "me", "artifact": { … }${cite} }`;
-}
-
-/**
- * `try` scores without writing. `commit` binds the artifact in this epoch and
- * prints the nonce; `reveal` opens it in a later one, and that is where the
- * citation goes -- `commit` takes none, because the commitment hash covers
- * the artifact and the submitter and nothing else.
- */
-function cliCalls(id: string, mustCite: string | undefined): string {
-  const cite = mustCite ? ` \\\n    --cites ${mustCite}` : "";
-  return `cairn --log my.jsonl --root . try ${id} \\
-    --submitter me --artifact my-artifact.json
-
-cairn --log my.jsonl --root . commit ${id} \\
-    --submitter me --artifact my-artifact.json
-# … the epoch turns …
-cairn --log my.jsonl --root . reveal ${id} \\
-    --submitter me --artifact my-artifact.json --nonce <from commit>${cite}`;
-}
 
 /**
  * One challenge: what it pays, who holds the frontier, and what beating them
@@ -97,35 +50,55 @@ export default function Page() {
         </div>
       }
     >
-      <Challenge />
+      <SelectedChallenge />
     </Suspense>
   );
 }
 
-function Challenge() {
+function SelectedChallenge() {
   const params = useSearchParams();
   const id = params.get("id") ?? "";
+  return <Challenge key={id} id={id} />;
+}
+
+function Challenge({ id }: { id: string }) {
   const [objective, setObjective] = useState<Objective | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "missing">("loading");
   const [live, setLive] = useState(false);
   const [origin, setOrigin] = useState("");
-  const [base, setBase] = useState<string | null>(null);
+  const base = useNode();
+  const inFlight = useRef(false);
+  const [readAt, setReadAt] = useState<Date | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [followed, setFollowed] = useState(false);
 
-  useEffect(() => {
+  const load = useCallback(async () => {
     if (!id) {
       setState("missing");
       return;
     }
-    void resolveNode().then(async (url) => {
-      setBase(url);
-      const r = await loadObjective(id, url);
+    if (base === null || inFlight.current) return;
+    inFlight.current = true;
+    try {
+      const r = await loadObjective(id, base);
+      // A failed refresh must not replace a node's frontier with the older
+      // launch snapshot while the page still advertises itself as live.
+      if (live && !r.live) {
+        setError("Could not refresh this node. Showing the last successful read; retry before choosing what to cite.");
+        return;
+      }
       setObjective(r.objective);
       setLive(r.live);
       setOrigin(r.origin);
       setState(r.objective ? "ready" : "missing");
-    });
-  }, [id]);
+      setReadAt(r.live ? new Date() : null);
+      setError(null);
+    } finally {
+      inFlight.current = false;
+    }
+  }, [id, base, live]);
+
+  useEvery(load, 20, base !== null);
 
   useEffect(() => {
     if (!id) return;
@@ -171,8 +144,8 @@ function Challenge() {
   const verifier = objective.record?.verifier ?? {};
   const checker = text(verifier.checker) ?? text(verifier.evaluator);
   const checkerHash = text(verifier.checker_sha256) ?? text(verifier.evaluator_sha256);
-  const paid = frontier?.paid_cumulative ?? objective.settlement?.reward ?? 0;
-  const remaining = frontier?.pool_remaining ?? (objective.settled ? 0 : objective.reward);
+  const paid = paidOut(objective);
+  const remaining = remainingPool(objective);
   const slug = goalSlug(objective.goal);
 
   return (
@@ -191,21 +164,30 @@ function Challenge() {
           </>
         }
         actions={
-          <button
-            type="button"
-            className={`btn btn-sm ${followed ? "btn-primary" : ""}`}
-            aria-pressed={followed}
-            title={
-              followed
-                ? "Stop following. This only changes this browser."
-                : "Keep this page's activity live, and list it on the Overview. Stored in this browser only."
-            }
-            onClick={() => setFollowed(setFollowing(objective.id, !followed))}
-          >
-            {followed ? "Following" : "Follow"}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {live && <LiveStamp at={readAt} error={error} />}
+            <button type="button" className="btn btn-sm" onClick={() => void load()}>Refresh</button>
+            <Link href={`/payouts?id=${encodeURIComponent(objective.id)}`} className="btn btn-sm btn-ghost">
+              External bounty split
+            </Link>
+            <button
+              type="button"
+              className={`btn btn-sm ${followed ? "btn-primary" : ""}`}
+              aria-pressed={followed}
+              title={
+                followed
+                  ? "Stop following. This only changes this browser."
+                  : "Keep this page's activity live, and list it on the Overview. Stored in this browser only."
+              }
+              onClick={() => setFollowed(setFollowing(objective.id, !followed))}
+            >
+              {followed ? "Following" : "Follow"}
+            </button>
+          </div>
         }
       />
+
+      {error && <div className="mb-4"><Note title="This challenge could not be refreshed" tone="bad">{error}</Note></div>}
 
       <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
         <Stat label="Bounty" value={units(ratchet?.reward ?? objective.reward)} tone="accent" />
@@ -219,7 +201,7 @@ function Challenge() {
           <Stat
             label="Status"
             value={objective.settled ? "Settled" : "Open"}
-            from={objective.settled ? "nothing left to win" : "first accepted answer wins"}
+            from={objective.settled ? "nothing left to win" : objective.piecework ? "paid per new verified piece" : "first accepted answer wins"}
           />
         )}
         <Stat label="Paid out" value={units(paid)} tone="accent" />
@@ -352,7 +334,6 @@ function Challenge() {
           {!objective.settled && (
             <WorkOnThis
               id={objective.id}
-              mustCite={frontier?.must_cite}
               piecework={Boolean(objective.piecework)}
               base={base}
             />
@@ -504,12 +485,9 @@ function Activity({
   }, [base, id]);
 
   useEffect(() => {
-    if (!live) return;
-    void refresh();
-    if (!followed) return;
-    const timer = setInterval(() => void refresh(), FOLLOW_REFRESH_MS);
-    return () => clearInterval(timer);
+    if (live && !followed) void refresh();
   }, [live, followed, refresh]);
+  useEvery(refresh, FOLLOW_REFRESH_MS / 1000, live && followed);
 
   const index = useMemo(() => indexObjectives([objective]), [objective]);
   const events = useMemo(
@@ -736,184 +714,52 @@ function text(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
 
-/**
- * How to submit, as two tabs rather than two side-by-side cards of prose.
- *
- * The terminal comes first: it is the one that needs nothing configured.
- */
+/** A direct way to join the challenge without exposing command lines. */
 function WorkOnThis({
   id,
-  mustCite,
   piecework,
   base,
 }: {
   id: string;
-  mustCite: string | undefined;
   piecework: boolean;
   base: string | null;
 }) {
-  const [tab, setTab] = useState<"worker" | "cli" | "mcp">(piecework ? "worker" : "cli");
-  // Inside Cairn.app the worker and the agent are a button each: the app
-  // runs `cairn work` and writes the agent's stanza, so the page has no
-  // reason to hand either to a terminal the window does not have.
   const [bridge, setBridge] = useState<Bridge | null>(null);
   const [appError, setAppError] = useState<string | null>(null);
   useEffect(() => setBridge(appBridge()), []);
-  const node = base || (typeof window !== "undefined" ? window.location.origin : "");
-  const cli = cliCalls(id, mustCite);
-  const calls = mcpCalls(id, mustCite);
 
-  function ask(sheet: "work" | "agents") {
+  function configureWorker() {
     if (!bridge) return;
     setAppError(null);
-    openSheet(bridge, sheet, sheet === "work" ? id : undefined).catch((cause: unknown) => {
+    openSheet(bridge, "work", id).catch((cause: unknown) => {
       setAppError(cause instanceof Error ? cause.message : String(cause));
     });
   }
 
   return (
-    <Box
-      title="Join this challenge"
-      aside={
-        <span className="hidden text-[11px] font-normal text-ink-3 sm:inline">
-          nobody assigns you: anyone may work it, and the checker decides who is paid
-        </span>
-      }
-      flush
-    >
-      <ol className="flex flex-col gap-1 border-b border-edge px-4 py-3 text-[12.5px] text-ink-2">
-        <li>
-          <b className="text-ink">1. Score it locally.</b> Free, records nothing, and runs the
-          same checker that decides payment.
-        </li>
-        <li>
-          <b className="text-ink">2. Commit.</b> Seals your answer in this epoch so nobody can
-          copy it before you reveal.
-        </li>
-        <li>
-          <b className="text-ink">3. Reveal.</b> After the epoch turns. You are paid when that
-          epoch settles.
-        </li>
-      </ol>
-      <div className="tabs" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === "worker"}
-          className="tab"
-          onClick={() => setTab("worker")}
-        >
-          Run a machine
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === "cli"}
-          className="tab"
-          onClick={() => setTab("cli")}
-        >
-          Terminal
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === "mcp"}
-          className="tab"
-          onClick={() => setTab("mcp")}
-        >
-          Agent over MCP
-        </button>
-      </div>
-      <div className="box-body flex flex-col gap-3">
-        {tab === "worker" ? (
-          <>
-            <p className="text-[12.5px] text-ink-2">
-              Put a machine on this challenge with your own solver. Each round it gets its slice
-              of the work on stdin and prints candidate answers, one JSON object per line;{" "}
-              <span className="mono">cairn work</span> commits them, reveals them after the epoch
-              turns, cites the best answer when there is one, and reports in so the machine shows
-              above as <i>working now</i>. Run one per machine, each with its own name.
-              {piecework && (
-                <>
-                  {" "}
-                  This is a divided search, so machines with different names take different
-                  slices.
-                </>
-              )}
-            </p>
-            {bridge ? (
-              <>
-                <div>
-                  <button type="button" className="btn btn-primary btn-sm" onClick={() => ask("work")}>
-                    Share this Mac…
-                  </button>
-                </div>
-                <details className="text-[12.5px] text-ink-2">
-                  <summary className="cursor-pointer text-ink-3">
-                    On another machine without Cairn.app
-                  </summary>
-                  <div className="mt-2">
-                    <CodeBlock value={workCommand({ node, objective: id, worker: "" })} />
-                  </div>
-                </details>
-              </>
-            ) : (
-              <CodeBlock value={workCommand({ node, objective: id, worker: "" })} />
-            )}
-            {appError && <p className="text-[12px] text-warn">{appError}</p>}
-            <p className="text-[12px] text-ink-3">
-              Another machine on your network needs this node shared there first:{" "}
-              <Link href="/contribute" className="text-accent hover:underline">
-                Contribute
-              </Link>{" "}
-              has the address and the steps.
-            </p>
-          </>
-        ) : tab === "cli" ? (
-          <>
-            <p className="text-[12.5px] text-ink-2">
-              <span className="mono">try</span> scores without touching the log. Then commit,
-              wait for the epoch to turn, and reveal.
-            </p>
-            <CodeBlock value={cli} />
-          </>
-        ) : (
-          <>
-            <p className="text-[12.5px] text-ink-2">
-              Add the stanza to Claude Code, Codex or OpenCode, then run{" "}
-              <span className="mono">get_objective → score_candidate → submit_claim</span>.{" "}
-              The developer documentation has the other clients&rsquo; spellings.
-            </p>
-            {bridge ? (
-              <>
-                <div>
-                  <button type="button" className="btn btn-primary btn-sm" onClick={() => ask("agents")}>
-                    Connect an agent…
-                  </button>
-                  <span className="ml-2 text-[12px] text-ink-3">
-                    Cairn.app writes the stanza with this Mac&rsquo;s real paths.
-                  </span>
-                </div>
-                {appError && <p className="text-[12px] text-warn">{appError}</p>}
-              </>
-            ) : (
-              <CodeBlock value={MCP_STANZA} />
-            )}
-            <CodeBlock value={calls} />
-          </>
+    <Box title="Join this challenge">
+      <div className="flex flex-col gap-4">
+        <p className="text-[12.5px] text-ink-2">
+          A worker takes a slice of this goal, runs the solver you choose in Cairn.app,
+          and sends answers to this challenge's checker. {piecework
+            ? "Different machines can work different slices at the same time."
+            : "The checker decides whether an answer moves the result forward."}
+        </p>
+        <WorkPanel objective={id} base={base ?? ""} />
+        {bridge && (
+          <button type="button" className="btn btn-sm self-start" onClick={configureWorker}>
+            Choose or change solver…
+          </button>
         )}
+        {appError && <p className="text-[12px] text-warn" role="alert">{appError}</p>}
+        <div className="border-t border-edge pt-4">
+          <h3 className="text-[13px] font-semibold text-ink">Solve with an agent</h3>
+          <p className="my-2 text-[12.5px] text-ink-2">
+            An agent can score an answer against the pinned checker before submitting it.
+          </p>
+          <AgentConnect bridge={bridge} />
+        </div>
       </div>
     </Box>
-  );
-}
-
-function CodeBlock({ value }: { value: string }) {
-  return (
-    <div className="relative">
-      <pre className="code pr-9 text-[11.5px]">{value}</pre>
-      <div className="absolute top-2 right-2">
-        <CopyButton value={value} />
-      </div>
-    </div>
   );
 }

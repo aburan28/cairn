@@ -115,13 +115,16 @@ decides; (2) replaceable without a code change, since `SEEDS_URL` /
 and no source is privileged in code; and (3) self-verifying, so a compromised
 anchor lies about who is *reachable* and never about who is *who*.
 
-**The fetch is deliberately outside the binary.** `tests/cipher_policy.rs` fails
-the build if a TLS crate enters the dependency tree, and an HTTP client is how
-one arrives. So `scripts/seeds-fetch.sh` does the transport with `curl` and
-`cairn seeds resolve` does the checking — the same split
-`scripts/drand-beacon.sh` makes, and for the same reason, with the added benefit
-that the half that has to be right is the half written in Rust with tests
-against it.
+**The fetch is deliberately outside the binary's dependency tree.**
+`tests/cipher_policy.rs` fails the build if a TLS crate enters it, and an
+HTTP client is how one arrives. `scripts/seeds-fetch.sh` still does the
+download for `make seeds`, with `cairn seeds resolve` checking the key files.
+`cairn run` also asks `curl` for this same URL when it is using the compiled
+list, and dials any seed that list adds (`src/p2p/seeds.rs`). A person does
+not download a bootstrap file to hear about a seed that was published after
+their binary was built. `curl` missing, or the site down, leaves the compiled
+list in place. `CAIRN_SEEDS=<file>` and `CAIRN_SEEDS=off` skip the refresh:
+the operator already chose the list.
 
 **And the binary carries the list itself.** `cairn run`, `cairn p2p` and
 `cairn serve --p2p-listen` dial the copy of this file compiled into them

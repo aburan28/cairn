@@ -15,11 +15,19 @@ enum AgentClient: String, CaseIterable, Identifiable {
         }
     }
 
+    func configURL(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
+        switch self {
+        case .claudeCode: return home.appendingPathComponent(".claude.json")
+        case .codex: return home.appendingPathComponent(".codex/config.toml")
+        case .opencode: return home.appendingPathComponent(".config/opencode/opencode.json")
+        }
+    }
+
     var file: String {
         switch self {
-        case .claudeCode: return ".mcp.json in the project, or ~/.claude.json through claude mcp add"
+        case .claudeCode: return "~/.claude.json (user config)"
         case .codex: return "~/.codex/config.toml"
-        case .opencode: return "opencode.json in the project, or ~/.config/opencode/opencode.json"
+        case .opencode: return "~/.config/opencode/opencode.json"
         }
     }
 }
@@ -109,6 +117,99 @@ enum AgentStanza {
             }
             return text
         }
+    }
+
+    enum InstallResult: Equatable {
+        case installed(URL, backup: URL?)
+        case alreadyConfigured(URL)
+    }
+
+    enum InstallError: LocalizedError {
+        case malformedJSON(URL, String)
+        case unsupportedConfig(URL)
+
+        var errorDescription: String? {
+            switch self {
+            case let .malformedJSON(url, reason):
+                return "Could not read \(url.path): \(reason). The file was left unchanged."
+            case let .unsupportedConfig(url):
+                return "\(url.path) has an unexpected structure. The file was left unchanged."
+            }
+        }
+    }
+
+    /// Install this client's user-level MCP entry after the UI has obtained
+    /// explicit consent. Existing configuration is preserved; replacement is
+    /// refused so a hand-edited entry cannot be silently changed.
+    static func install(_ i: Inputs, home: URL = FileManager.default.homeDirectoryForCurrentUser) throws -> InstallResult {
+        let url = i.client.configURL(home: home)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        switch i.client {
+        case .codex:
+            let current = FileManager.default.fileExists(atPath: url.path)
+                ? try String(contentsOf: url, encoding: .utf8)
+                : ""
+            if current.contains("[mcp_servers.cairn]") {
+                return .alreadyConfigured(url)
+            }
+            let backup = try backupIfPresent(url)
+            let stanza = render(i).trimmingCharacters(in: .whitespacesAndNewlines)
+            let separator = current.isEmpty || current.hasSuffix("\n") ? "" : "\n"
+            try (current + separator + "\n# cairn -- added by Cairn.app\n" + stanza + "\n")
+                .write(to: url, atomically: true, encoding: .utf8)
+            return .installed(url, backup: backup)
+
+        case .claudeCode, .opencode:
+            var config: [String: Any] = [:]
+            if FileManager.default.fileExists(atPath: url.path) {
+                do {
+                    let data = try Data(contentsOf: url)
+                    guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    else { throw InstallError.unsupportedConfig(url) }
+                    config = object
+                } catch let error as InstallError {
+                    throw error
+                } catch {
+                    throw InstallError.malformedJSON(url, error.localizedDescription)
+                }
+            }
+
+            let section = i.client == .claudeCode ? "mcpServers" : "mcp"
+            var servers: [String: Any]
+            if let existingSection = config[section] {
+                guard let object = existingSection as? [String: Any] else {
+                    throw InstallError.unsupportedConfig(url)
+                }
+                servers = object
+            } else {
+                servers = [:]
+            }
+            if servers["cairn"] != nil { return .alreadyConfigured(url) }
+            let rendered = render(i)
+            guard let data = rendered.data(using: .utf8),
+                  let entryObject = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let entries = entryObject[section] as? [String: Any],
+                  let entry = entries["cairn"] else {
+                throw InstallError.unsupportedConfig(url)
+            }
+            servers["cairn"] = entry
+            config[section] = servers
+            let encoded = try JSONSerialization.data(
+                withJSONObject: config, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            let backup = try backupIfPresent(url)
+            try (encoded + Data([0x0A])).write(to: url, options: .atomic)
+            return .installed(url, backup: backup)
+        }
+    }
+
+    private static func backupIfPresent(_ url: URL) throws -> URL? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let backup = url.appendingPathExtension("cairn-\(stamp).bak")
+        try FileManager.default.copyItem(at: url, to: backup)
+        return backup
     }
 
     /// `claude mcp add`, which writes the Claude Code stanza itself and

@@ -1,49 +1,51 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { type NetworkResponse, fetchNetwork } from "@/lib/network";
-import { type Objective, loadObjectives, resolveNode } from "@/lib/site";
+import { useCallback, useEffect, useState } from "react";
+import { type NetworkResponse, fetchNetwork, primaryRole } from "@/lib/network";
+import { type Objective, loadObjectives } from "@/lib/site";
+import { type Underserved, fetchGoals } from "@/lib/goals";
 import { type ChallengeAssignment, fetchAssignments, resourceSummary, workerModeLabel } from "@/lib/scheduling";
 import {
   type AppRole,
   type AppSheet,
-  DECLARED_BY_ROLE,
   PAY_LABEL,
   ROLES,
   ROLE_TOGGLE,
+  type RoleId,
   type RoleInfo,
-  lanState,
   openSheet,
   setRole,
-  workCommand,
 } from "@/lib/contribute";
 import { type Bridge, appBridge } from "@/lib/draft";
 import { objectiveTitle } from "@/lib/title";
-import { Badge, Box, CopyButton, Note, PageHeader, Skeleton } from "@/components/ui";
+import { AgentConnect } from "@/components/agents";
+import { WorkPanel } from "@/components/WorkPanel";
+import { useNode } from "@/components/hooks";
+import { Badge, Box, Note, PageHeader, Sheet } from "@/components/ui";
 
 /**
- * Ways to take part, what each pays, and how to start.
+ * Ways to take part, what each pays, and -- one click away -- doing it.
  *
- * Inside Cairn.app every role is a button: the app flips the toggle, opens
- * the sheet, or starts the worker, because a window whose whole point is
- * that there is no terminal must not answer "how do I start" with a shell
- * line. In a browser tab there is no app to ask, so the same card says
- * where the control is in the app and what the command is.
+ * Every role is a button. It opens a panel that asks what it needs to and
+ * then does the thing: inside Cairn.app it flips the app's toggle or opens
+ * its sheet. A browser cannot control a process on the reader's machine.
  *
- * Everything about *this node* comes from `GET /network`: which roles it
- * declares, the contradictions the node itself found in that declaration,
- * and where its HTTP side can be reached from. The role descriptions are
- * `lib/contribute.ts`, which is written against what the rules pay today.
+ * What an offer is not is proof. The roster shows what a machine says it
+ * offers; only the answers a challenge's checker accepts are paid, so a
+ * machine that offers a day and finds nothing earns nothing. The page says
+ * so beside the button, because the alternative -- implying that offering is
+ * earning -- is the one claim here the log could not back.
  */
 export default function Page() {
-  const [base, setBase] = useState<string | null>(null);
+  const base = useNode();
   const [network, setNetwork] = useState<NetworkResponse | null>(null);
-  const [networkError, setNetworkError] = useState<string | null>(null);
   const [objectives, setObjectives] = useState<Objective[]>([]);
-  const [live, setLive] = useState(false);
+  const [underserved, setUnderserved] = useState<Underserved[]>([]);
   const [origin, setOrigin] = useState("");
   const [bridge, setBridge] = useState<Bridge | null>(null);
+  const [open, setOpen] = useState<RoleId | null>(null);
+  const [requestedObjective, setRequestedObjective] = useState<string | null>(null);
   /** The change the app is restarting the node for, until the page reloads. */
   const [restarting, setRestarting] = useState<{ role: AppRole; on: boolean } | null>(null);
   const [appError, setAppError] = useState<string | null>(null);
@@ -51,114 +53,176 @@ export default function Page() {
   useEffect(() => {
     setOrigin(window.location.origin);
     setBridge(appBridge());
-    void resolveNode().then(async (url) => {
-      setBase(url);
-      const [net, feed] = await Promise.all([
-        fetchNetwork(url).catch((cause: unknown) => {
-          setNetworkError(cause instanceof Error ? cause.message : String(cause));
-          return null;
-        }),
-        loadObjectives(url),
-      ]);
-      setNetwork(net);
-      setLive(feed.live);
-      setObjectives(feed.live ? feed.objectives.filter((o) => o.open) : []);
-    });
+    setRequestedObjective(new URLSearchParams(window.location.search).get("objective"));
+    // `#compute` and friends open their panel, so "Offer compute →" on the
+    // Network page lands on the form rather than on a card to find.
+    const fromHash = window.location.hash.replace("#", "");
+    const ids: Record<string, RoleId> = { compute: "compute", agent: "experimenter", check: "validator", relay: "relay", fund: "funder" };
+    if (ids[fromHash]) setOpen(ids[fromHash]);
   }, []);
+
+  useEffect(() => {
+    if (base === null) return;
+    void Promise.all([
+      fetchNetwork(base).catch(() => null),
+      loadObjectives(base),
+      fetchGoals(base).catch(() => null),
+    ]).then(([net, feed, goals]) => {
+      setNetwork(net);
+      setObjectives(feed.live ? feed.objectives.filter((o) => o.open) : []);
+      setUnderserved(goals?.underserved ?? []);
+    });
+  }, [base]);
 
   const declared = new Set<string>(network?.node.roles.declared ?? []);
 
-  async function toggle(role: AppRole, on: boolean) {
-    if (!bridge) return;
-    setAppError(null);
-    try {
-      await setRole(bridge, role, on);
-      // The app restarts the node and reloads this page when it is back.
-      setRestarting({ role, on });
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      if (message !== "Cancelled.") setAppError(message);
-    }
-  }
+  const toggle = useCallback(
+    async (role: AppRole, on: boolean) => {
+      if (!bridge) return;
+      setAppError(null);
+      try {
+        await setRole(bridge, role, on);
+        // The app restarts the node and reloads this page when it is back.
+        setRestarting({ role, on });
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        if (message !== "Cancelled.") setAppError(message);
+      }
+    },
+    [bridge],
+  );
 
-  async function open(sheet: AppSheet, objective?: string) {
-    if (!bridge) return;
-    setAppError(null);
-    try {
-      await openSheet(bridge, sheet, objective);
-    } catch (cause) {
-      setAppError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
+  const sheet = useCallback(
+    async (name: AppSheet, objective?: string) => {
+      if (!bridge) return;
+      setAppError(null);
+      try {
+        await openSheet(bridge, name, objective);
+      } catch (cause) {
+        setAppError(cause instanceof Error ? cause.message : String(cause));
+      }
+    },
+    [bridge],
+  );
+
+  const role = network ? primaryRole(network.node) : null;
+  const active = ROLES.find((r) => r.id === open) ?? null;
 
   return (
     <>
       <PageHeader
         title="Contribute"
-        subtitle="Ways to take part, what each one pays today, and how to start. Only an objective's pinned checker decides who is paid; no role changes that."
+        subtitle="Ways to take part and what each one pays. Pick one to start; only a challenge's pinned checker decides who is paid."
       />
 
-      <div className="flex flex-col gap-5">
-        <ThisNode network={network} error={networkError} loading={base === null} />
+      {role && network && (
+        <p className="mb-4 text-[12.5px] text-ink-2">
+          This node is a <b className="text-ink">{role.title}</b>
+          {role.also.length > 0 && <> and {role.also.join(", ")}</>}
+          {network.node.reach && !network.node.reach.lan && <> · reachable from this computer only</>}.{" "}
+          <Link href="/network" className="text-accent hover:underline">
+            Network →
+          </Link>
+        </p>
+      )}
 
-        <SharedChallenges
-          base={base}
-          shared={network?.node.resources != null}
-          bridge={bridge}
-          busy={restarting !== null}
-          onOpen={open}
-        />
-
-        {restarting && (
-          <Note title="restarting the node">
+      {restarting && (
+        <div className="mb-4">
+          <Note title="Restarting the node">
             Cairn.app is starting the node again with{" "}
-            <b className="text-ink">
-              {ROLES.find((r) => r.start.inApp?.role === restarting.role)?.title ?? restarting.role}
-            </b>{" "}
+            <b className="text-ink">{ROLES.find((r) => r.start.inApp?.role === restarting.role)?.title ?? restarting.role}</b>{" "}
             {restarting.on ? "on" : "off"}. This page comes back on its own.
           </Note>
-        )}
-        {appError && (
+        </div>
+      )}
+      {appError && (
+        <div className="mb-4">
           <Note title="Cairn.app said no" tone="warn">
             {appError}
           </Note>
-        )}
+        </div>
+      )}
 
-        <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {ROLES.map((role) => (
-            <RoleCard
-              key={role.id}
-              role={role}
-              on={role.declares ? declared.has(role.declares) : false}
+      <SharedChallenges
+        base={base}
+        shared={network?.node.resources != null}
+        bridge={bridge}
+        busy={restarting !== null}
+        onOpen={(name, objective) => void sheet(name, objective)}
+      />
+
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {ROLES.map((info) => (
+          <RoleCard
+            key={info.id}
+            role={info}
+            on={info.declares ? declared.has(info.declares) : false}
+            onOpen={() => {
+              setOpen(info.id);
+              history.replaceState(null, "", `#${HASH[info.id]}`);
+            }}
+          />
+        ))}
+      </section>
+
+      {active && (
+        <Sheet
+          title={active.title}
+          onClose={() => {
+            setOpen(null);
+            history.replaceState(null, "", window.location.pathname);
+          }}
+        >
+          {active.id === "compute" && (
+            <OfferCompute
+              network={network}
+              objectives={objectives}
+              requestedObjective={requestedObjective}
+              underserved={underserved}
+              origin={base || origin}
               bridge={bridge}
               busy={restarting !== null}
-              onToggle={toggle}
-              onOpen={open}
+              onShare={() => void toggle("worker-host", true)}
+              onWork={(objective) => void sheet("work", objective)}
             />
-          ))}
-        </section>
-
-        <AddMachine
-          network={network}
-          objectives={objectives}
-          live={live}
-          base={base ?? ""}
-          origin={origin}
-          bridge={bridge}
-          busy={restarting !== null}
-          onShare={() => toggle("worker-host", true)}
-          onOpen={open}
-        />
-
-        <p className="text-[12px] text-ink-3">
-          Why validators and relays are not paid yet, and what would change that:{" "}
-          <span className="mono">docs/design/roles-and-rewards.md</span>.
-        </p>
-      </div>
+          )}
+          {active.id === "experimenter" && <Solve objectives={objectives} bridge={bridge} />}
+          {active.id === "validator" && (
+            <Toggled role={active} on={declared.has("verifier")} bridge={bridge} busy={restarting !== null} onToggle={toggle}>
+              <p>
+                You re-run each answer&rsquo;s checker on your own machine and sign what it said, staking 50,000 units per
+                check. The stake comes back after six epochs; if your check is shown wrong, whoever caught it takes it.
+                Checks are what lift a result to <i>backed by a bond</i> on the Knowledge page.
+              </p>
+              {!bridge && (
+                <p className="mt-3">Open this node in Cairn.app and turn on checking in Settings.</p>
+              )}
+            </Toggled>
+          )}
+          {active.id === "relay" && (
+            <Toggled role={active} on={declared.has("relay")} bridge={bridge} busy={restarting !== null} onToggle={toggle}>
+              <p>
+                Your node accepts connections from other nodes and serves them the log, so the network stays connected
+                when others are behind routers. It costs bandwidth and opens a port to the internet.
+              </p>
+              {!bridge && <p className="mt-3">Open this node in Cairn.app and turn on relaying in Settings.</p>}
+              <p className="mt-3 text-ink-3">
+                Whether strangers can reach it is on the Network page, under <i>from outside</i>.
+              </p>
+            </Toggled>
+          )}
+          {active.id === "funder" && <Fund />}
+        </Sheet>
+      )}
     </>
   );
 }
 
+/**
+ * Open challenges whose declared minimums this node's shared capacity meets.
+ * A suggestion only: it reserves nothing, and the pinned checker alone decides
+ * what is paid.
+ */
 function SharedChallenges({
   base,
   shared,
@@ -176,7 +240,7 @@ function SharedChallenges({
   const [problem, setProblem] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!base || !shared) {
+    if (base === null || !shared) {
       setAssignments([]);
       setProblem(null);
       return;
@@ -199,419 +263,264 @@ function SharedChallenges({
 
   if (!shared) return null;
   return (
-    <Box title="Challenges this Mac can take" aside={<span className="text-[11px] font-normal text-ink-3">from this node&rsquo;s offer</span>}>
-      {problem ? (
-        <p className="text-[12.5px] text-warn">The node could not match its offer to challenges yet: {problem}</p>
-      ) : assignments.length === 0 ? (
-        <p className="text-[12.5px] text-ink-3">No open challenge currently matches the resources shared in Settings.</p>
-      ) : (
-        <ul className="grid gap-2 sm:grid-cols-2">
-          {assignments.slice(0, 8).map((assignment) => (
-            <li key={assignment.objective_id} className="rounded-lg border border-edge bg-surface-2 p-3">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="truncate text-[13px] font-medium text-ink" title={assignment.statement}>{assignment.goal || assignment.statement}</div>
-                  <div className="mt-1 text-[11.5px] text-ink-3">{workerModeLabel(assignment.capabilities.worker)} · {assignment.capabilities.assignment} · {resourceSummary(assignment.capabilities.resources)}</div>
+    <div className="mb-4">
+      <Box
+        title="Challenges this Mac can take"
+        aside={<span className="text-[11px] font-normal text-ink-3">from this node&rsquo;s offer</span>}
+      >
+        {problem ? (
+          <p className="text-[12.5px] text-warn">The node could not match its offer to challenges yet: {problem}</p>
+        ) : assignments.length === 0 ? (
+          <p className="text-[12.5px] text-ink-3">No open challenge currently matches the resources shared in Settings.</p>
+        ) : (
+          <ul className="grid gap-2 sm:grid-cols-2">
+            {assignments.slice(0, 8).map((assignment) => (
+              <li key={assignment.objective_id} className="rounded-lg border border-edge bg-surface-2 p-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-[13px] font-medium text-ink" title={assignment.statement}>
+                      {assignment.goal || assignment.statement}
+                    </div>
+                    <div className="mt-1 text-[11.5px] text-ink-3">
+                      {workerModeLabel(assignment.capabilities.worker)} · {assignment.capabilities.assignment} ·{" "}
+                      {resourceSummary(assignment.capabilities.resources)}
+                    </div>
+                  </div>
+                  <span className="shrink-0 text-[12px] text-ink-2">{assignment.reward.toLocaleString("en-US")}</span>
                 </div>
-                <span className="shrink-0 text-[12px] text-ink-2">{assignment.reward.toLocaleString("en-US")}</span>
-              </div>
-              {bridge && (
-                <button type="button" className="btn btn-sm mt-2" onClick={() => onOpen("work", assignment.objective_id)} disabled={busy}>
-                  Share this Mac…
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-      <p className="mt-3 text-[11.5px] text-ink-3">These matches are a scheduling suggestion based on reported capacity. A worker still has to run, submit, and pass the objective&rsquo;s pinned checker.</p>
-    </Box>
+                {bridge && (
+                  <button
+                    type="button"
+                    className="btn btn-sm mt-2"
+                    onClick={() => onOpen("work", assignment.objective_id)}
+                    disabled={busy}
+                  >
+                    Share this Mac…
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="mt-3 text-[11.5px] text-ink-3">
+          These matches are a scheduling suggestion based on reported capacity. A worker still has to run, submit, and
+          pass the objective&rsquo;s pinned checker before anything is paid.
+        </p>
+      </Box>
+    </div>
   );
 }
 
-function ThisNode({
+const HASH: Record<RoleId, string> = {
+  compute: "compute",
+  experimenter: "agent",
+  validator: "check",
+  relay: "relay",
+  funder: "fund",
+};
+
+const ACTION: Record<RoleId, string> = {
+  experimenter: "Start solving",
+  compute: "Offer compute",
+  validator: "Check answers",
+  relay: "Relay for the network",
+  funder: "Fund a question",
+};
+
+function RoleCard({ role, on, onOpen }: { role: RoleInfo; on: boolean; onOpen: () => void }) {
+  const tone = role.pay === "paid" ? "accent" : role.pay === "bonded" ? "warn" : "neutral";
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="card card-pad flex cursor-pointer flex-col gap-2 text-left transition-colors hover:border-edge-strong hover:bg-surface-2"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-[14px] font-semibold text-ink">{role.title}</h2>
+        <Badge tone={tone}>{PAY_LABEL[role.pay]}</Badge>
+        {on && <Badge title="This node does this now">on here</Badge>}
+      </div>
+      <p className="text-[13px] leading-relaxed text-ink-2">{role.does}</p>
+      <p className="text-[12.5px] leading-relaxed text-ink-3">{role.payDetail}</p>
+      <span className="mt-auto pt-1 text-[12.5px] font-medium text-accent">{ACTION[role.id]} →</span>
+    </button>
+  );
+}
+
+// -- offer compute ---------------------------------------------------------------
+
+function OfferCompute({
   network,
-  error,
-  loading,
+  objectives,
+  requestedObjective,
+  underserved,
+  origin,
+  bridge,
+  busy,
+  onShare,
+  onWork,
 }: {
   network: NetworkResponse | null;
-  error: string | null;
-  loading: boolean;
+  objectives: Objective[];
+  requestedObjective: string | null;
+  underserved: Underserved[];
+  origin: string;
+  bridge: Bridge | null;
+  busy: boolean;
+  onShare: () => void;
+  onWork: (objective?: string) => void;
 }) {
-  if (error) {
-    return (
-      <Note title="this node did not describe itself" tone="warn">
-        {error} The roles below still apply; this page just cannot say which this node has on.
-      </Note>
-    );
-  }
-  if (!network) {
-    return (
-      <Box title="This node">
-        <Skeleton className={loading ? "h-4 w-64" : "h-4 w-48"} />
-      </Box>
-    );
-  }
-  const { roles, warnings, reach } = network.node;
-  const lan = lanState(reach, "");
+  const [objective, setObjective] = useState("");
+
+  useEffect(() => {
+    if (objective || objectives.length === 0) return;
+    if (requestedObjective && objectives.some((row) => row.id === requestedObjective)) {
+      setObjective(requestedObjective);
+      return;
+    }
+    const scarce = underserved.flatMap((row) => row.objectives).find((id) => objectives.some((row) => row.id === id));
+    setObjective(scarce ?? objectives[0].id);
+  }, [objectives, underserved, objective, requestedObjective]);
+
   return (
-    <Box title="This node">
-      <dl className="kv">
-        <dt>declares</dt>
-        <dd className="flex flex-wrap gap-1.5">
-          {roles.declared.length === 0 ? (
-            <span className="text-ink-3">no roles</span>
-          ) : (
-            roles.declared.map((role) => <Badge key={role}>{role}</Badge>)
-          )}
-        </dd>
-        <dt>reachable from</dt>
-        <dd>
-          {lan.state === "lan"
-            ? lan.urls.length
-              ? "your network"
-              : "your network (address not found)"
-            : lan.state === "local"
-              ? "this computer only"
-              : "unknown on this node version"}
-        </dd>
-        <dt>can check</dt>
-        <dd>
-          {network.node.verifiers.servable.length
-            ? network.node.verifiers.servable.join(", ")
-            : "no verifier kind on this machine"}
-        </dd>
-        <dt>shared capacity</dt>
-        <dd>{network.node.resources ? resourceSummary(network.node.resources) : "not shared"}</dd>
-      </dl>
-      {warnings.length > 0 && (
-        <ul className="mt-3 flex flex-col gap-1 text-[12.5px] text-warn">
-          {warnings.map((warning) => (
-            <li key={warning}>{warning}</li>
-          ))}
-        </ul>
+    <div className="flex flex-col gap-4 text-[13px]">
+      <p className="text-ink-2">
+        Choose a goal, then start a worker on this Mac. The worker takes a slice of the search,
+        runs the solver you chose in Cairn.app, and sends its answers for verification.
+      </p>
+      <label className="flex flex-col gap-1 text-[12px] text-ink-3">
+        Goal to work on
+        <select className="field" value={objective} onChange={(event) => setObjective(event.target.value)} disabled={!objectives.length}>
+          {objectives.length === 0 && <option value="">No open goal on this node</option>}
+          {objectives.map((row) => <option key={row.id} value={row.id}>{objectiveTitle(row)}</option>)}
+        </select>
+      </label>
+      {objective && <WorkPanel objective={objective} base={origin} />}
+      {bridge && (
+        <button type="button" className="btn btn-sm self-start" disabled={busy || !objective} onClick={() => onWork(objective)}>
+          Choose or change solver…
+        </button>
       )}
-    </Box>
+      {!bridge && (
+        <p className="text-ink-2">
+          Open this node in Cairn.app on the computer that will do the work. Choose a goal and
+          a solver there, then use the Start and Stop controls above.
+        </p>
+      )}
+      {network?.node.reach && !network.node.reach.lan && (
+        <div className="rounded-lg border border-edge bg-surface-2 p-3 text-ink-2">
+          Other machines cannot reach this node yet.
+          {bridge && (
+            <button type="button" className="btn btn-sm mt-2 block" onClick={onShare} disabled={busy}>
+              Share this node on my network
+            </button>
+          )}
+        </div>
+      )}
+      <p className="text-[12px] text-ink-3">
+        CPU use is measured on this Mac. Search rate comes from worker reports and appears only when
+        its solver measures steps. Rewards count verified results in the log, never idle time.
+      </p>
+    </div>
   );
 }
 
-function RoleCard({
+// -- the others ------------------------------------------------------------------
+
+function Solve({ objectives, bridge }: { objectives: Objective[]; bridge: Bridge | null }) {
+  const richest = [...objectives].sort((a, b) => b.reward - a.reward).slice(0, 4);
+  return (
+    <div className="flex flex-col gap-5 text-[13px]">
+      <p className="text-ink-2">
+        Answer open challenges by hand, with a program, or with an agent. Scoring a candidate first is free and uses the
+        same checker that decides payment; a copy of someone else&rsquo;s answer earns nothing.
+      </p>
+      <div>
+        <div className="label">Open on this node</div>
+        {richest.length === 0 ? (
+          <p className="text-ink-3">Nothing open right now.</p>
+        ) : (
+          <ul className="flex flex-col gap-1.5">
+            {richest.map((o) => (
+              <li key={o.id} className="flex items-baseline gap-2">
+                <Link href={`/challenge?id=${encodeURIComponent(o.id)}`} className="min-w-0 flex-1 truncate text-accent hover:underline">
+                  {objectiveTitle(o)}
+                </Link>
+                <span className="mono shrink-0 text-[12px] text-ink-3">{o.reward.toLocaleString("en-US")}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div>
+        <div className="label">With an agent</div>
+        <AgentConnect bridge={bridge} />
+      </div>
+      <div>
+        <div className="label">By hand</div>
+        <p className="text-ink-2">Open a challenge to see its answer format and pinned checker, then connect an agent to score and submit your answer.</p>
+      </div>
+    </div>
+  );
+}
+
+function Toggled({
   role,
   on,
   bridge,
   busy,
   onToggle,
-  onOpen,
+  children,
 }: {
   role: RoleInfo;
   on: boolean;
   bridge: Bridge | null;
   busy: boolean;
   onToggle: (role: AppRole, on: boolean) => void;
-  onOpen: (sheet: AppSheet) => void;
+  children: React.ReactNode;
 }) {
-  const tone = role.pay === "paid" ? "accent" : role.pay === "bonded" ? "warn" : "neutral";
-  const inApp = bridge ? role.start.inApp : undefined;
+  const inApp = role.start.inApp?.role;
   return (
-    <article className="card card-pad flex flex-col gap-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <h2 className="text-[14px] font-semibold text-ink">{role.title}</h2>
-        <Badge tone={tone}>{PAY_LABEL[role.pay]}</Badge>
-        {on && <Badge title="This node declares this role">on here</Badge>}
-      </div>
-      <p className="text-[13px] leading-relaxed text-ink-2">{role.does}</p>
-      <p className="text-[12.5px] leading-relaxed text-ink-2">
-        <b className="font-medium text-ink">How it pays.</b> {role.payDetail}
+    <div className="flex flex-col gap-4 text-[13px] leading-relaxed text-ink-2">
+      <div>{children}</div>
+      <p className="text-[12.5px]">
+        <b className="text-ink">Risk.</b> {role.risk}
       </p>
-      <p className="text-[12.5px] leading-relaxed text-ink-3">
-        <b className="font-medium text-ink-2">Risk.</b> {role.risk}
-      </p>
-      <div className="mt-auto flex flex-col gap-1.5 pt-1 text-[12px]">
-        {inApp ? (
-          <div className="flex flex-wrap items-center gap-2">
-            {inApp.open && (
-              <button
-                type="button"
-                className="btn btn-primary btn-sm"
-                onClick={() => onOpen(inApp.open!.sheet)}
-                disabled={busy}
-              >
-                {inApp.open.label}
-              </button>
-            )}
-            {inApp.role && (
-              <button
-                type="button"
-                className={inApp.open ? "btn btn-sm" : on ? "btn btn-sm" : "btn btn-primary btn-sm"}
-                onClick={() => onToggle(inApp.role!, !on)}
-                disabled={busy}
-                title={
-                  on
-                    ? "Turns this role off and restarts the node"
-                    : "Turns this role on and restarts the node; Cairn.app asks first"
-                }
-              >
-                {on ? ROLE_TOGGLE[inApp.role].on : ROLE_TOGGLE[inApp.role].off}
-              </button>
-            )}
-          </div>
-        ) : (
-          <>
-            {role.start.app && (
-              <div className="text-ink-2">
-                <span className="text-ink-3">In Cairn.app: </span>
-                {role.start.app}
-              </div>
-            )}
-            {role.start.cli && (
-              <div className="relative">
-                <pre className="code pr-9 text-[11.5px]">{role.start.cli}</pre>
-                <div className="absolute top-1.5 right-1.5">
-                  <CopyButton value={role.start.cli} />
-                </div>
-              </div>
-            )}
-          </>
-        )}
-        {role.start.page && (
-          <Link href={role.start.page.href} className="text-accent hover:underline">
-            {role.start.page.label} →
-          </Link>
-        )}
-      </div>
-    </article>
+      {bridge && inApp ? (
+        <div>
+          <button type="button" className={`btn ${on ? "" : "btn-primary"}`} onClick={() => onToggle(inApp, !on)} disabled={busy}>
+            {on ? ROLE_TOGGLE[inApp].on : ROLE_TOGGLE[inApp].off}
+          </button>
+          <p className="hint">Cairn.app asks first, then restarts the node with it {on ? "off" : "on"}.</p>
+        </div>
+      ) : (
+        role.start.app && <p className="text-[12px] text-ink-3">In Cairn.app: {role.start.app}.</p>
+      )}
+    </div>
   );
 }
 
-/**
- * The second-machine walkthrough: is this node reachable from the LAN, and
- * if so, what that machine does to join -- in its own Cairn.app, or with
- * the exact `cairn work` line for the objective picked here.
- */
-function AddMachine({
-  network,
-  objectives,
-  live,
-  base,
-  origin,
-  bridge,
-  busy,
-  onShare,
-  onOpen,
-}: {
-  network: NetworkResponse | null;
-  objectives: Objective[];
-  live: boolean;
-  base: string;
-  origin: string;
-  bridge: Bridge | null;
-  busy: boolean;
-  onShare: () => void;
-  onOpen: (sheet: AppSheet, objective?: string) => void;
-}) {
-  const lan = lanState(network?.node.reach, base || origin);
-  const [objective, setObjective] = useState<string>("");
-  const [worker, setWorker] = useState("");
-  const [solver, setSolver] = useState("");
-  const [url, setUrl] = useState<string>("");
-
-  useEffect(() => {
-    if (!objective && objectives.length) setObjective(objectives[0].id);
-  }, [objectives, objective]);
-  const urls = lan.state === "lan" ? lan.urls : [];
-  const leader = network?.node.fleet?.signs_as ?? null;
-  useEffect(() => {
-    if (!url && urls.length) setUrl(urls[0]);
-  }, [urls, url]);
-
-  const command = useMemo(
-    () => workCommand({ node: url, objective: objective || null, worker, solver, leader }),
-    [url, objective, worker, solver, leader],
-  );
-  const working = (network?.compute.workers ?? []).filter((w) => w.status === "live");
-
+function Fund() {
   return (
-    <Box title="Add a machine on your network">
-      <div className="flex flex-col gap-4 text-[13px]">
-        {lan.state === "local" ? (
-          <Note title="only this computer can reach this node" tone="warn">
-            Another machine cannot connect until the node listens on your network.{" "}
-            {bridge ? (
-              <>
-                Anyone on that network can then read the log and post answers; nobody can
-                change what has settled.
-                <div className="mt-2">
-                  <button type="button" className="btn btn-primary btn-sm" onClick={onShare} disabled={busy}>
-                    Share this node on my network
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                In Cairn.app: Contribute ▸ <b>Share this node on my network</b> (or Settings ▸
-                Roles ▸ Worker host), then restart the node. From a terminal:{" "}
-                <code className="mono">cairn run --serve 0.0.0.0:8080</code>. Anyone on that
-                network can then read the log and post answers; nobody can change what has
-                settled.
-              </>
-            )}
-          </Note>
-        ) : lan.state === "unknown" ? (
-          <Note title="this node does not say where it can be reached" tone="warn">
-            It is older than this page. If you started it with{" "}
-            <code className="mono">--serve 0.0.0.0:8080</code>, use this computer&rsquo;s LAN
-            address below.
-          </Note>
-        ) : null}
-
-        <ol className="flex flex-col gap-3">
-          <li>
-            <b className="text-ink">1. Put Cairn on the other machine.</b>{" "}
-            <span className="text-ink-2">
-              A Mac: install Cairn from the same disk image, which brings Cairn.app. Anything
-              else, with internet: the install line on the Overview. Without: copy the{" "}
-              <code className="mono">cairn</code> binary across — it is one file with nothing to
-              install beside it.
-            </span>
-          </li>
-          <li className="flex flex-col gap-2">
-            <b className="text-ink">2. Pick what it works on, and its name.</b>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <label className="flex flex-col gap-1 text-[12px] text-ink-3">
-                Objective
-                <select
-                  className="field"
-                  value={objective}
-                  onChange={(e) => setObjective(e.target.value)}
-                  disabled={!objectives.length}
-                >
-                  {objectives.length === 0 && (
-                    <option value="">{live ? "no open objectives" : "no node answered"}</option>
-                  )}
-                  {objectives.map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {objectiveTitle(o)} · {o.capabilities ? workerModeLabel(o.capabilities.worker) : "External worker"}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex flex-col gap-1 text-[12px] text-ink-3">
-                Node address
-                {urls.length > 1 ? (
-                  <select className="field field-mono" value={url} onChange={(e) => setUrl(e.target.value)}>
-                    {urls.map((u) => (
-                      <option key={u}>{u}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    className="field field-mono"
-                    value={url}
-                    placeholder="http://<this computer>:8080"
-                    onChange={(e) => setUrl(e.target.value)}
-                    spellCheck={false}
-                  />
-                )}
-              </label>
-              <label className="flex flex-col gap-1 text-[12px] text-ink-3">
-                Machine name (shown on the roster, and paid)
-                <input
-                  className="field"
-                  value={worker}
-                  placeholder="garage-gpu"
-                  onChange={(e) => setWorker(e.target.value)}
-                  spellCheck={false}
-                />
-              </label>
-            </div>
-          </li>
-          <li className="flex flex-col gap-2">
-            <b className="text-ink">3. Start it there.</b>
-            {bridge ? (
-              <>
-                <span className="text-[12.5px] text-ink-2">
-                  In Cairn.app on that machine: <b className="text-ink">Contribute ▸ Share this
-                  Mac…</b>, choose this challenge; it uses the resources allowed in Settings. The
-                  current worker protocol still needs a search program for objectives without an
-                  app-provided integration, so that choice lives under Advanced.
-                </span>
-                <div>
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={() => onOpen("work", objective || undefined)}
-                    disabled={busy}
-                  >
-                    Share this Mac…
-                  </button>
-                </div>
-                <details className="text-[12.5px] text-ink-2">
-                  <summary className="cursor-pointer text-ink-3">
-                    Without Cairn.app on that machine (Linux, a rented GPU)
-                  </summary>
-                  <div className="relative mt-2">
-                    <pre className="code pr-9 text-[11.5px]">{command}</pre>
-                    <div className="absolute top-2 right-2">
-                      <CopyButton value={command} />
-                    </div>
-                  </div>
-                </details>
-              </>
-            ) : (
-              <div className="relative">
-                <pre className="code pr-9 text-[11.5px]">{command}</pre>
-                <div className="absolute top-2 right-2">
-                  <CopyButton value={command} />
-                </div>
-              </div>
-            )}
-            <span className="text-[12.5px] text-ink-2">
-              The machine joins the selected challenge and reports its progress.
-              When a search program is required, it gets its slice as JSON on stdin and prints
-              candidate answers, one object per line. The checker decides what is paid.
-              {leader ? (
-                <>
-                  {" "}
-                  This node leads a fleet, so a machine on its network names it as the
-                  submitter: the node signs each machine&rsquo;s records and is paid for them,
-                  while each machine keeps its own slice and its own line on the roster.
-                </>
-              ) : (
-                <> Each machine is paid under its own name.</>
-              )}
-            </span>
-          </li>
-        </ol>
-
-        <div className="text-[12.5px] text-ink-2">
-          <b className="text-ink">Working offline.</b> A network with no internet works the same:
-          {bridge ? (
-            <> Settings ▸ Network ▸ Offline.</>
-          ) : (
-            <>
-              {" "}
-              start the node with <code className="mono">CAIRN_SEEDS=off</code> (Cairn.app:
-              Settings ▸ Network ▸ Offline).
-            </>
-          )}{" "}
-          Nodes on the same network find each other by their LAN beacon, and workers only ever
-          need the node&rsquo;s address.
+    <div className="flex flex-col gap-3 text-[13px]">
+      <p className="text-ink-2">
+        You set the bounty aside when you post, and it goes to whoever the checker accepts. It cannot be changed afterwards.
+      </p>
+      <Link href="/submit" className="card card-pad block transition-colors hover:border-edge-strong hover:bg-surface-2">
+        <div className="font-medium text-ink">A single question →</div>
+        <div className="mt-1 text-[12.5px] text-ink-2">
+          One answer settles it, or each improvement on a score is paid. Write it, pin how answers are checked, sign it.
         </div>
-
-        <div className="text-[12.5px] text-ink-2">
-          <b className="text-ink">Working now:</b>{" "}
-          {working.length === 0 ? (
-            <span className="text-ink-3">no machine is reporting in to this node.</span>
-          ) : (
-            <>
-              {working.map((w) => w.worker).join(", ")}{" "}
-              <Link href="/network" className="text-accent hover:underline">
-                on the Network page →
-              </Link>
-            </>
-          )}
+      </Link>
+      <Link
+        href="/coordination#launch"
+        className="card card-pad block transition-colors hover:border-edge-strong hover:bg-surface-2"
+      >
+        <div className="font-medium text-ink">A coordinated task →</div>
+        <div className="mt-1 text-[12.5px] text-ink-2">
+          A big search split across many machines, each paid per piece it finishes. Describe it and your agent sets it up.
         </div>
-      </div>
-    </Box>
+      </Link>
+    </div>
   );
 }

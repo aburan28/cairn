@@ -5,6 +5,14 @@
 #   ./scripts/mcp-config.sh --client opencode    # -> opencode.json
 #   ./scripts/mcp-config.sh --client codex       # -> ~/.codex/config.toml
 #   ./scripts/mcp-config.sh --print              # show the stanza, write nothing
+#   ./scripts/mcp-config.sh --url http://127.0.0.1:8001/mcp --print
+#   ./scripts/mcp-config.sh --url http://127.0.0.1:8001/mcp   # HTTP, not stdio
+#
+# Without --url the client spawns `cairn mcp` itself over stdio. With --url it
+# talks Streamable HTTP to a server that is already running (`cairn mcp --http
+# ADDR`, or `cairn run --mcp-http ADDR` for the live log) -- the arrangement
+# for a client that cannot spawn a subprocess, on this machine or another.
+# --log/--identity are server-side there and this script ignores them.
 #
 # --identity defaults to .local/node.identity.json and is included in the
 # stanza only when that file already exists, so a fresh checkout with no
@@ -43,6 +51,7 @@ LOG="${MCP_LOG:-$REPO/.local/cairn-mcp.jsonl}"
 IDENTITY="${MCP_IDENTITY:-$REPO/.local/node.identity.json}"
 OUT=""
 PRINT=0
+URL=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -50,6 +59,7 @@ while [ $# -gt 0 ]; do
     --log)      LOG="$2"; shift 2 ;;
     --identity) IDENTITY="$2"; shift 2 ;;
     --out)      OUT="$2"; shift 2 ;;
+    --url)      URL="$2"; shift 2 ;;
     --print)    PRINT=1; shift ;;
     -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -77,7 +87,16 @@ CAIRN_BIN="${CAIRN_BIN:-$REPO/bin/cairn}"
 
 say() { printf '  %s\n' "$1"; }
 
-if [ ! -x "$CAIRN_BIN" ]; then
+# An http(s):// URL, or nothing. Anything else is a client that would fail its
+# first connection with a transport error rather than this sentence.
+if [ -n "$URL" ]; then
+  case "$URL" in
+    http://*|https://*) ;;
+    *) echo "not a URL: $URL (want http(s)://host:port/mcp)" >&2; exit 2 ;;
+  esac
+fi
+
+if [ -z "$URL" ] && [ ! -x "$CAIRN_BIN" ]; then
   say "note: $CAIRN_BIN is not built yet -- 'make build' before starting a client"
 fi
 
@@ -88,7 +107,9 @@ fi
 # one a p2p node key also answers to, and that key is the wrong shape by three
 # orders of magnitude. Check for what --identity actually takes, not for a
 # filename, because existence was never the property that mattered here.
-if [ -f "$IDENTITY" ]; then
+# Skipped for --url: the server is already running somewhere else, and its
+# flags are its operator's business, not this stanza's.
+if [ -z "$URL" ] && [ -f "$IDENTITY" ]; then
   if ! IDENTITY_WHY=$(IDENTITY="$IDENTITY" "$PYTHON" -c '
 import json, os, sys
 path = os.environ["IDENTITY"]
@@ -116,11 +137,19 @@ if any(c not in "0123456789abcdefABCDEF" for c in secret):
 fi
 
 if [ "$PRINT" = "1" ]; then
-  CAIRN_BIN="$CAIRN_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" IDENTITY="$IDENTITY" "$PYTHON" - <<'PY'
+  CAIRN_BIN="$CAIRN_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" IDENTITY="$IDENTITY" URL="$URL" "$PYTHON" - <<'PY'
 import json, os
-b, log, repo, client, identity = (
-    os.environ[k] for k in ("CAIRN_BIN", "LOG", "REPO", "CLIENT", "IDENTITY")
+b, log, repo, client, identity, url = (
+    os.environ[k] for k in ("CAIRN_BIN", "LOG", "REPO", "CLIENT", "IDENTITY", "URL")
 )
+if url:
+    if client == "claude":
+        print(json.dumps({"mcpServers": {"cairn": {"type": "http", "url": url}}}, indent=2))
+    elif client == "opencode":
+        print(json.dumps({"mcp": {"cairn": {"type": "remote", "url": url, "enabled": True}}}, indent=2))
+    else:
+        print(f'[mcp_servers.cairn]\nurl = "{url}"')
+    raise SystemExit(0)
 args = ["--log", log, "--root", repo, "mcp"]
 if os.path.exists(identity):
     args += ["--identity", identity]
@@ -145,26 +174,30 @@ if [ "$CLIENT" = "codex" ]; then
   if [ -f "$OUT" ] && grep -q '^\[mcp_servers\.cairn\]' "$OUT"; then
     say "[mcp_servers.cairn] already in $OUT -- leaving it alone"
     say "delete that section and rerun to repoint it, or edit it by hand:"
-    "$0" --client codex --log "$LOG" --print | sed 's/^/    /'
+    "$0" --client codex --log "$LOG" ${URL:+--url "$URL"} --print | sed 's/^/    /'
     exit 0
   fi
   [ -f "$OUT" ] && cp "$OUT" "$OUT.bak" && say "backed up -> $OUT.bak"
-  ARGS_TOML="\"--log\", \"$LOG\", \"--root\", \"$REPO\", \"mcp\""
-  [ -f "$IDENTITY" ] && ARGS_TOML="$ARGS_TOML, \"--identity\", \"$IDENTITY\""
   {
     printf '\n# cairn -- written by scripts/mcp-config.sh\n'
     printf '[mcp_servers.cairn]\n'
-    printf 'command = "%s"\n' "$CAIRN_BIN"
-    printf 'args = [%s]\n' "$ARGS_TOML"
+    if [ -n "$URL" ]; then
+      printf 'url = "%s"\n' "$URL"
+    else
+      ARGS_TOML="\"--log\", \"$LOG\", \"--root\", \"$REPO\", \"mcp\""
+      [ -f "$IDENTITY" ] && ARGS_TOML="$ARGS_TOML, \"--identity\", \"$IDENTITY\""
+      printf 'command = "%s"\n' "$CAIRN_BIN"
+      printf 'args = [%s]\n' "$ARGS_TOML"
+    fi
   } >>"$OUT"
   say "appended [mcp_servers.cairn] -> $OUT"
 else
   [ -f "$OUT" ] && cp "$OUT" "$OUT.bak" && say "backed up -> $OUT.bak"
-  CAIRN_BIN="$CAIRN_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" OUT="$OUT" IDENTITY="$IDENTITY" "$PYTHON" - <<'PY'
+  CAIRN_BIN="$CAIRN_BIN" LOG="$LOG" REPO="$REPO" CLIENT="$CLIENT" OUT="$OUT" IDENTITY="$IDENTITY" URL="$URL" "$PYTHON" - <<'PY'
 import json, os, sys
 
-b, log, repo, client, out, identity = (
-    os.environ[k] for k in ("CAIRN_BIN", "LOG", "REPO", "CLIENT", "OUT", "IDENTITY")
+b, log, repo, client, out, identity, url = (
+    os.environ[k] for k in ("CAIRN_BIN", "LOG", "REPO", "CLIENT", "OUT", "IDENTITY", "URL")
 )
 args = ["--log", log, "--root", repo, "mcp"]
 if os.path.exists(identity):
@@ -183,7 +216,12 @@ if os.path.exists(out):
     if not isinstance(config, dict):
         sys.exit(f"  {out} is not a JSON object; fix or move it, then rerun")
 
-if client == "claude":
+if url:
+    if client == "claude":
+        section, entry = "mcpServers", {"type": "http", "url": url}
+    else:
+        section, entry = "mcp", {"type": "remote", "url": url, "enabled": True}
+elif client == "claude":
     section, entry = "mcpServers", {"command": b, "args": args}
 else:
     section, entry = "mcp", {"type": "local", "command": [b, *args], "enabled": True}
@@ -204,6 +242,20 @@ print(f"  {'updated' if replaced else 'added'} 'cairn' in {out}")
 if existing:
     print(f"  kept alongside: {', '.join(existing)}")
 PY
+fi
+
+if [ -n "$URL" ]; then
+  say "url:  $URL"
+  cat <<'NOTE'
+
+  The server must already be running there: `cairn mcp --http ADDR` on its own
+  log, or `cairn run --mcp-http ADDR` on the live one. The client opens its own
+  session per connection; capabilities do not cross sessions. The server speaks
+  plaintext HTTP, so a URL outside loopback wants an SSH tunnel underneath it.
+
+  Claude Code picks up .mcp.json on restart. Verify with /mcp.
+NOTE
+  exit 0
 fi
 
 say "log:  $LOG"

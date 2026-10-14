@@ -221,7 +221,11 @@ fn serve_usage(code: i32) -> ! {
          --fanout      peers dialled per round\n\n\
          Everything served is public by design. Without --p2p-listen,\n\
          submissions are queued and never admitted: drain them into the log\n\
-         with `cairn drain --queue <dir>`.",
+         with `cairn drain --queue <dir>`.\n\n\
+         Google sign-in is optional and off by default. Set\n\
+         CAIRN_GOOGLE_CLIENT_ID to offer it; every route still answers with\n\
+         no session, and an unconfigured node runs anonymously. See\n\
+         docs/configuration.md.",
     );
 }
 

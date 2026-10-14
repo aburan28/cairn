@@ -40,7 +40,7 @@ env:
   # rather than read from launch/seeds.json on purpose: a workflow that
   # mirrored whatever a stranger can edit into seeds.json would let that file
   # point a GitHub Actions runner at an arbitrary host on every push.
-  SEED_NODE: http://44.251.117.84:8080
+  SEED_NODE: http://103.196.86.88:19813
 
 jobs:
   mirror:
@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
           [ "$(curl -fsS --max-time 15 "$SEED_NODE/health")" = "ok" ]
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -66,7 +66,7 @@ jobs:
 
       # Asks rather than hard-coding, for the reason pages.yml gives: a
       # custom domain and a project page need different base paths.
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
         id: pages
         with:
           enablement: true

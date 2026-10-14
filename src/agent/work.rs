@@ -17,7 +17,8 @@
 //! Each round the solver is started once, with this round's assignment as one
 //! line of JSON on stdin and in `CAIRN_ASSIGNMENT`, plus `CAIRN_NODE`,
 //! `CAIRN_OBJECTIVE`, `CAIRN_WORKER`, `CAIRN_EPOCH` and
-//! `CAIRN_EPOCH_ENDS_IN` (seconds). It prints zero or more candidate
+//! `CAIRN_EPOCH_ENDS_IN` (seconds) and `CAIRN_ROUND` (zero-based, per process).
+//! It prints zero or more candidate
 //! artifacts on stdout, **one JSON object per line**, and exits. Exit 0 with
 //! no output means "nothing this round" and is not an error. Its stderr is
 //! passed through. A non-zero exit discards that round's output: a solver
@@ -50,7 +51,11 @@
 //! can see which machines are on it.
 
 use std::collections::BTreeMap;
+use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -120,6 +125,13 @@ cairn work — put this machine to work on one objective, with your own solver
 USAGE
     cairn work --node URL --objective ID --worker NAME [options] -- SOLVER [ARGS]...
     cairn work --fleet FILE --objective ID [--worker SUFFIX] [options] -- SOLVER [ARGS]...
+    cairn work start --name NAME [--state-dir DIR] <worker options> -- SOLVER [ARGS]...
+    cairn work status --name NAME [--state-dir DIR]
+    cairn work stop --name NAME [--state-dir DIR]
+
+    A named worker runs in the background. Stop finishes its current solver round
+    and reveals committed candidates before exiting; status shows when it is
+    draining. Its state and log are under ~/.cairn/work/NAME by default.
 
     --node URL           the node's HTTP address, e.g. http://192.168.1.20:8080
     --objective ID       the objective to work (sha256:…)
@@ -139,13 +151,27 @@ USAGE
     --partitions N       how many ways the search is split (default 8)
     --rounds N           stop after N solver runs (default: run until stopped)
     --heartbeat SECONDS  how often to report in while the solver runs (default 30)
+    --stop-file PATH     finish the current round and reveal pending answers when
+                         this local file appears; for a supervising app
+    --pause-file PATH    finish the current round, then wait while this local file
+                         exists; reveals continue and stop still works
     --device TEXT        what this machine is, for the roster
     --margin SECONDS     post nothing this close to an epoch's end (default 8)
+
+OFFERING COMPUTE
+    --threads N          give the solver N threads: $CAIRN_THREADS, $OMP_NUM_THREADS
+                         and $RAYON_NUM_THREADS, and N lanes on the roster
+    --gpus LIST          the GPUs the solver may use, e.g. 0 or 0,2, or `none`:
+                         $CAIRN_GPUS, $CUDA_VISIBLE_DEVICES, $HIP_VISIBLE_DEVICES
+    --hours-per-day H    run the solver at most H hours (1-24) per UTC day, then
+                         pause until midnight UTC. Checked between rounds; due
+                         reveals are still sent while paused, so nothing
+                         already committed goes unpaid
 
 THE SOLVER
     Started once per round. Gets the assignment as one line of JSON on stdin and in
     $CAIRN_ASSIGNMENT, plus $CAIRN_NODE $CAIRN_OBJECTIVE $CAIRN_WORKER $CAIRN_EPOCH
-    $CAIRN_EPOCH_ENDS_IN. Prints candidate artifacts on stdout, one JSON object per
+    $CAIRN_EPOCH_ENDS_IN $CAIRN_ROUND. Prints candidate artifacts on stdout, one JSON object per
     line, and exits 0. No output is fine. A non-zero exit discards the round.
 
     Every candidate is committed this epoch and revealed after the epoch turns; the
@@ -172,13 +198,34 @@ pub struct Options {
     pub partitions: u64,
     pub rounds: Option<u64>,
     pub heartbeat: Duration,
+    /// A local supervisor's graceful stop request. Unique per run so an old
+    /// request cannot stop a new worker with the same name.
+    pub stop_file: Option<PathBuf>,
+    /// A local supervisor's reversible pause request, checked between rounds.
+    pub pause_file: Option<PathBuf>,
     pub device: Option<String>,
     pub margin: u64,
+    /// Threads the solver is given, through the environment variables the
+    /// common runtimes read. Reported as `lanes` on the roster.
+    pub threads: Option<u64>,
+    /// GPU indices the solver may see, `Some(empty)` for none at all.
+    pub gpus: Option<Vec<u32>>,
+    /// Most solver time per UTC day. See [`Budget`].
+    pub hours_per_day: Option<u64>,
     pub solver: Vec<String>,
 }
 
 /// Entry point: `cairn work ARGS…`. Returns the process exit code.
 pub fn main(args: Vec<String>) -> i32 {
+    if let Some((verb, tail)) = args.split_first() {
+        match verb.as_str() {
+            "start" => return managed_start(tail),
+            "status" => return managed_status(tail),
+            "stop" => return managed_stop(tail),
+            "__managed" => return managed_run(tail),
+            _ => {}
+        }
+    }
     let options = match parse(&args) {
         Ok(Some(options)) => options,
         Ok(None) => {
@@ -190,7 +237,26 @@ pub fn main(args: Vec<String>) -> i32 {
             return 2;
         }
     };
-    match Worker::new(options).and_then(|mut worker| worker.run()) {
+    run_options(options, None)
+}
+
+fn run_options(options: Options, control: Option<Control>) -> i32 {
+    let mut worker = match Worker::new(options) {
+        Ok(worker) => worker,
+        Err(error) => {
+            eprintln!("cairn work: {error:?}");
+            return 2;
+        }
+    };
+    worker.control = control;
+    let result = worker.run();
+    if let Some(control) = &worker.control {
+        let phase = if result.is_ok() { "done" } else { "failed" };
+        if let Err(error) = control.phase(phase) {
+            eprintln!("cairn work: could not update worker state: {error}");
+        }
+    }
+    match result {
         Ok(()) => 0,
         Err(WorkError::Solver(message)) => {
             eprintln!("cairn work: {message}");
@@ -205,6 +271,346 @@ pub fn main(args: Vec<String>) -> i32 {
             3
         }
     }
+}
+
+/// A named worker's files are local process control, never network records.
+/// The random token makes a delayed child or a stale stop request harmless
+/// after a worker with the same name has been restarted.
+struct Control {
+    dir: PathBuf,
+    token: String,
+}
+
+impl Control {
+    fn state_path(&self) -> PathBuf {
+        self.dir.join("state.json")
+    }
+
+    fn read(&self) -> Result<Value, String> {
+        let path = self.state_path();
+        let data = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Value::from_json(&data).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    fn phase(&self, phase: &str) -> Result<(), String> {
+        let mut state = self.read()?;
+        if state.get("token").and_then(Value::as_str) != Some(self.token.as_str()) {
+            return Err("worker control was replaced while this process was running".into());
+        }
+        let Value::Object(fields) = &mut state else {
+            return Err("worker state is not a JSON object".into());
+        };
+        fields.insert("phase".into(), Value::string(phase));
+        fields.insert("updated_at".into(), Value::string(timestamp()));
+        write_state(&self.state_path(), &state)
+    }
+
+    fn stopping(&self) -> bool {
+        fs::read_to_string(self.dir.join("stop")).is_ok_and(|token| token.trim() == self.token)
+    }
+}
+
+fn write_state(path: &Path, state: &Value) -> Result<(), String> {
+    let temporary = path.with_extension(format!("json.{}", std::process::id()));
+    fs::write(&temporary, state.canonical_string())
+        .and_then(|()| fs::rename(&temporary, path))
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn managed_args(args: &[String]) -> Result<(String, PathBuf, Vec<String>), String> {
+    let mut name = None;
+    let mut state_dir = None;
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let flag = &args[i];
+        if flag == "--" {
+            rest.extend_from_slice(&args[i..]);
+            break;
+        }
+        if flag == "--name" || flag == "--state-dir" {
+            let value = args
+                .get(i + 1)
+                .ok_or_else(|| format!("{flag} needs a value"))?;
+            if flag == "--name" {
+                name = Some(value.clone());
+            } else {
+                state_dir = Some(PathBuf::from(value));
+            }
+            i += 2;
+        } else {
+            rest.push(flag.clone());
+            i += 1;
+        }
+    }
+    let name: String = name.ok_or("--name is required")?;
+    if name.len() > 64
+        || name == "."
+        || name == ".."
+        || name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return Err("--name needs 1-64 letters, digits, dots, dashes or underscores".into());
+    }
+    let root = state_dir
+        .or_else(|| std::env::var_os("CAIRN_WORK_STATE_DIR").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cairn/work")))
+        .ok_or("set --state-dir or HOME for managed work")?;
+    Ok((name, root, rest))
+}
+
+fn control_error(error: String) -> i32 {
+    eprintln!("cairn work: {error}");
+    2
+}
+
+fn live_pid(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    Command::new("/bin/kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                // A sandboxed caller may not inspect another process even
+                // though it is alive. Treat that as busy: archiving its state
+                // and starting a second worker would be the harmful guess.
+                || String::from_utf8_lossy(&output.stderr).contains("Operation not permitted")
+        })
+}
+
+fn managed_start(args: &[String]) -> i32 {
+    let (name, root, worker_args) = match managed_args(args) {
+        Ok(parts) => parts,
+        Err(error) => return control_error(error),
+    };
+    let options = match parse(&worker_args) {
+        Ok(Some(options)) => options,
+        Ok(None) => {
+            print!("{USAGE}");
+            return 0;
+        }
+        Err(error) => return control_error(error),
+    };
+    if let Err(error) = DirBuilder::new().recursive(true).mode(0o700).create(&root) {
+        return control_error(format!("{}: {error}", root.display()));
+    }
+    let root = match root.canonicalize() {
+        Ok(root) => root,
+        Err(error) => return control_error(format!("{}: {error}", root.display())),
+    };
+    let dir = root.join(&name);
+    if dir.exists() {
+        let old = Control {
+            dir: dir.clone(),
+            token: String::new(),
+        };
+        let previous = match old.read() {
+            Ok(previous) => previous,
+            Err(error) => return control_error(format!("cannot reuse {name}: {error}")),
+        };
+        if previous
+            .get("pid")
+            .and_then(Value::as_u64)
+            .is_some_and(|pid| u32::try_from(pid).is_ok_and(live_pid))
+        {
+            return control_error(format!(
+                "{name} is already running; use `cairn work status --name {name}`"
+            ));
+        }
+        let archive = root.join(format!("{name}.old.{}", nonce()));
+        if let Err(error) = fs::rename(&dir, &archive) {
+            return control_error(format!("cannot archive previous {name} state: {error}"));
+        }
+    }
+    if let Err(error) = DirBuilder::new().mode(0o700).create(&dir) {
+        return control_error(format!("{}: {error}", dir.display()));
+    }
+    let log_path = dir.join("worker.log");
+    let log = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&log_path)
+    {
+        Ok(log) => log,
+        Err(error) => return control_error(format!("{}: {error}", log_path.display())),
+    };
+    let stderr = match log.try_clone() {
+        Ok(stderr) => stderr,
+        Err(error) => return control_error(format!("cannot open worker log: {error}")),
+    };
+    let token = nonce();
+    let binary = match std::env::current_exe() {
+        Ok(binary) => binary,
+        Err(error) => return control_error(format!("cannot locate cairn binary: {error}")),
+    };
+    let mut child = match Command::new(binary)
+        .arg("work")
+        .arg("__managed")
+        .arg(&name)
+        .arg(&root)
+        .arg(&token)
+        .args(&worker_args)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => return control_error(format!("cannot start worker: {error}")),
+    };
+    let control = Control { dir, token };
+    let state = Value::object([
+        ("name", Value::string(name.clone())),
+        ("token", Value::string(control.token.clone())),
+        ("pid", Value::Int(i128::from(child.id()))),
+        ("node", Value::string(options.node.as_str())),
+        ("objective", Value::string(options.objective)),
+        ("worker", Value::string(options.worker)),
+        ("phase", Value::string("starting")),
+        ("updated_at", Value::string(timestamp())),
+    ]);
+    if let Err(error) = write_state(&control.state_path(), &state) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return control_error(error);
+    }
+    println!(
+        "started {name} (pid {}, objective {}); log {}",
+        child.id(),
+        state
+            .get("objective")
+            .and_then(Value::as_str)
+            .unwrap_or("?"),
+        log_path.display()
+    );
+    0
+}
+
+fn managed_run(args: &[String]) -> i32 {
+    if args.len() < 4 {
+        return control_error("invalid managed worker invocation".into());
+    }
+    let control = Control {
+        dir: PathBuf::from(&args[1]).join(&args[0]),
+        token: args[2].clone(),
+    };
+    // The parent creates the state after spawning this child. Wait for it,
+    // and refuse a stale child if another start replaced its token or PID.
+    let mut valid = false;
+    for _ in 0..100 {
+        if let Ok(state) = control.read() {
+            valid = state.get("token").and_then(Value::as_str) == Some(control.token.as_str())
+                && state.get("pid").and_then(Value::as_u64) == Some(u64::from(std::process::id()));
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if !valid {
+        return control_error("managed worker state was not initialized by its parent".into());
+    }
+    let options = match parse(&args[3..]) {
+        Ok(Some(options)) => options,
+        Ok(None) => return control_error("managed worker needs solver options".into()),
+        Err(error) => return control_error(error),
+    };
+    if let Err(error) = control.phase("running") {
+        return control_error(error);
+    }
+    run_options(options, Some(control))
+}
+
+fn managed_status(args: &[String]) -> i32 {
+    let (name, root, rest) = match managed_args(args) {
+        Ok(parts) => parts,
+        Err(error) => return control_error(error),
+    };
+    if !rest.is_empty() {
+        return control_error("status takes only --name and --state-dir".into());
+    }
+    let dir = root.join(&name);
+    let control = Control {
+        dir,
+        token: String::new(),
+    };
+    let state = match control.read() {
+        Ok(state) => state,
+        Err(error) => return control_error(error),
+    };
+    let pid = state
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0);
+    let phase = state
+        .get("phase")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let token = state.get("token").and_then(Value::as_str).unwrap_or("");
+    let stopping = fs::read_to_string(control.dir.join("stop")).is_ok_and(|v| v.trim() == token);
+    let condition = if live_pid(pid) {
+        if stopping {
+            "stopping"
+        } else {
+            phase
+        }
+    } else if phase == "done" || phase == "failed" {
+        phase
+    } else {
+        "stale"
+    };
+    println!(
+        "{name}: {condition}; objective {}; worker {}; pid {pid}; log {}",
+        state
+            .get("objective")
+            .and_then(Value::as_str)
+            .unwrap_or("?"),
+        state.get("worker").and_then(Value::as_str).unwrap_or("?"),
+        control.dir.join("worker.log").display()
+    );
+    0
+}
+
+fn managed_stop(args: &[String]) -> i32 {
+    let (name, root, rest) = match managed_args(args) {
+        Ok(parts) => parts,
+        Err(error) => return control_error(error),
+    };
+    if !rest.is_empty() {
+        return control_error("stop takes only --name and --state-dir".into());
+    }
+    let control = Control {
+        dir: root.join(&name),
+        token: String::new(),
+    };
+    let state = match control.read() {
+        Ok(state) => state,
+        Err(error) => return control_error(error),
+    };
+    let pid = state
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0);
+    if !live_pid(pid) {
+        return control_error(format!(
+            "{name} is not running; inspect `cairn work status --name {name}`"
+        ));
+    }
+    let token = state.get("token").and_then(Value::as_str).unwrap_or("");
+    if token.is_empty() {
+        return control_error("worker state has no control token".into());
+    }
+    if let Err(error) = fs::write(control.dir.join("stop"), token) {
+        return control_error(format!("cannot stop {name}: {error}"));
+    }
+    println!("stopping {name}: finishing the current round and pending reveals; use `cairn work status --name {name}` to watch");
+    0
 }
 
 /// `Ok(None)` is `--help`.
@@ -223,8 +629,13 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
     let mut partitions = 8u64;
     let mut rounds = None;
     let mut heartbeat = 30u64;
+    let mut stop_file = None;
+    let mut pause_file = None;
     let mut device = None;
     let mut margin = DEFAULT_MARGIN_SECONDS;
+    let mut threads = None;
+    let mut gpus = None;
+    let mut hours_per_day = None;
 
     let mut i = 0;
     while i < flags.len() {
@@ -251,8 +662,13 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
             "--partitions" => partitions = number(value()?)?,
             "--rounds" => rounds = Some(number(value()?)?),
             "--heartbeat" => heartbeat = number(value()?)?,
+            "--stop-file" => stop_file = Some(PathBuf::from(value()?.as_str())),
+            "--pause-file" => pause_file = Some(PathBuf::from(value()?.as_str())),
             "--device" => device = Some(value()?.clone()),
             "--margin" => margin = number(value()?)?,
+            "--threads" => threads = Some(number(value()?)?),
+            "--gpus" => gpus = Some(parse_gpus(value()?)?),
+            "--hours-per-day" => hours_per_day = Some(number(value()?)?),
             other => return Err(format!("unknown option {other:?}")),
         }
         i += 2;
@@ -310,6 +726,14 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
     if heartbeat == 0 {
         return Err("--heartbeat must be at least 1 second".into());
     }
+    if threads == Some(0) {
+        return Err("--threads must be at least 1".into());
+    }
+    if let Some(hours) = hours_per_day {
+        if !(1..=24).contains(&hours) {
+            return Err("--hours-per-day is a whole number of hours from 1 to 24".into());
+        }
+    }
     if solver.is_empty() {
         return Err("no solver: put the command after `--`".into());
     }
@@ -336,10 +760,88 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
         partitions,
         rounds,
         heartbeat: Duration::from_secs(heartbeat),
+        stop_file,
+        pause_file,
         device,
         margin,
+        threads,
+        gpus,
+        // Twenty-four hours a day is no budget at all.
+        hours_per_day: hours_per_day.filter(|hours| *hours < 24),
         solver,
     }))
+}
+
+/// `0`, `0,2`, or `none`. Indices as the GPU runtimes number them; the
+/// solver sees only these, renumbered from zero, which is what pinning a
+/// device to this work means.
+fn parse_gpus(text: &str) -> Result<Vec<u32>, String> {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case("none") {
+        return Ok(Vec::new());
+    }
+    let mut gpus = Vec::new();
+    for part in text.split(',') {
+        let index = part.trim().parse::<u32>().map_err(|_| {
+            format!("--gpus: {part:?} is not a GPU index; give e.g. 0 or 0,2, or none")
+        })?;
+        if gpus.contains(&index) {
+            return Err(format!("--gpus names GPU {index} twice"));
+        }
+        gpus.push(index);
+    }
+    Ok(gpus)
+}
+
+/// How much solver time this machine has offered per UTC day, and how much of
+/// today's it has used.
+///
+/// UTC days, not local ones: the worker carries no timezone database, and a
+/// budget that reset at a different hour on a machine that moved would be a
+/// budget nobody could predict. Checked between rounds -- a round in progress
+/// is never killed, because a solver stopped half-way has printed half of
+/// something -- so a long round can overrun by at most its own length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    per_day: u64,
+    day: u64,
+    spent: u64,
+}
+
+impl Budget {
+    pub fn hours(hours: u64) -> Budget {
+        Budget {
+            per_day: hours * 3600,
+            day: 0,
+            spent: 0,
+        }
+    }
+
+    fn roll(&mut self, now: u64) {
+        let today = now / 86_400;
+        if today != self.day {
+            self.day = today;
+            self.spent = 0;
+        }
+    }
+
+    /// Count `seconds` of solver time used at `now`.
+    pub fn spend(&mut self, now: u64, seconds: u64) {
+        self.roll(now);
+        self.spent = self.spent.saturating_add(seconds);
+    }
+
+    /// Whether today's offer is used up, as of `now`.
+    pub fn exhausted(&mut self, now: u64) -> bool {
+        self.roll(now);
+        self.spent >= self.per_day
+    }
+
+    /// Seconds from `now` to the next UTC midnight, when a new day's offer
+    /// begins.
+    pub fn resumes_in(now: u64) -> u64 {
+        86_400 - now % 86_400
+    }
 }
 
 /// The identity file `cairn identity --out` writes: `{"secret": hex, "public": hex}`.
@@ -393,6 +895,14 @@ struct Worker {
     committed: u64,
     revealed: u64,
     rounds: u64,
+    /// Today's share of `--hours-per-day`, when one was offered.
+    budget: Option<Budget>,
+    /// Whether the pause for a spent budget has been said already today.
+    paused_said: bool,
+    manual_paused_said: bool,
+    /// Present only for a named background worker. Its stop request never
+    /// interrupts a commitment: the loop drains reveals before it exits.
+    control: Option<Control>,
 }
 
 impl Worker {
@@ -407,13 +917,17 @@ impl Worker {
             (None, None, None) => options.worker.clone(),
         };
         Ok(Worker {
-            options,
             submitter,
             epoch_seconds: 0,
             pending: Vec::new(),
             committed: 0,
             revealed: 0,
             rounds: 0,
+            budget: options.hours_per_day.map(Budget::hours),
+            paused_said: false,
+            manual_paused_said: false,
+            control: None,
+            options,
         })
     }
 
@@ -443,7 +957,13 @@ impl Worker {
         loop {
             self.reveal_due()?;
             let more_rounds = self.options.rounds.is_none_or(|limit| self.rounds < limit);
-            if !more_rounds {
+            let stopping = self.stopping_requested();
+            if !more_rounds || stopping {
+                if stopping {
+                    if let Some(control) = &self.control {
+                        control.phase("draining").map_err(WorkError::Solver)?;
+                    }
+                }
                 if self.pending.is_empty() {
                     say(&format!(
                         "done: {} round(s), {} committed, {} revealed",
@@ -454,6 +974,52 @@ impl Worker {
                 self.sleep_to_next_epoch();
                 continue;
             }
+            if self.pausing_requested() {
+                if !self.manual_paused_said {
+                    say("work paused: waiting to resume; pending reveals continue");
+                    self.manual_paused_said = true;
+                }
+                // Keep revealing committed answers while no new slice is taken.
+                // A stop request is checked first, so a paused worker can leave.
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+            if self.manual_paused_said {
+                say("work resumed: taking the next slice");
+                self.manual_paused_said = false;
+            }
+            if let Some(budget) = &mut self.budget {
+                let now = now_seconds();
+                if budget.exhausted(now) {
+                    if !self.paused_said {
+                        say(&format!(
+                            "today's {} h are used; pausing until 00:00 UTC (in {}), still \
+                             revealing what is committed",
+                            self.options.hours_per_day.unwrap_or(0),
+                            span(Budget::resumes_in(now))
+                        ));
+                        self.paused_said = true;
+                    }
+                    // Wake for every epoch turn while paused: a commitment's
+                    // reveal is due one epoch later, and an unrevealed
+                    // commitment is never paid.
+                    let wait = Budget::resumes_in(now).min(self.seconds_left() + 1);
+                    // A managed worker must notice stop even when its daily
+                    // budget would otherwise leave it asleep until midnight.
+                    thread::sleep(Duration::from_secs(
+                        if self.control.is_some() || self.options.stop_file.is_some() {
+                            wait.min(1)
+                        } else {
+                            wait
+                        },
+                    ));
+                    continue;
+                }
+                if self.paused_said {
+                    say("a new UTC day: resuming");
+                    self.paused_said = false;
+                }
+            }
             if !self.safe_to_post() {
                 self.sleep_to_next_epoch();
                 continue;
@@ -463,12 +1029,22 @@ impl Worker {
                 None => self.assignment()?,
             };
             let started = Instant::now();
-            match self.solve(&assignment) {
+            let outcome = self.solve(&assignment);
+            if let Some(budget) = &mut self.budget {
+                budget.spend(now_seconds(), started.elapsed().as_secs().max(1));
+            }
+            match outcome {
                 Ok(artifacts) => {
                     failures = 0;
                     self.rounds += 1;
                     if artifacts.is_empty() {
                         say(&format!("round {}: nothing", self.rounds));
+                    } else {
+                        say(&format!(
+                            "round {}: {} candidate(s)",
+                            self.rounds,
+                            artifacts.len()
+                        ));
                     }
                     for artifact in artifacts {
                         self.commit(artifact)?;
@@ -538,6 +1114,22 @@ impl Worker {
         thread::sleep(Duration::from_secs(self.seconds_left() + 1));
     }
 
+    fn stopping_requested(&self) -> bool {
+        self.control.as_ref().is_some_and(Control::stopping)
+            || self
+                .options
+                .stop_file
+                .as_ref()
+                .is_some_and(|path| path.exists())
+    }
+
+    fn pausing_requested(&self) -> bool {
+        self.options
+            .pause_file
+            .as_ref()
+            .is_some_and(|path| path.exists())
+    }
+
     /// Run the solver once over `assignment`, heartbeating while it runs.
     fn solve(&self, assignment: &Value) -> Result<Vec<Value>, String> {
         let line = assignment.canonical_string();
@@ -549,14 +1141,20 @@ impl Worker {
             .get("epoch_ends_in_seconds")
             .and_then(Value::as_u64)
             .unwrap_or(self.seconds_left());
-        let mut child = Command::new(&self.options.solver[0])
+        let mut command = Command::new(&self.options.solver[0]);
+        command
             .args(&self.options.solver[1..])
             .env("CAIRN_NODE", self.options.node.as_str())
             .env("CAIRN_OBJECTIVE", &self.options.objective)
             .env("CAIRN_WORKER", &self.options.worker)
             .env("CAIRN_EPOCH", epoch.to_string())
             .env("CAIRN_EPOCH_ENDS_IN", ends_in.to_string())
-            .env("CAIRN_ASSIGNMENT", &line)
+            .env("CAIRN_ROUND", self.rounds.to_string())
+            .env("CAIRN_ASSIGNMENT", &line);
+        for (name, value) in offer_environment(self.options.threads, self.options.gpus.as_deref()) {
+            command.env(name, value);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -680,6 +1278,9 @@ impl Worker {
         }
         if let Some(device) = &self.options.device {
             body.insert("device".to_string(), Value::string(device.clone()));
+        }
+        if let Some(threads) = self.options.threads {
+            body.insert("lanes".to_string(), Value::Int(i128::from(threads)));
         }
         Value::Object(body)
     }
@@ -829,6 +1430,42 @@ impl Worker {
     }
 }
 
+/// What a solver is told about the compute it was offered: the thread count
+/// and visible devices, under the names the common runtimes already read, so
+/// a solver honours the offer without knowing cairn exists. Nothing here can
+/// stop a solver ignoring them -- it is the operator's program -- and the
+/// roster reports the offer, not a measurement of it.
+fn offer_environment(threads: Option<u64>, gpus: Option<&[u32]>) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    if let Some(threads) = threads {
+        let threads = threads.to_string();
+        for name in ["CAIRN_THREADS", "OMP_NUM_THREADS", "RAYON_NUM_THREADS"] {
+            out.push((name, threads.clone()));
+        }
+    }
+    if let Some(gpus) = gpus {
+        let list = gpus
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        for name in ["CAIRN_GPUS", "CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"] {
+            out.push((name, list.clone()));
+        }
+    }
+    out
+}
+
+/// `3 h 12 min`, for a pause.
+fn span(seconds: u64) -> String {
+    let (hours, minutes) = (seconds / 3600, (seconds % 3600) / 60);
+    if hours > 0 {
+        format!("{hours} h {minutes} min")
+    } else {
+        format!("{minutes} min")
+    }
+}
+
 fn now_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -888,6 +1525,114 @@ mod tests {
         assert_eq!(options.solver, vec!["./solve", "--fast"]);
         assert_eq!(options.node.port, 8080);
         assert_eq!(options.partitions, 8);
+    }
+
+    #[test]
+    fn a_local_stop_request_is_separate_from_a_worker_restart() {
+        let marker = std::env::temp_dir().join(format!("cairn-work-stop-{}", nonce()));
+        let options = parse(&args(&format!(
+            "--node http://h:1 --objective sha256:ab --worker w --stop-file {} -- ./solve",
+            marker.display()
+        )))
+        .unwrap()
+        .unwrap();
+        let worker = Worker::new(options).unwrap();
+        assert!(!worker.stopping_requested());
+        fs::write(&marker, b"stop").unwrap();
+        assert!(worker.stopping_requested());
+        fs::remove_file(&marker).unwrap();
+    }
+
+    #[test]
+    fn pause_can_resume_and_stop_takes_precedence() {
+        let marker = std::env::temp_dir().join(format!("cairn-work-pause-{}", nonce()));
+        let stop = std::env::temp_dir().join(format!("cairn-work-stop-{}", nonce()));
+        let options = parse(&args(&format!(
+            "--node http://h:1 --objective sha256:ab --worker w --pause-file {} --stop-file {} -- ./solve",
+            marker.display(), stop.display()
+        )))
+        .unwrap()
+        .unwrap();
+        let worker = Worker::new(options).unwrap();
+        assert!(!worker.pausing_requested());
+        fs::write(&marker, b"pause").unwrap();
+        assert!(worker.pausing_requested());
+        assert!(!worker.stopping_requested());
+        fs::write(&stop, b"stop").unwrap();
+        assert!(worker.stopping_requested());
+        fs::remove_file(&marker).unwrap();
+        assert!(!worker.pausing_requested());
+        fs::remove_file(&stop).unwrap();
+    }
+
+    #[test]
+    fn an_offer_of_threads_gpus_and_hours_is_parsed_and_checked() {
+        let base = "--node http://h:1 --objective sha256:ab --worker w";
+        let options = parse(&args(&format!(
+            "{base} --threads 6 --gpus 0,2 --hours-per-day 5 -- ./solve"
+        )))
+        .unwrap()
+        .unwrap();
+        assert_eq!(options.threads, Some(6));
+        assert_eq!(options.gpus, Some(vec![0, 2]));
+        assert_eq!(options.hours_per_day, Some(5));
+        // None at all, and the whole day, are both offers worth spelling.
+        let options = parse(&args(&format!(
+            "{base} --gpus none --hours-per-day 24 -- x"
+        )))
+        .unwrap()
+        .unwrap();
+        assert_eq!(options.gpus, Some(vec![]));
+        assert_eq!(options.hours_per_day, None, "24 h a day is no budget");
+        for bad in [
+            "--threads 0",
+            "--gpus 0,0",
+            "--gpus gpu0",
+            "--hours-per-day 0",
+            "--hours-per-day 25",
+        ] {
+            assert!(
+                parse(&args(&format!("{base} {bad} -- x"))).is_err(),
+                "{bad} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn the_solver_is_told_its_threads_and_devices_in_the_runtimes_words() {
+        let env = offer_environment(Some(4), Some(&[1, 3]));
+        let get = |name: &str| {
+            env.iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("OMP_NUM_THREADS"), Some("4"));
+        assert_eq!(get("CAIRN_THREADS"), Some("4"));
+        assert_eq!(get("CUDA_VISIBLE_DEVICES"), Some("1,3"));
+        assert_eq!(get("HIP_VISIBLE_DEVICES"), Some("1,3"));
+        // `none` hides every GPU rather than leaving them all visible.
+        let env = offer_environment(None, Some(&[]));
+        assert_eq!(
+            env.iter()
+                .find(|(n, _)| *n == "CUDA_VISIBLE_DEVICES")
+                .map(|(_, v)| v.as_str()),
+            Some("")
+        );
+        assert!(offer_environment(None, None).is_empty());
+    }
+
+    #[test]
+    fn a_daily_budget_is_spent_by_rounds_and_renewed_at_utc_midnight() {
+        let day = 86_400 * 20_000;
+        let mut budget = Budget::hours(2);
+        assert!(!budget.exhausted(day + 10));
+        budget.spend(day + 3_600, 3_600);
+        assert!(!budget.exhausted(day + 3_601));
+        budget.spend(day + 7_200, 3_600);
+        assert!(budget.exhausted(day + 7_201));
+        assert_eq!(Budget::resumes_in(day + 7_201), 86_400 - 7_201);
+        // The next UTC day starts with the whole offer again.
+        assert!(!budget.exhausted(day + 86_400));
     }
 
     #[test]

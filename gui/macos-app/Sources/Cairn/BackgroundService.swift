@@ -99,11 +99,11 @@ enum BackgroundService {
 
     /// The environment the service gets. Deliberately not this app's whole
     /// environment: the PATH the node's verifiers need, the folder-relative
-    /// variables, every `CAIRN_*` the settings produce, and nothing else.
+    /// variables, every `CAIRN_*` the settings produce, and its stable TMPDIR.
     static func serviceEnvironment(_ settings: NodeSettings) -> [String: String] {
         let full = Node.childEnvironment(settings)
         var env: [String: String] = [:]
-        for (key, value) in full where key == "PATH" || key == "HOME" || key.hasPrefix("CAIRN_") {
+        for (key, value) in full where key == "PATH" || key == "HOME" || key == "TMPDIR" || key.hasPrefix("CAIRN_") {
             env[key] = value
         }
         if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
@@ -114,6 +114,7 @@ enum BackgroundService {
 
     /// Write the plist and start the service. Replaces one already loaded.
     static func install(settings: NodeSettings, binary: URL) throws {
+        try Node.prepareScratch(settings)
         let data = try render(settings: settings, binary: binary)
         let url = plistURL
         do {

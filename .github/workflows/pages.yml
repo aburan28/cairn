@@ -83,7 +83,7 @@ jobs:
       # The parameter stays anyway. It costs one refused call, and it heals the
       # case it can heal: a fork, or a repository whose token does carry that
       # scope, enables itself instead of failing the way this one did.
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
         id: pages
         with:
           enablement: true

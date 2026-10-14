@@ -12,13 +12,28 @@ final class WorkTests: XCTestCase {
                             identity: "/Users/x/Library/Application Support/Cairn/worker.identity.json",
                             solver: "/Users/x/solver", solverArguments: ["--threads", "8"])
         XCTAssertEqual(plan.arguments, [
-            "work", "--node", "http://127.0.0.1:8080", "--objective", objective, "--worker", "garage-gpu",
+            "work", "--node", "http://127.0.0.1:8080", "--objective", objective,
+            "--worker", "garage-gpu", "--heartbeat", "5",
             "--identity", "/Users/x/Library/Application Support/Cairn/worker.identity.json",
             "--", "/Users/x/solver", "--threads", "8",
         ])
         XCTAssertFalse(plan.arguments.contains("--submitter"), "a worker on the leader's own Mac is paid to its own key")
+        var safelyStopped = plan
+        safelyStopped.stopFile = "/tmp/cairn-stop-unique"
+        let flag = safelyStopped.arguments.firstIndex(of: "--stop-file")
+        XCTAssertNotNil(flag)
+        if let flag { XCTAssertEqual(safelyStopped.arguments[flag + 1], "/tmp/cairn-stop-unique") }
+        safelyStopped.pauseFile = "/tmp/cairn-pause-unique"
+        safelyStopped.threads = 4
+        safelyStopped.gpus = "0,1"
+        safelyStopped.hoursPerDay = 6
+        XCTAssertTrue(safelyStopped.arguments.contains("--pause-file"))
+        XCTAssertTrue(safelyStopped.arguments.contains("--threads"))
+        XCTAssertTrue(safelyStopped.arguments.contains("--gpus"))
+        XCTAssertTrue(safelyStopped.arguments.contains("--hours-per-day"))
         let unsigned = WorkPlan(node: "http://h:1", objective: objective, worker: "w", identity: nil, solver: "/s")
-        XCTAssertEqual(unsigned.arguments, ["work", "--node", "http://h:1", "--objective", objective, "--worker", "w", "--", "/s"])
+        XCTAssertEqual(unsigned.arguments, ["work", "--node", "http://h:1", "--objective", objective,
+                                          "--worker", "w", "--heartbeat", "5", "--", "/s"])
     }
 
     func testThePlanRefusesWhatCairnWorkWouldRefuse() throws {
@@ -40,6 +55,15 @@ final class WorkTests: XCTestCase {
         plan.worker = "w"
         plan.solver = solver.path + ".missing"
         XCTAssertNotNil(plan.problem, "a solver that is not there would fail every round")
+        plan.solver = solver.path
+        plan.threads = 0
+        XCTAssertNotNil(plan.problem)
+        plan.threads = 2
+        plan.gpus = "0,0"
+        XCTAssertNotNil(plan.problem)
+        plan.gpus = "0,1"
+        plan.hoursPerDay = 25
+        XCTAssertNotNil(plan.problem)
     }
 
     func testNamesAreCleanedAsThePageCleansThem() {
@@ -103,5 +127,29 @@ final class WorkTests: XCTestCase {
         // The objective reaches a command line; only an id gets that far.
         XCTAssertTrue(refused(["kind": "open", "sheet": "work", "objective": "--rounds 1"]))
         XCTAssertTrue(refused(["kind": "open", "sheet": "work", "objective": "sha256:zz"]))
+    }
+
+    func testThePageCanOnlyControlASelectedObjectiveThroughTheApp() throws {
+        XCTAssertEqual(try PageRequest.parse(["kind": "work-status"]).get(), .workStatus)
+        XCTAssertEqual(try PageRequest.parse(["kind": "start-work", "objective": objective]).get(),
+                       .startWork(objective: objective))
+        XCTAssertEqual(try PageRequest.parse(["kind": "stop-work"]).get(), .stopWork)
+        XCTAssertEqual(try PageRequest.parse(["kind": "pause-work"]).get(), .pauseWork)
+        XCTAssertEqual(try PageRequest.parse(["kind": "resume-work"]).get(), .resumeWork)
+        XCTAssertEqual(try PageRequest.parse(["kind": "exit-work"]).get(), .exitWork)
+        if case .success = PageRequest.parse(["kind": "start-work", "objective": "--solver /tmp/x"]) {
+            XCTFail("a page must not choose an executable")
+        }
+    }
+
+    @MainActor func testWorkerCPUIncludesItsSolverTree() {
+        let ps = """
+          20   1  5.0
+          21  20 92.5
+          22  21 50.0
+          30   1 80.0
+          """
+        XCTAssertEqual(Worker.cpuUsage(root: 20, ps: ps), 147.5)
+        XCTAssertNil(Worker.cpuUsage(root: 99, ps: ps))
     }
 }

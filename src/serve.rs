@@ -36,11 +36,19 @@
 //!
 //! # What this server is not
 //!
-//! Not authenticated, not rate-limited beyond a connection cap, and not TLS.
+//! Not a login wall, not rate-limited beyond a connection cap, and not TLS.
+//! Google sign-in ([`crate::google_auth`]) is optional recognition of a
+//! browser and is off unless the operator sets `CAIRN_GOOGLE_CLIENT_ID`. A
+//! session cookie is not a cairn identity, nothing in the log is written
+//! because somebody signed in, and every route answers with no cookie. The
+//! default node is anonymous.
+//!
 //! It publishes what is already public and accepts proposals a node will
 //! re-check from scratch. Run it behind whatever reverse proxy terminates TLS
 //! for you; the security argument here does not rest on the transport, because
-//! nothing it serves is secret and nothing it accepts is trusted.
+//! nothing it serves is secret and nothing it accepts is trusted. Google's
+//! own token endpoint is reached with `curl`, the same way a deposit is, so
+//! this crate still does not link a TLS stack.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -50,6 +58,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+use crate::attribution::{payouts_selected_with_enforced, FlowParams};
 use crate::canonical::{digest_bytes, Value};
 use crate::crypto::identity::Identity;
 use crate::deposit::{self, DepositDir, DepositError, MAX_PROXY_BYTES};
@@ -57,6 +66,7 @@ use crate::fleet::auth::{JoinRequest, MemberAuth, Refusal};
 use crate::fleet::members::{Member, Registry};
 use crate::fleet::{self, Fleet};
 use crate::goals;
+use crate::google_auth::GoogleAuth;
 use crate::hosts;
 use crate::lease::{self, Leases};
 use crate::ledger::{Codec, Ledger};
@@ -479,6 +489,19 @@ pub struct Serving {
     /// asked it to (`CAIRN_PORTMAP_HTTP`): `node.reach.external` on
     /// `GET /network`, the address a worker outside the LAN would dial.
     http_external: Option<Arc<Mutex<crate::p2p::reach::Report>>>,
+    /// Optional Google sign-in. Anonymous unless the process asked for it
+    /// ([`Serving::enable_google_from_env`]) or a test pinned one.
+    google: GoogleAuth,
+    /// Set once sign-in has been decided, so a second enable does not mint a
+    /// second reading of the environment over a test's pinned client.
+    google_pinned: bool,
+    /// What this process saw happen, for `GET /events`. Its own on a plain
+    /// `cairn serve`; the daemon's, shared with its p2p loops and its MCP
+    /// session, inside `cairn run`. See [`crate::journal`].
+    journal: crate::journal::Shared,
+    /// Who is attached over MCP, when this server runs inside a daemon that
+    /// serves it: `node.mcp` on `GET /network`.
+    agents: Option<crate::mcp::SharedPresence>,
 }
 
 /// A fleet and the identity that signs for it.
@@ -536,7 +559,63 @@ impl Serving {
             goals: goals::Catalog::from_env(),
             released: Mutex::new(BTreeMap::new()),
             http_external: None,
+            google: GoogleAuth::anonymous(),
+            google_pinned: false,
+            journal: crate::journal::Journal::shared(crate::time::unix_seconds()),
+            agents: None,
         }
+    }
+
+    /// Narrate into the daemon's journal rather than one of this server's
+    /// own, so `GET /events` carries what the p2p loops and the MCP session
+    /// saw as well.
+    pub fn with_journal(mut self, journal: crate::journal::Shared) -> Serving {
+        self.journal = journal;
+        self
+    }
+
+    /// Publish who is attached over MCP. Crate-only: the board is the MCP
+    /// server's, and only the daemon has one to share.
+    pub(crate) fn with_agents(mut self, agents: crate::mcp::SharedPresence) -> Serving {
+        self.agents = Some(agents);
+        self
+    }
+
+    /// Say something in this server's journal.
+    fn note(
+        &self,
+        kind: crate::journal::Kind,
+        tone: crate::journal::Tone,
+        text: &str,
+        subject: Option<&str>,
+    ) {
+        crate::journal::note(&self.journal, kind, tone, text, subject);
+    }
+
+    /// Offer Google sign-in when the operator configured it.
+    ///
+    /// Called by the real servers and not by the unit tests, which either
+    /// leave the anonymous default or pin a client that does not touch the
+    /// network. Unset is silent. A client id that does not parse is a line
+    /// on stderr and a node that still serves.
+    pub fn enable_google_from_env(mut self) -> Serving {
+        if self.google_pinned {
+            return self;
+        }
+        self.google = GoogleAuth::from_env();
+        self.google_pinned = true;
+        if let Some(line) = self.google.banner() {
+            eprintln!("cairn serve: {line}");
+        }
+        self
+    }
+
+    /// Pin a sign-in implementation. Tests use this; a process that also
+    /// calls [`Serving::enable_google_from_env`] keeps the pin.
+    pub fn with_google(mut self, google: GoogleAuth) -> Serving {
+        self.google = google;
+        self.google_pinned = true;
+        self
     }
 
     /// Lead a fleet: sign, with `identity`, every unsigned commitment or claim
@@ -968,6 +1047,9 @@ struct Request {
     /// `X-Forwarded-For`, `X-Real-IP`). Read only to stop a reverse proxy's
     /// loopback connection standing in for a fleet member; see [`handle`].
     forwarded: bool,
+    /// The `Cookie` header, if the client sent one. Read by the optional
+    /// Google session and by nothing that admits a record.
+    cookie: Option<String>,
 }
 
 /// Serve until the process is killed.
@@ -976,6 +1058,7 @@ struct Request {
 /// job -- publishing a log -- and an async runtime would be a dependency and a
 /// rewrite for load this will not see.
 pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
+    let serving = serving.enable_google_from_env();
     serving.check_startup()?;
     let listener = TcpListener::bind(addr)?;
     let local = listener.local_addr()?;
@@ -1252,8 +1335,15 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") | ("GET", "/index") => index(stream, serving),
         ("GET", "/health") => respond(stream, 200, "text/plain", b"ok\n"),
+        ("GET", "/auth") => auth_status(stream, serving, &request),
+        ("GET", "/auth/google") => auth_start(stream, serving, &request),
+        ("GET", "/auth/google/callback") => auth_callback(stream, serving, &request),
+        ("POST", "/auth/logout") => auth_logout(stream, serving),
         ("GET", "/verifiers") => verifiers(stream, serving),
         ("GET", "/objectives") => objectives(stream, serving),
+        ("GET", path) if path.starts_with("/payouts/") => {
+            payout_preview(stream, serving, &path["/payouts/".len()..])
+        }
         ("GET", "/peers") => peers(stream, serving),
         ("GET", "/log") => log(stream, serving),
         ("GET", "/checkpoint") => checkpoint(stream, serving),
@@ -1261,6 +1351,9 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ("GET", "/chain.html") => chain_page(stream, serving),
         ("GET", path) if path.starts_with("/objective/") => {
             one_objective(stream, serving, &path["/objective/".len()..])
+        }
+        ("GET", path) if path.starts_with("/claim/") => {
+            one_claim(stream, serving, &path["/claim/".len()..])
         }
         ("GET", path) if path.starts_with("/frontier/") => {
             frontier(stream, serving, &path["/frontier/".len()..])
@@ -1276,6 +1369,11 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         }
         ("GET", "/sessions") => sessions(stream, serving),
         ("GET", "/network") => network(stream, serving),
+        ("GET", "/events") => events(stream, serving, &request),
+        ("GET", "/prompts") => prompts_index(stream),
+        ("GET", path) if path.starts_with("/prompts/") => {
+            prompt_one(stream, serving, &path["/prompts/".len()..], &request)
+        }
         ("GET", "/hosts") => hosts_index(stream, serving),
         ("GET", "/knowledge") => knowledge_index(stream, serving, &request),
         ("GET", path) if path.starts_with("/knowledge/") => {
@@ -1335,6 +1433,34 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ),
         ("POST", "/fleet/join") => fleet_join(stream, &mut reader, serving, &request),
         ("POST", "/objective/prepare") => prepare_objective(stream, &mut reader, &request),
+        // A description can be longer than a request line may be, so the
+        // reader posts it; nothing is written, and the answer is the GET's.
+        ("POST", path) if path.starts_with("/prompts/") => {
+            let name = path["/prompts/".len()..].to_string();
+            match read_json_body(&mut reader, &request, "/prompts/{name}") {
+                Ok(body) => {
+                    let arguments: BTreeMap<String, String> = body
+                        .get("arguments")
+                        .and_then(|args| match args {
+                            Value::Object(fields) => Some(fields),
+                            _ => None,
+                        })
+                        .map(|fields| {
+                            fields
+                                .iter()
+                                .filter_map(|(key, value)| match value {
+                                    Value::String(text) => Some((key.clone(), text.clone())),
+                                    Value::Int(n) => Some((key.clone(), n.to_string())),
+                                    _ => None,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    render_prompt(stream, serving, &name, &arguments)
+                }
+                Err((status, message)) => json_error(stream, status, &message),
+            }
+        }
         ("POST", "/deposit/grant") => deposit_grant(stream, &mut reader, serving, &request),
         ("PUT", path) if path.starts_with("/deposit/upload/") => deposit_upload(
             stream,
@@ -1393,6 +1519,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
     let mut host = None;
     let mut authorization = None;
     let mut forwarded = false;
+    let mut cookie = None;
     let mut headers = 0usize;
     loop {
         let mut header = String::new();
@@ -1413,6 +1540,12 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
             }
             if name == "authorization" {
                 authorization = Some(value.to_string());
+            }
+            if name == "cookie" {
+                cookie = Some(match cookie {
+                    Some(existing) => format!("{existing}; {value}"),
+                    None => value.to_string(),
+                });
             }
             if matches!(name.as_str(), "forwarded" | "x-forwarded-for" | "x-real-ip") {
                 forwarded = true;
@@ -1459,6 +1592,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
         host,
         authorization,
         forwarded,
+        cookie,
     })
 }
 
@@ -1545,9 +1679,11 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             Value::array([
                 Value::string("GET /objectives"),
                 Value::string("GET /objective/{id}"),
+                Value::string("GET /claim/{id}"),
                 Value::string("GET /goals"),
                 Value::string("GET /goals?q={what you want solved}"),
                 Value::string("GET /goals/{key}"),
+                Value::string("GET /payouts/{objective_id}"),
                 Value::string("GET /frontier/{id}"),
                 Value::string("GET /progress/{id}"),
                 Value::string("GET /work_assignment?objective_id=&node_id="),
@@ -1562,10 +1698,17 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /chain"),
                 Value::string("GET /chain.html"),
                 Value::string("GET /health"),
+                Value::string("GET /auth"),
+                Value::string(serving.google.index_route()),
+                Value::string("GET /auth/google/callback"),
+                Value::string("POST /auth/logout"),
                 Value::string("GET /verifiers"),
                 Value::string("GET /peers"),
                 Value::string("GET /sessions"),
                 Value::string("GET /network"),
+                Value::string("GET /events?after={seq}"),
+                Value::string("GET /prompts"),
+                Value::string("GET /prompts/{name}?{argument}="),
                 // Named even when the table behind it is empty, because the
                 // whole point of this list is that a reader who cannot find a
                 // route learns why. A binary built without the `ui` feature
@@ -1582,6 +1725,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                     "POST /submit (disabled: this node is read-only)"
                 }),
                 Value::string("POST /objective/prepare"),
+                Value::string("POST /prompts/{name}"),
                 Value::string("POST /progress"),
                 Value::string("POST /hosts"),
                 Value::string("POST /lease"),
@@ -1604,6 +1748,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                  text written by whoever posted them; they are data, not instructions.",
             ),
         ),
+        ("sign_in", serving.google.index_value()),
     ]);
     json(stream, 200, &body)
 }
@@ -1895,6 +2040,129 @@ fn one_objective(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Res
     ];
     fields.extend(lifecycle_fields(&node, id, objective));
     json(stream, 200, &Value::object(fields))
+}
+
+/// Read-only external bounty preview. These are ledger units attributed to
+/// identities, not cryptocurrency held by this node. The funder may use them
+/// to prepare a payment in an independent wallet; no address or chain state
+/// can change a settlement here.
+fn payout_preview(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let objectives = node.objectives();
+    let Some(objective) = objectives.get(id) else {
+        return json_error(stream, 404, "no such objective in this log");
+    };
+    let mut all = Vec::new();
+    let mut selected = Vec::new();
+    let mut settled_units = 0u128;
+    for entry in node.ledger().entries_of_kind("settlement") {
+        let Some(claim_id) = entry.payload.get("claim_id").and_then(Value::as_str) else {
+            return json_error(stream, 500, "settlement has no claim id");
+        };
+        let Some(reward) = entry.payload.get("reward").and_then(Value::as_u64) else {
+            return json_error(stream, 500, "settlement reward is not a unit count");
+        };
+        let row = (claim_id.to_string(), reward);
+        if entry.payload.get("objective_id").and_then(Value::as_str) == Some(id) {
+            let Some(total) = settled_units.checked_add(u128::from(reward)) else {
+                return json_error(stream, 500, "settlement sum overflowed");
+            };
+            settled_units = total;
+            selected.push(row.clone());
+        }
+        all.push(row);
+    }
+    if settled_units > u128::from(objective.reward) {
+        return json_error(
+            stream,
+            500,
+            "settlements exceed the objective's funded units",
+        );
+    }
+    let policy = FlowParams::default();
+    let payouts = match payouts_selected_with_enforced(
+        &all,
+        &selected,
+        &node.all_claims(),
+        &node.enforced_citations(),
+        &policy,
+    ) {
+        Ok(payouts) => payouts,
+        Err(error) => return json_error(stream, 500, &error.to_string()),
+    };
+    let attributed = payouts
+        .values()
+        .try_fold(0u128, |total, units| total.checked_add(u128::from(*units)));
+    if attributed != Some(settled_units) {
+        return json_error(stream, 500, "attributed units do not equal settled units");
+    }
+    let payees = payouts
+        .into_iter()
+        .map(|(identity, units)| {
+            Value::object([
+                ("identity", Value::string(identity)),
+                ("units", Value::string(units.to_string())),
+            ])
+        })
+        .collect();
+    json(
+        stream,
+        200,
+        &Value::object([
+            ("objective_id", Value::string(id)),
+            (
+                "ledger",
+                Value::object([
+                    ("height", Value::Int(node.ledger().len() as i128)),
+                    (
+                        "head",
+                        Value::string(node.ledger().head().unwrap_or("")),
+                    ),
+                ]),
+            ),
+            ("reward_units", Value::string(objective.reward.to_string())),
+            ("settled_units", Value::string(settled_units.to_string())),
+            ("payees", Value::Array(payees)),
+            (
+                "attribution",
+                Value::object([
+                    ("delta_num", Value::Int(i128::from(policy.delta_num()))),
+                    ("delta_den", Value::Int(i128::from(policy.delta_den()))),
+                    ("max_depth", Value::Int(i128::from(policy.max_depth()))),
+                    ("reserved_num", Value::Int(i128::from(policy.reserved_num()))),
+                    ("reserved_den", Value::Int(i128::from(policy.reserved_den()))),
+                ]),
+            ),
+            (
+                "note",
+                Value::string(
+                    "Derived from this node's log under the default attribution policy. No external funds, payout address, escrow, or transfer is verified here."
+                ),
+            ),
+        ]),
+    )
+}
+
+/// A claim's record bytes, addressed by their content id for receipt checks.
+/// The log is already public; this avoids making clients reimplement canonical
+/// encoding just to bind a settled claim to the artifact they submitted.
+fn one_claim(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let claims = node.all_claims();
+    let Some(claim) = claims.get(id) else {
+        return json_error(stream, 404, "no such claim in this log");
+    };
+    json(
+        stream,
+        200,
+        &Value::object([("id", Value::string(id)), ("record", claim.to_value())]),
+    )
 }
 
 /// Where one objective stands: `settled`, `open`, `settlement`, and
@@ -2333,6 +2601,20 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                             None => Value::Null,
                         },
                     ),
+                    // Who is attached over MCP: the client's own name for
+                    // itself and what it has called, from this process's
+                    // stdio session. `serving: false` on a node that runs
+                    // no MCP, which is every plain publisher.
+                    (
+                        "mcp",
+                        match &serving.agents {
+                            Some(agents) => agents
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .to_value(),
+                            None => Value::object([("serving", Value::Bool(false))]),
+                        },
+                    ),
                 ]),
             ),
             ("peers", peers),
@@ -2350,6 +2632,117 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             ),
         ]),
     )
+}
+
+/// `GET /events?after=<seq>&limit=<n>`: what this process saw happen. See
+/// [`crate::journal`].
+fn events(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    let number = |key: &str| request.query.get(key).and_then(|v| v.parse::<u64>().ok());
+    let after = number("after").unwrap_or(0);
+    let limit = number("limit").map_or(crate::journal::MAX_PAGE, |n| {
+        usize::try_from(n).unwrap_or(crate::journal::MAX_PAGE)
+    });
+    let page = serving
+        .journal
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .to_value(after, limit);
+    json(stream, 200, &page)
+}
+
+/// `GET /prompts`: the prompts this node's MCP server offers, for the reader.
+fn prompts_index(stream: &mut TcpStream) -> io::Result<()> {
+    let prompts = crate::prompts::ALL.iter().map(|definition| {
+        Value::object([
+            ("name", Value::string(definition.name)),
+            ("title", Value::string(definition.title)),
+            ("description", Value::string(definition.description)),
+            (
+                "slash_command",
+                Value::string(format!("/mcp__cairn__{}", definition.name)),
+            ),
+            (
+                "arguments",
+                Value::array(definition.arguments.iter().map(|argument| {
+                    Value::object([
+                        ("name", Value::string(argument.name)),
+                        ("description", Value::string(argument.description)),
+                        ("required", Value::Bool(argument.required)),
+                    ])
+                })),
+            ),
+        ])
+    });
+    json(
+        stream,
+        200,
+        &Value::object([
+            ("prompts", Value::array(prompts)),
+            (
+                "note",
+                Value::string(
+                    "The same text an agent gets from this node's MCP server with prompts/get. \
+                     GET /prompts/{name}?<argument>=<value> renders one. A prompt grants \
+                     nothing: what an agent posts afterwards is admitted by the same rules as \
+                     anything else.",
+                ),
+            ),
+        ]),
+    )
+}
+
+/// `GET /prompts/{name}?description=…`: one prompt, rendered exactly as MCP
+/// `prompts/get` renders it, with this node's bundle root.
+fn prompt_one(
+    stream: &mut TcpStream,
+    serving: &Serving,
+    name: &str,
+    request: &Request,
+) -> io::Result<()> {
+    let arguments: BTreeMap<String, String> = request
+        .query
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    render_prompt(stream, serving, name, &arguments)
+}
+
+fn render_prompt(
+    stream: &mut TcpStream,
+    serving: &Serving,
+    name: &str,
+    arguments: &BTreeMap<String, String>,
+) -> io::Result<()> {
+    let context = crate::prompts::Context {
+        root: Some(
+            std::fs::canonicalize(&serving.root)
+                .unwrap_or_else(|_| serving.root.clone())
+                .display()
+                .to_string(),
+        ),
+    };
+    match crate::prompts::render(name, arguments, &context) {
+        Ok(text) => json(
+            stream,
+            200,
+            &Value::object([
+                ("name", Value::string(name)),
+                (
+                    "slash_command",
+                    Value::string(format!("/mcp__cairn__{name}")),
+                ),
+                ("text", Value::string(text)),
+            ]),
+        ),
+        Err(why) => {
+            let status = if crate::prompts::ALL.iter().any(|d| d.name == name) {
+                400
+            } else {
+                404
+            };
+            json_error(stream, status, &why)
+        }
+    }
 }
 
 /// Capability-specific edges visible from this node: a live host offer to an
@@ -2747,6 +3140,22 @@ fn knowledge_index(stream: &mut TcpStream, serving: &Serving, request: &Request)
     );
     let claims = node.all_claims();
     let graph = node.knowledge_graph(&claims);
+    // Who stood behind each verdict under bond, counted once for the whole
+    // index rather than per row: a reader drawing a verification level for
+    // every claim should not need a request per claim to do it.
+    let slashed = node.slashed_attestations();
+    let mut bonded: BTreeMap<String, (i128, i128, i128)> = BTreeMap::new();
+    for (id, attestation) in node.attestations() {
+        let row = bonded.entry(attestation.claim_id.clone()).or_default();
+        match attestation.status.as_str() {
+            "accept" => row.0 += 1,
+            "reject" => row.1 += 1,
+            _ => {}
+        }
+        if slashed.contains(&id) {
+            row.2 += 1;
+        }
+    }
     // Newest first, so the page a reader lands on is the recent frontier.
     let mut ordered: Vec<(&String, &crate::records::Claim)> = claims.iter().collect();
     ordered.sort_by(|a, b| {
@@ -2780,6 +3189,17 @@ fn knowledge_index(stream: &mut TcpStream, serving: &Serving, request: &Request)
             fields.insert(
                 "created_at".to_string(),
                 Value::string(claim.created_at.clone()),
+            );
+            // Beside the standing, never in it: the same split the per-claim
+            // route keeps. Counts only; the rows are on that route.
+            let (accept, reject, slashed) = bonded.get(id.as_str()).copied().unwrap_or_default();
+            fields.insert(
+                "attestations".to_string(),
+                Value::object([
+                    ("accept", Value::Int(accept)),
+                    ("reject", Value::Int(reject)),
+                    ("slashed", Value::Int(slashed)),
+                ]),
             );
             rows.push(Value::Object(fields));
         }
@@ -2870,6 +3290,12 @@ fn fleet_join(
         &fleet::auth::key_hex(&member.key)[..12],
         member.name
     );
+    serving.note(
+        crate::journal::Kind::Fleet,
+        crate::journal::Tone::Good,
+        &format!("Machine {} joined this node's fleet", member.name),
+        Some(&member.name),
+    );
     let iso = |unix: u64| crate::time::format_iso8601_utc(i64::try_from(unix).unwrap_or(i64::MAX));
     json(
         stream,
@@ -2902,6 +3328,28 @@ fn fleet_join(
     )
 }
 
+/// `: 16 CPUs, 2 GPUs`, from what a host said about itself, for a sentence.
+/// Empty when it said nothing a sentence can use.
+fn describe_hardware(hardware: &Value) -> String {
+    let cpus = hardware.get("cpus").and_then(Value::as_u64);
+    let gpus = hardware
+        .get("gpus")
+        .and_then(Value::as_array)
+        .map_or(0, <[Value]>::len);
+    let mut parts = Vec::new();
+    if let Some(cpus) = cpus {
+        parts.push(format!("{cpus} CPU{}", if cpus == 1 { "" } else { "s" }));
+    }
+    if gpus > 0 {
+        parts.push(format!("{gpus} GPU{}", if gpus == 1 { "" } else { "s" }));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", parts.join(", "))
+    }
+}
+
 fn host_register(
     stream: &mut TcpStream,
     serving: &Serving,
@@ -2927,11 +3375,28 @@ fn host_register(
     // stranger here is the roster's own cap and the size cap on each entry.
     let now = crate::time::unix_seconds();
     let host = registration.host.clone();
-    let outcome = serving
-        .hosts
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .record(registration, now);
+    let described = describe_hardware(&registration.hardware);
+    let (outcome, previously) = {
+        let mut roster = serving
+            .hosts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previously = roster.last_seen(&host);
+        (roster.record(registration, now), previously)
+    };
+    let returning = previously.map(|at| now.saturating_sub(at) > progress::LIVE_SECONDS);
+    if outcome.is_ok() && returning != Some(false) {
+        let text = match returning {
+            None => format!("Machine {host} registered with this node{described}"),
+            _ => format!("Machine {host} is back{described}"),
+        };
+        serving.note(
+            crate::journal::Kind::Host,
+            crate::journal::Tone::Good,
+            &text,
+            Some(&host),
+        );
+    }
     match outcome {
         Ok(liveness) => json(
             stream,
@@ -3077,6 +3542,17 @@ fn lease_claim(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .claim(claim, now);
+    // A new hold, not a renewal and not a refusal: once per task taken.
+    if let Ok(standing) = &outcome {
+        if standing.held && !standing.renewed {
+            serving.note(
+                crate::journal::Kind::Lease,
+                crate::journal::Tone::Neutral,
+                &format!("{holder} took task {task}"),
+                Some(&objective_id),
+            );
+        }
+    }
     match outcome {
         Ok(standing) => json(
             stream,
@@ -3167,6 +3643,19 @@ fn lease_release(
     if let (Ok(()), Some(verified)) = (&result, verified) {
         serving.note_release(released_key, verified.time);
     }
+    if result.is_ok() {
+        let (verb, tone) = match outcome {
+            lease::Outcome::Completed => ("finished", crate::journal::Tone::Good),
+            lease::Outcome::Failed => ("gave up on", crate::journal::Tone::Warn),
+            lease::Outcome::Abandoned => ("let go of", crate::journal::Tone::Neutral),
+        };
+        serving.note(
+            crate::journal::Kind::Lease,
+            tone,
+            &format!("{holder} {verb} task {task}"),
+            Some(&objective_id),
+        );
+    }
     match result {
         Ok(()) => json(
             stream,
@@ -3238,11 +3727,44 @@ fn heartbeat(
     let now = crate::time::unix_seconds();
     let objective_id = heartbeat.objective_id.clone();
     let worker = heartbeat.worker.clone();
-    let outcome = serving
-        .progress
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .record(heartbeat, now);
+    let device = heartbeat.device.clone();
+    let (outcome, previously) = {
+        let mut board = serving
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previously = board.last_seen(&objective_id, &worker);
+        (board.record(heartbeat, now), previously)
+    };
+    if outcome.is_ok() {
+        // An arrival, or a return after reading as stale: said once, never
+        // per heartbeat.
+        let returning = previously.map(|at| now.saturating_sub(at) > progress::LIVE_SECONDS);
+        if returning != Some(false) {
+            let on = node
+                .objectives()
+                .get(&objective_id)
+                .map(|objective| {
+                    let goal = objective.goal.trim();
+                    goal.strip_prefix("GOAL-").unwrap_or(goal).to_string()
+                })
+                .unwrap_or_else(|| crate::journal::short(&objective_id));
+            let with = device
+                .as_deref()
+                .map(|device| format!(" ({device})"))
+                .unwrap_or_default();
+            let text = match returning {
+                None => format!("Machine {worker}{with} started working on {on}"),
+                _ => format!("Machine {worker}{with} is back on {on}"),
+            };
+            serving.note(
+                crate::journal::Kind::Worker,
+                crate::journal::Tone::Good,
+                &text,
+                Some(&objective_id),
+            );
+        }
+    }
     match outcome {
         Ok(liveness) => json(
             stream,
@@ -3895,6 +4417,17 @@ fn submit(
                     log::warn!("fleet: cannot journal {id} for {}: {error}", member.name);
                 }
             }
+            // A proposed objective is news; a worker's commitments and reveals
+            // are the log's to report once admitted, and are many.
+            if kind == "objective" {
+                let goal = value.get("goal").and_then(Value::as_str).unwrap_or("?");
+                serving.note(
+                    crate::journal::Kind::Submission,
+                    crate::journal::Tone::Neutral,
+                    &format!("A new objective ({goal}) was proposed here and queued for admission"),
+                    None,
+                );
+            }
             let wait = wait_for(serving, &kind, &value, crate::time::unix_seconds());
             json(
                 stream,
@@ -4161,6 +4694,20 @@ fn deposit_grant(
             }
         },
     };
+    let slot = match value.get("slot") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_u64() {
+            Some(n) => Some(n),
+            None => {
+                return respond(
+                    stream,
+                    400,
+                    "application/json",
+                    error_body("slot must be a non-negative integer").as_bytes(),
+                );
+            }
+        },
+    };
     // Counted per address, so one requester cannot hold every grant. Loopback
     // is the operator's own machine and is not counted.
     let requester = stream
@@ -4178,6 +4725,7 @@ fn deposit_grant(
         max_bytes,
         size,
         digest,
+        slot,
         requester: requester.as_deref(),
     };
     match deposit::issue_grant(&dir, &grant_request, None, &secrets_dir) {
@@ -4513,19 +5061,109 @@ fn ui_asset(stream: &mut TcpStream, path: &str) -> io::Result<()> {
     )
 }
 
+fn auth_status(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    write_auth(
+        stream,
+        serving
+            .google
+            .status(request.cookie.as_deref(), crate::time::unix_seconds()),
+    )
+}
+
+fn auth_start(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    write_auth(
+        stream,
+        serving.google.start(
+            request.query.get("next").map(String::as_str),
+            default_auth_next(),
+            crate::time::unix_seconds(),
+        ),
+    )
+}
+
+fn auth_callback(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    write_auth(
+        stream,
+        serving.google.callback(
+            request.query.get("code").map(String::as_str),
+            request.query.get("state").map(String::as_str),
+            request.cookie.as_deref(),
+            crate::time::unix_seconds(),
+        ),
+    )
+}
+
+fn auth_logout(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    write_auth(stream, serving.google.logout())
+}
+
+/// Where a finished sign-in lands when the browser did not say. The reader,
+/// when this binary has one; the index otherwise, which explains the routes.
+fn default_auth_next() -> &'static str {
+    if cfg!(feature = "ui") {
+        "/ui/"
+    } else {
+        "/"
+    }
+}
+
+fn write_auth(stream: &mut TcpStream, answer: crate::google_auth::Answer) -> io::Result<()> {
+    // A header value is not a place for a request's bytes. The answers this
+    // writes are built here, but a redirect location that ever grew a CR
+    // would split the response.
+    if answer.headers.iter().any(|(_, value)| {
+        value
+            .bytes()
+            .any(|byte| byte == b'\r' || byte == b'\n' || byte == 0)
+    }) {
+        return json_error(stream, 500, "refusing to write a header with a line break");
+    }
+    let extra: Vec<(&str, &str)> = answer
+        .headers
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    respond_with(
+        stream,
+        answer.status,
+        answer.content_type,
+        &answer.body,
+        &extra,
+    )
+}
+
 fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> io::Result<()> {
+    respond_with(stream, status, content_type, body, &[])
+}
+
+fn respond_with(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    extra: &[(&str, &str)],
+) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
         202 => "Accepted",
+        302 => "Found",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
         415 => "Unsupported Media Type",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
+        502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "Error",
     };
+    let mut extra_lines = String::new();
+    for (name, value) in extra {
+        extra_lines.push_str(name);
+        extra_lines.push_str(": ");
+        extra_lines.push_str(value);
+        extra_lines.push_str("\r\n");
+    }
     // `access-control-allow-origin: *` is what lets a browser on another origin
     // *read* this. Everything served here is public by construction -- the log,
     // the objectives, the signed checkpoint -- so there is nothing for a
@@ -4553,6 +5191,7 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
          cache-control: no-store\r\n\
          x-content-type-options: nosniff\r\n\
          access-control-allow-origin: *\r\n\
+         {extra_lines}\
          \r\n",
         body.len()
     );
@@ -4664,6 +5303,241 @@ mod tests {
             body
         ));
         assert!(simple.starts_with("http/1.1 415"), "{simple}");
+    }
+
+    /// Google sign-in is a browser session. It is not required, it is not a
+    /// cairn identity, and a node that was not configured for it still answers
+    /// every route it answered before.
+    #[test]
+    fn google_sign_in_is_optional_and_does_not_gate_the_node() {
+        let dir = TempDir::new("google-off");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let off = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let off_addr = off.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let _ = serve_on(off, Serving::new(&log, "."));
+        });
+
+        let anonymous = http(
+            off_addr,
+            "GET /auth HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            anonymous.status.starts_with("HTTP/1.1 200"),
+            "{}",
+            anonymous.head
+        );
+        assert!(
+            anonymous.body.contains("\"anonymous_ok\":true"),
+            "{}",
+            anonymous.body
+        );
+        assert!(
+            anonymous.body.contains("\"required\":false"),
+            "{}",
+            anonymous.body
+        );
+        assert!(
+            anonymous.body.contains("\"available\":false"),
+            "{}",
+            anonymous.body
+        );
+        let health = http(
+            off_addr,
+            "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(health.body, "ok\n");
+        let blocked = http(
+            off_addr,
+            "GET /auth/google HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            blocked.status.starts_with("HTTP/1.1 404"),
+            "{}",
+            blocked.head
+        );
+        assert!(!blocked
+            .head
+            .to_ascii_lowercase()
+            .contains("accounts.google.com"));
+
+        let dir = TempDir::new("google-on");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").expect("log");
+        let on = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let on_addr = on.local_addr().expect("addr");
+        let google = GoogleAuth::with_client(
+            match crate::google_auth::resolve(crate::google_auth::Settings {
+                client_id: Some("123-abc.apps.googleusercontent.com".to_string()),
+                client_secret: Some("supersecretvalue".to_string()),
+                redirect_uri: Some("http://127.0.0.1:9/auth/google/callback".to_string()),
+                public_url: None,
+                cookie_secure: Some(false),
+            }) {
+                crate::google_auth::Outcome::Ready(config) => config,
+                other => panic!("config: {other:?}"),
+            },
+            [4u8; 32],
+            std::sync::Arc::new(ScriptedGoogle),
+        );
+        std::thread::spawn(move || {
+            let _ = serve_on(on, Serving::new(&log, ".").with_google(google));
+        });
+
+        let bare = http(
+            on_addr,
+            "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(bare.body, "ok\n");
+        let start = http(
+            on_addr,
+            "GET /auth/google?next=/ui/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        );
+        assert!(start.status.starts_with("HTTP/1.1 302"), "{}", start.head);
+        let location = header_value(&start.head, "location");
+        assert!(
+            location.starts_with("https://accounts.google.com/"),
+            "{location}"
+        );
+        assert!(
+            location.contains("code_challenge_method=S256"),
+            "{location}"
+        );
+        assert!(!location.contains("supersecretvalue"), "{location}");
+        let state_cookie = header_value(&start.head, "set-cookie");
+        let state = state_cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1;
+        let state_query = location
+            .split_once("state=")
+            .unwrap()
+            .1
+            .split('&')
+            .next()
+            .unwrap();
+        assert_eq!(state, state_query);
+
+        let callback = http(
+            on_addr,
+            &format!(
+                "GET /auth/google/callback?code=code-1&state={state} HTTP/1.1\r\n\
+                 Host: 127.0.0.1\r\nCookie: cairn_google_state={state}\r\n\
+                 Connection: close\r\n\r\n"
+            ),
+        );
+        assert!(
+            callback.status.starts_with("HTTP/1.1 302"),
+            "{} {}",
+            callback.head,
+            callback.body
+        );
+        assert_eq!(header_value(&callback.head, "location"), "/ui/");
+        let session = callback
+            .head
+            .lines()
+            .find(|line| {
+                line.to_ascii_lowercase()
+                    .starts_with("set-cookie: cairn_google=")
+            })
+            .expect("session cookie")
+            .split(':')
+            .nth(1)
+            .unwrap()
+            .trim()
+            .split(';')
+            .next()
+            .unwrap();
+        let authed = http(
+            on_addr,
+            &format!(
+                "GET /auth HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {session}\r\n\
+                 Connection: close\r\n\r\n"
+            ),
+        );
+        assert!(
+            authed.body.contains("\"authenticated\":true"),
+            "{}",
+            authed.body
+        );
+        assert!(authed.body.contains("ada@example.com"), "{}", authed.body);
+        assert!(
+            authed.body.contains("\"required\":false"),
+            "{}",
+            authed.body
+        );
+        let still = http(
+            on_addr,
+            &format!(
+                "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {session}\r\n\
+                 Connection: close\r\n\r\n"
+            ),
+        );
+        assert_eq!(still.body, "ok\n");
+
+        let logout = http(
+            on_addr,
+            "POST /auth/logout HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\
+             Connection: close\r\n\r\n",
+        );
+        assert!(logout.status.starts_with("HTTP/1.1 200"), "{}", logout.head);
+        assert!(logout.head.to_ascii_lowercase().contains("cairn_google=;"));
+        assert!(logout.head.to_ascii_lowercase().contains("max-age=0"));
+    }
+
+    struct ScriptedGoogle;
+
+    impl crate::google_auth::TokenClient for ScriptedGoogle {
+        fn post_form(&self, url: &str, body: &str) -> Result<String, String> {
+            assert_eq!(url, "https://oauth2.googleapis.com/token");
+            assert!(body.contains("code_verifier="), "{body}");
+            assert!(body.contains("client_secret=supersecretvalue"), "{body}");
+            Ok(
+                r#"{"access_token":"access-token-1","expires_in":3600,"token_type":"Bearer"}"#
+                    .to_string(),
+            )
+        }
+        fn get_bearer(&self, url: &str, access_token: &str) -> Result<String, String> {
+            assert_eq!(url, "https://openidconnect.googleapis.com/v1/userinfo");
+            assert_eq!(access_token, "access-token-1");
+            Ok(r#"{"sub":"110169484474386276334","name":"Ada Lovelace","email":"ada@example.com","email_verified":true}"#.to_string())
+        }
+    }
+
+    struct RawHttp {
+        status: String,
+        head: String,
+        body: String,
+    }
+
+    fn http(addr: std::net::SocketAddr, request: &str) -> RawHttp {
+        let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+        socket.write_all(request.as_bytes()).expect("write");
+        let mut response = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut socket, &mut response);
+        let text = String::from_utf8_lossy(&response).into_owned();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+        let status = head.lines().next().unwrap_or("").to_string();
+        RawHttp {
+            status,
+            head: head.to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    fn header_value(head: &str, name: &str) -> String {
+        head.lines()
+            .find(|line| line.to_ascii_lowercase().starts_with(&format!("{name}:")))
+            .unwrap_or_else(|| panic!("no {name} in {head}"))
+            .split_once(':')
+            .unwrap()
+            .1
+            .trim()
+            .to_string()
     }
 
     /// `GET /chain` publishes the ledger's height and head *beside* the epoch
@@ -5553,6 +6427,30 @@ mod tests {
         (addr, id)
     }
 
+    #[test]
+    fn payout_preview_uses_paid_settlements_and_names_its_log_head() {
+        let dir = TempDir::new("payout-preview");
+        let (addr, id) = serve_orbit_search(&dir);
+        let (status, body) = get_json(addr, &format!("/payouts/{id}"));
+        assert!(
+            status.contains("200"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        assert_eq!(at(&body, "objective_id").as_str(), Some(id.as_str()));
+        assert_eq!(at(&body, "settled_units").as_str(), Some("400"));
+        assert!(at(&body, "ledger.head")
+            .as_str()
+            .is_some_and(|head| head.starts_with("sha256:")));
+        let payees = at(&body, "payees").as_array().expect("payees");
+        assert_eq!(payees.len(), 2);
+        assert_eq!(at(&payees[0], "identity").as_str(), Some("alice"));
+        assert_eq!(at(&payees[0], "units").as_str(), Some("300"));
+        assert_eq!(at(&payees[1], "identity").as_str(), Some("bob"));
+        assert_eq!(at(&payees[1], "units").as_str(), Some("100"));
+        assert!(body.get("address").is_none());
+    }
+
     /// Everything in `derived` is a join over records already in the log:
     /// settlements to claims to elements. The numbers below are what those
     /// records say, and a reader with the log would get the same ones.
@@ -5710,6 +6608,97 @@ mod tests {
         );
     }
 
+    /// A machine's first heartbeat is an event, its second is not, and a
+    /// reader asking for what came after the last event it saw gets nothing
+    /// new. The journal is this server's own, so nothing another test does
+    /// can appear in it.
+    #[test]
+    fn a_machine_arriving_is_said_once_on_the_event_feed() {
+        let dir = TempDir::new("events-feed");
+        let (addr, id) = serve_orbit_search(&dir);
+        let heartbeat = |steps: u64| {
+            format!(
+                r#"{{"objective_id":"{id}","worker":"garage-gpu","steps":{steps},"device":"rtx-4090"}}"#
+            )
+        };
+        for steps in [10, 20, 30] {
+            let (status, _) = ask_json(addr, "/progress", &heartbeat(steps));
+            assert!(status.starts_with("HTTP/1.1 202"), "{status}");
+        }
+        let (status, body) = get_json(addr, "/events");
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        let events = at(&body, "events").as_array().expect("events").to_vec();
+        let arrivals: Vec<&Value> = events
+            .iter()
+            .filter(|event| at(event, "kind").as_str() == Some("worker"))
+            .collect();
+        assert_eq!(arrivals.len(), 1, "{}", body.canonical_string());
+        let text = at(arrivals[0], "text").as_str().unwrap_or_default();
+        assert!(
+            text.contains("garage-gpu") && text.contains("rtx-4090"),
+            "{text}"
+        );
+        assert_eq!(at(arrivals[0], "subject").as_str(), Some(id.as_str()));
+
+        let last = int(&body, "last");
+        let (_, after) = get_json(addr, &format!("/events?after={last}"));
+        assert_eq!(at(&after, "events").as_array().map(<[Value]>::len), Some(0));
+        assert_eq!(int(&after, "dropped"), 0);
+    }
+
+    /// The reader's prompt and MCP's are one rendering: the description is
+    /// fenced, the bundle root is this node's, and a POST carries a
+    /// description longer than a request line may be.
+    #[test]
+    fn a_prompt_renders_over_get_and_post_and_refuses_what_is_missing() {
+        let dir = TempDir::new("prompts-route");
+        let (addr, _) = serve_orbit_search(&dir);
+        let (status, index) = get_json(addr, "/prompts");
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        let first = &at(&index, "prompts").as_array().unwrap()[0];
+        assert_eq!(
+            at(first, "name").as_str(),
+            Some(crate::prompts::COORDINATE_TASK)
+        );
+        assert_eq!(
+            at(first, "slash_command").as_str(),
+            Some("/mcp__cairn__coordinate_task")
+        );
+
+        let (status, body) = get_json(
+            addr,
+            "/prompts/coordinate_task?description=split%20the%20seeds&budget=500",
+        );
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        let text = at(&body, "text").as_str().unwrap_or_default();
+        assert!(
+            text.contains("<description>\nsplit the seeds\n</description>"),
+            "{text}"
+        );
+        assert!(text.contains("at most 500 units"), "{text}");
+
+        let long = "x".repeat(9_000);
+        let (status, body) = ask_json(
+            addr,
+            "/prompts/coordinate_task",
+            &format!(r#"{{"arguments":{{"description":"{}"}}}}"#, &long[..7_000]),
+        );
+        assert!(
+            status.starts_with("HTTP/1.1 200"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+        assert!(at(&body, "text")
+            .as_str()
+            .unwrap_or_default()
+            .contains(&long[..7_000]));
+
+        let (status, _) = get_json(addr, "/prompts/coordinate_task");
+        assert!(status.starts_with("HTTP/1.1 400"), "{status}");
+        let (status, _) = get_json(addr, "/prompts/no_such_prompt?description=x");
+        assert!(status.starts_with("HTTP/1.1 404"), "{status}");
+    }
+
     /// The HTTP route is the MCP tool's function: the same inputs give the
     /// same slice, the slice maps onto the objective's units, and a node that
     /// asks twice in one epoch is told the same thing.
@@ -5738,7 +6727,20 @@ mod tests {
         assert!(first < end && end <= 4096, "{first}..{end}");
         // A quarter of the space, give or take the last partition's remainder.
         assert!((end - first - 1024).abs() <= 1, "{first}..{end}");
-        assert_eq!(get_json(addr, &route).1, body, "fixed for the epoch");
+        // `epoch_ends_in_seconds` is a countdown from the clock, so two reads
+        // a second apart differ while the slice, which is what this asserts,
+        // does not.
+        let stable = |mut value: Value| {
+            if let Value::Object(fields) = &mut value {
+                fields.remove("epoch_ends_in_seconds");
+            }
+            value
+        };
+        assert_eq!(
+            stable(get_json(addr, &route).1),
+            stable(body),
+            "fixed for the epoch"
+        );
 
         // Every expected partition is reached by some node, and the ranges tile.
         let mut ranges: Vec<(i128, i128)> = (0..64)
@@ -5933,6 +6935,8 @@ mod tests {
             at(&body, "node.roles.declared").as_array().unwrap(),
             &[Value::string("coordinator"), Value::string("verifier")]
         );
+        // A plain publisher runs no MCP, and says so rather than omitting it.
+        assert_eq!(at(&body, "node.mcp.serving"), &Value::Bool(false));
         // Read-only, so the coordinator declaration is contradicted and said so.
         let warnings = at(&body, "node.warnings").as_array().unwrap();
         assert!(
@@ -6088,6 +7092,16 @@ mod tests {
         assert_eq!(int(&body, "attestations.accept"), 1);
         assert_eq!(int(&body, "attestations.reject"), 0);
         assert_eq!(int(&body, "attestations.slashed"), 0);
+        let (claim_status, claim_body) = get_json(addr, &format!("/claim/{accepted_claim}"));
+        assert!(claim_status.starts_with("HTTP/1.1 200"));
+        assert_eq!(
+            claim_body.get("id").and_then(Value::as_str),
+            Some(accepted_claim.as_str())
+        );
+        assert_eq!(
+            at(&claim_body, "record.objective_id").as_str(),
+            Some(objective_id.as_str())
+        );
         let rows = at(&body, "attestations.attestations").as_array().unwrap();
         assert_eq!(
             rows[0].get("attestor").unwrap().as_str(),
@@ -6115,6 +7129,18 @@ mod tests {
         let claims = index.get("claims").unwrap().as_array().unwrap();
         assert!(claims.iter().all(|row| row.get("assertions").is_none()));
         assert!(claims.iter().all(|row| row.get("standing").is_some()));
+        // The bond behind a verdict rides beside each row, counted, so a
+        // reader can draw every claim's verification level from one request.
+        let attested = claims
+            .iter()
+            .find(|row| row.get("claim_id").and_then(Value::as_str) == Some(&accepted_claim))
+            .expect("the attested claim is listed");
+        assert_eq!(int(attested, "attestations.accept"), 1);
+        assert_eq!(int(attested, "attestations.slashed"), 0);
+        assert!(claims
+            .iter()
+            .filter(|row| row.get("claim_id").and_then(Value::as_str) != Some(&accepted_claim))
+            .all(|row| int(row, "attestations.accept") == 0));
 
         let (status, _) = get_json(addr, "/knowledge/sha256:nope");
         assert!(status.starts_with("HTTP/1.1 404"), "{status}");

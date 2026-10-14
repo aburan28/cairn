@@ -3,8 +3,8 @@ name: ios-app
 # The iPhone .app, compiled on a Mac GitHub hosts. This Linux cloud-agent
 # image has no Xcode; macos-latest does. `workflow_dispatch` is how somebody
 # builds the reader without waiting for the rust job, and `workflow_call` is
-# how `ci.yml`'s gui-ios job runs the same steps so a toolchain break still
-# goes red on every PR.
+# how `ci.yml` retains the `gui-ios / app` check on every non-cancelled PR,
+# compiling on macOS only when the reader or its shared snapshot changed.
 #
 # Simulator, unsigned. DEVELOPMENT_TEAM is empty and Automatic signing
 # needs a logged-in Xcode; a machine that is not that cannot produce a
@@ -13,21 +13,42 @@ name: ios-app
 
 on:
   workflow_dispatch:
+    inputs:
+      run_build:
+        description: Compile the iOS reader on a macOS runner
+        type: boolean
+        required: true
+        default: true
   workflow_call:
+    inputs:
+      run_build:
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: read
 
 jobs:
   app:
-    runs-on: macos-latest
+    runs-on: ${{ inputs.run_build && 'macos-latest' || 'ubuntu-latest' }}
+    timeout-minutes: 25
     steps:
+      - name: no iOS changes in this workflow run
+        if: ${{ !inputs.run_build }}
+        run: echo 'The iOS check is present; no macOS build is needed for this change.'
       - uses: actions/checkout@v7
+        if: ${{ inputs.run_build }}
       - run: xcodebuild -version
+        if: ${{ inputs.run_build }}
       - run: cmp -s ui/lib/snapshot.json gui/ios/Sources/CairnKit/Resources/snapshot.json
+        if: ${{ inputs.run_build }}
       - run: swift test --package-path gui/ios
+        if: ${{ inputs.run_build }}
       - run: swift build -c release --package-path gui/ios
+        if: ${{ inputs.run_build }}
       - name: compile Cairn.app for the simulator
+        if: ${{ inputs.run_build }}
         run: |
           set -euo pipefail
           xcodebuild \
@@ -41,12 +62,14 @@ jobs:
             CODE_SIGN_IDENTITY= \
             build
       - name: package the .app
+        if: ${{ inputs.run_build }}
         run: |
           set -euo pipefail
           app=gui/ios/.derived/Build/Products/Release-iphonesimulator/Cairn.app
           test -d "$app"
           ditto -c -k --keepParent "$app" cairn-reader-ios-simulator.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
+        if: ${{ inputs.run_build }}
         with:
           name: cairn-reader-ios-simulator
           path: cairn-reader-ios-simulator.zip

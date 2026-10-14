@@ -40,6 +40,16 @@ use crate::canonical::Value;
 /// Names another seed list, or `off`. See the module docs.
 pub const SEEDS_ENV: &str = "CAIRN_SEEDS";
 
+/// `off` skips the published-list refresh. The compiled list is still dialled.
+pub const REFRESH_ENV: &str = "CAIRN_SEEDS_REFRESH";
+
+/// Where a node that was not given its own list asks for seeds published
+/// after this binary was built. Same default as `scripts/seeds-fetch.sh`.
+pub const PUBLISHED_URL_ENV: &str = "CAIRN_SEEDS_URL";
+
+/// The list GitHub Pages serves. Overridable so a fork is not stuck with this one.
+pub const PUBLISHED_URL: &str = "https://aburan28.github.io/cairn/seeds.json";
+
 /// `launch/seeds.json`, as this binary was built with it.
 pub const BUILT_IN: &str = include_str!("../../launch/seeds.json");
 
@@ -207,6 +217,58 @@ impl Source {
     }
 }
 
+/// Seeds from `extra` whose transport id is not already in `base`.
+///
+/// A published list and the compiled copy name the same seed for as long as
+/// this binary is current. Dialling it twice is the same handshake. An id
+/// that appears only in the published list is a seed added after the binary
+/// was built, which is the whole reason the refresh exists.
+pub fn merge(mut base: List, extra: List) -> List {
+    let mut seen: std::collections::BTreeSet<PeerId> =
+        base.seeds.iter().map(|seed| seed.transport).collect();
+    for seed in extra.seeds {
+        if seen.insert(seed.transport) {
+            base.seeds.push(seed);
+        }
+    }
+    base
+}
+
+/// The published list, if `curl` can read it.
+///
+/// This is a refresh of addresses, not a trust decision: each entry is still
+/// checked by asking that address for its key and keeping the key only when
+/// it hashes to the id. A failed fetch is `None` and the caller keeps the
+/// compiled list. `curl` is the transport because a TLS crate in this binary
+/// is refused by `tests/cipher_policy.rs`.
+pub fn fetch_published() -> Option<List> {
+    if std::env::var(REFRESH_ENV)
+        .ok()
+        .is_some_and(|value| value == "off" || value == "0")
+    {
+        return None;
+    }
+    let url = std::env::var(PUBLISHED_URL_ENV).unwrap_or_else(|_| PUBLISHED_URL.to_string());
+    let output = std::process::Command::new("curl")
+        .args([
+            "-fsSL",
+            "--proto",
+            "-all,https,file",
+            "--max-time",
+            "5",
+            "--retry",
+            "0",
+            &url,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    parse(&text).ok()
+}
+
 fn read_bounded(path: &Path) -> Result<String, String> {
     let size = std::fs::metadata(path)
         .map_err(|e| format!("{}: {e}", path.display()))?
@@ -343,5 +405,27 @@ mod tests {
         std::fs::write(&path, "{").expect("write");
         assert!(Source::File(path).load().is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_published_seed_is_added_once_and_a_known_id_is_not_dialled_twice() {
+        let known = "ab".repeat(32);
+        let fresh = "cd".repeat(32);
+        let base = parse(&format!(
+            r#"{{"seeds":[{{"name":"us-west","addr":"203.0.113.1:9000","transport":"{known}"}}]}}"#
+        ))
+        .unwrap();
+        let published = parse(&format!(
+            r#"{{"seeds":[
+                {{"name":"us-west","addr":"203.0.113.9:9000","transport":"{known}"}},
+                {{"name":"runpod","addr":"203.0.113.2:37775","transport":"{fresh}"}}
+            ]}}"#
+        ))
+        .unwrap();
+        let merged = merge(base, published);
+        assert_eq!(merged.seeds.len(), 2);
+        assert_eq!(merged.seeds[0].addr, "203.0.113.1:9000");
+        assert_eq!(merged.seeds[1].name, "runpod");
+        assert_eq!(merged.seeds[1].addr, "203.0.113.2:37775");
     }
 }

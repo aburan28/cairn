@@ -14,62 +14,63 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { NODE_URL } from "@/lib/objectives";
-import { readableNode } from "@/lib/site";
+import { GoogleSignIn } from "@/components/GoogleSignIn";
+import { nodeAnswers } from "@/lib/site";
+import { useEvery, useModalDialog, useNode } from "@/components/hooks";
 
 export const ROUTES = [
-  { href: "/", label: "Overview", hint: "What cairn is, and this node's numbers" },
-  { href: "/network", label: "Network", hint: "This node, its peer connections, and node roles" },
-  { href: "/objectives", label: "Objectives", hint: "What this node will pay for" },
-  { href: "/goals", label: "Goals", hint: "What the network is trying to beat, and from which angles" },
+  { href: "/", label: "Overview", hint: "Your node at a glance, and what it is paying for" },
+  { href: "/objectives", label: "Objectives", hint: "Every challenge this node knows, and what is still payable" },
+  { href: "/coordination", label: "Coordination", hint: "Launch a coordinated task from a description, and watch the running ones" },
+  { href: "/network", label: "Network", hint: "Your node's role, the agents and machines connected to it, and other nodes" },
+  { href: "/log", label: "Log", hint: "Everything that happened: the records, and what the node saw" },
+  { href: "/knowledge", label: "Knowledge", hint: "How well verified each result is, and the chain that links them" },
+  { href: "/goals", label: "Goals", hint: "The problems the network is working on, and each approach to them" },
+  { href: "/contribute", label: "Contribute", hint: "Offer compute, connect an agent, check answers, fund a question" },
+  { href: "/submit", label: "Post a challenge", hint: "Fund a question with a pinned checker" },
+  { href: "/payouts", label: "External bounties", hint: "See attributed shares and plan a payment outside Cairn" },
   { href: "/task", label: "Task progress", hint: "A divided search: what is settled, who is working it, how far along" },
-  { href: "/submit", label: "Post a challenge", hint: "Fund a question, signed by a wallet" },
-  { href: "/contribute", label: "Contribute", hint: "Ways to take part, what each pays, and adding machines on your network" },
-  { href: "/chain", label: "Chain", hint: "Epoch links, and whether you have forked" },
-  { href: "/log", label: "Log", hint: "Every record, as the node stores it" },
-  { href: "/coordination", label: "Coordination", hint: "A divided search's epoch, who holds which slice, and the task leases" },
-  { href: "/peers", label: "Peers", hint: "The log's address book: who announced an address" },
-  { href: "/how-it-works", label: "How it works", hint: "The protocol, in order" },
+  { href: "/peers", label: "Address book", hint: "Every node that announced an address in the log" },
+  { href: "/how-it-works", label: "How it works", hint: "The network in plain words, and its limits" },
 ] as const;
 
 /**
- * The sidebar, in three groups: what this node holds, what you can do to it,
- * and the explanation. `match` lists the routes that belong under an entry
- * without being it -- one objective, and its move history, are both
- * "Objectives".
+ * Two groups: the places that show this node and its work, and the two
+ * about taking part. Goals, one task's progress, posting a challenge and
+ * the address book stay in `ROUTES`, so ⌘K opens them, and the pages they
+ * belong to link to them -- they are listed under their parent via `match`.
+ *
+ * It was four places for a while, which was tidy and hid the Log, the
+ * chain and coordination behind a keyboard shortcut. These are the pages an
+ * operator moves between all day, and a sidebar is where those go.
  */
 const NAV: {
   group: string;
-  siteOnly?: boolean;
   items: { href: string; label: string; icon: React.ReactNode; match?: string[] }[];
 }[] = [
   {
-    group: "Node",
+    group: "",
     items: [
       { href: "/", label: "Overview", icon: <IconHome /> },
-      { href: "/network", label: "Network", icon: <IconNetwork />, match: ["/peers"] },
       {
         href: "/objectives",
         label: "Objectives",
         icon: <IconTarget />,
-        match: ["/challenge", "/frontier", "/task"],
+        match: ["/challenge", "/frontier", "/submit", "/goals"],
       },
-      { href: "/goals", label: "Goals", icon: <IconTarget /> },
-      { href: "/chain", label: "Chain", icon: <IconChain /> },
+      { href: "/coordination", label: "Coordination", icon: <IconSplit />, match: ["/task"] },
+      { href: "/network", label: "Network", icon: <IconNetwork />, match: ["/peers"] },
       { href: "/log", label: "Log", icon: <IconList /> },
-      { href: "/coordination", label: "Coordination", icon: <IconCoordination /> },
+      { href: "/knowledge", label: "Knowledge", icon: <IconCheck />, match: ["/chain"] },
     ],
   },
   {
     group: "Take part",
     items: [
-      { href: "/contribute", label: "Contribute", icon: <IconNetwork /> },
-      { href: "/submit", label: "Post a challenge", icon: <IconPlus /> },
+      { href: "/contribute", label: "Contribute", icon: <IconHand /> },
+      { href: "/payouts", label: "External bounties", icon: <IconHand /> },
+      { href: "/how-it-works", label: "How it works", icon: <IconBook /> },
     ],
-  },
-  {
-    group: "Learn",
-    items: [{ href: "/how-it-works", label: "How it works", icon: <IconBook /> }],
   },
 ];
 
@@ -121,8 +122,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </Link>
           <nav aria-label="Primary" className="flex-1 overflow-y-auto px-3 pb-4">
             {NAV.map((section) => (
-              <div key={section.group}>
-                <div className="sidebar-group">{section.group}</div>
+              <div key={section.group || "primary"}>
+                {section.group ? <div className="sidebar-group">{section.group}</div> : null}
                 {section.items.map((item) => (
                   <Link
                     key={item.href}
@@ -138,6 +139,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             ))}
           </nav>
           <div className="flex flex-col gap-2 border-t border-edge px-3 py-3">
+            <GoogleSignIn />
             <button
               type="button"
               onClick={() => setPaletteOpen(true)}
@@ -169,6 +171,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
                 cairn
               </Link>
               <div className="ml-auto flex items-center gap-2">
+                <GoogleSignIn />
                 <NodeStatus />
                 <button
                   type="button"
@@ -229,28 +232,13 @@ export function Shell({ children }: { children: React.ReactNode }) {
  * visitor who does not know that reads every fallback figure as live.
  */
 function NodeStatus() {
+  const base = useNode();
   const [state, setState] = useState<"checking" | "live" | "down">("checking");
-  const target = readableNode(NODE_URL || "", typeof window !== "undefined" ? window.location.origin : undefined);
+  const target = base || "this origin";
 
-  useEffect(() => {
-    let cancelled = false;
-    const check = async () => {
-      try {
-        const response = await fetch(`${NODE_URL}/health`, { cache: "no-store" });
-        if (!cancelled) setState(response.ok ? "live" : "down");
-      } catch {
-        if (!cancelled) setState("down");
-      }
-    };
-    void check();
-    // Slow on purpose. This is a status light, not a heartbeat, and a node on
-    // the other end of an SSH tunnel should not be polled every second.
-    const timer = setInterval(check, 30_000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, []);
+  useEvery(async () => {
+    if (base !== null) setState(await nodeAnswers(base) ? "live" : "down");
+  }, 30, base !== null);
 
   const tone =
     state === "live" ? "bg-accent" : "bg-ink-3";
@@ -265,7 +253,7 @@ function NodeStatus() {
           ? `A node answered at ${target}.`
           : state === "down"
             ? `Nothing answered at ${target}. Pages fall back to the settled log that ships in the repository, and say so.`
-            : `Asking ${target}…`
+            : "Looking for a node…"
       }
     >
       <span className={`h-1.5 w-1.5 rounded-full ${tone}`} />
@@ -334,6 +322,8 @@ function CommandPalette({ onClose }: { onClose: () => void }) {
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const input = useRef<HTMLInputElement>(null);
+  const dialog = useModalDialog();
+  const results = useRef<HTMLUListElement>(null);
   const router = useRouter();
 
   const matches = useMemo(() => {
@@ -347,36 +337,32 @@ function CommandPalette({ onClose }: { onClose: () => void }) {
     );
   }, [query]);
 
-  useEffect(() => {
-    input.current?.focus();
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   useEffect(() => setCursor(0), [query]);
+  useEffect(() => {
+    results.current?.querySelector('[data-current="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [cursor, matches]);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-canvas/70 px-4 pt-[12vh] backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
+    <dialog
+      ref={dialog}
+      className="fixed inset-0 m-0 h-dvh max-h-none w-full max-w-none bg-transparent px-4 pt-[12dvh] text-ink open:flex open:items-start open:justify-center backdrop:bg-canvas/70 backdrop:backdrop-blur-sm"
       aria-label="Command palette"
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="card w-full max-w-lg overflow-hidden shadow-2xl">
+      <div className="card flex max-h-[76dvh] w-full max-w-lg flex-col overflow-hidden shadow-2xl">
+        <div className="flex shrink-0 items-center border-b border-edge pr-2">
         <input
           ref={input}
+          aria-label="Find a page"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "ArrowDown") {
               event.preventDefault();
-              setCursor((c) => Math.min(c + 1, matches.length - 1));
+              setCursor((c) => Math.max(0, Math.min(c + 1, matches.length - 1)));
             } else if (event.key === "ArrowUp") {
               event.preventDefault();
               setCursor((c) => Math.max(c - 1, 0));
@@ -389,15 +375,17 @@ function CommandPalette({ onClose }: { onClose: () => void }) {
             }
           }}
           placeholder="Jump to…"
-          className="w-full border-b border-edge bg-transparent px-4 py-3 text-[14px]
+          className="min-w-0 flex-1 bg-transparent px-4 py-3 text-[14px]
                      text-ink placeholder:text-ink-3 focus:outline-none"
         />
-        <ul className="max-h-80 overflow-y-auto py-1">
+          <button type="button" className="btn btn-sm btn-ghost" onClick={onClose} aria-label="Close command palette">✕</button>
+        </div>
+        <ul ref={results} className="min-h-0 overflow-y-auto py-1">
           {matches.length === 0 && (
             <li className="px-4 py-6 text-center text-[13px] text-ink-3">Nothing matches.</li>
           )}
           {matches.map((route, index) => (
-            <li key={route.href}>
+            <li key={route.href} data-current={index === cursor}>
               <Link
                 href={route.href}
                 onClick={onClose}
@@ -412,7 +400,8 @@ function CommandPalette({ onClose }: { onClose: () => void }) {
             </li>
           ))}
         </ul>
-        <div className="flex items-center gap-3 border-t border-edge bg-surface-2 px-4 py-2 text-[11px] text-ink-3">
+        <span className="sr-only" role="status">{matches[cursor]?.label ?? "No matching page"}</span>
+        <div className="flex shrink-0 items-center gap-3 border-t border-edge bg-surface-2 px-4 py-2 text-[11px] text-ink-3">
           <span>
             <span className="kbd">↑</span> <span className="kbd">↓</span> to move
           </span>
@@ -424,7 +413,7 @@ function CommandPalette({ onClose }: { onClose: () => void }) {
           </span>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }
 
@@ -540,22 +529,6 @@ function IconTarget() {
   );
 }
 
-function IconChain() {
-  return (
-    <Icon>
-      <path d="M6.5 9.5 9.5 6.5M7 4.5l1-1a2.5 2.5 0 0 1 3.5 3.5l-1 1M9 11.5l-1 1A2.5 2.5 0 0 1 4.5 9l1-1" />
-    </Icon>
-  );
-}
-
-function IconList() {
-  return (
-    <Icon>
-      <path d="M5.5 4h8M5.5 8h8M5.5 12h8M2.5 4h.01M2.5 8h.01M2.5 12h.01" />
-    </Icon>
-  );
-}
-
 function IconNetwork() {
   return (
     <Icon>
@@ -567,22 +540,38 @@ function IconNetwork() {
   );
 }
 
-function IconCoordination() {
+function IconSplit() {
   return (
     <Icon>
-      <rect x="2" y="4" width="12" height="3.5" rx="0.8" />
-      <path d="M5.5 4v3.5M9 4v3.5" />
-      <rect x="2" y="9.5" width="7" height="3" rx="0.8" />
-      <rect x="10.5" y="9.5" width="3.5" height="3" rx="0.8" />
+      <path d="M2.5 8h3.5M6 8l3-4.5h4.5M6 8l3 4.5h4.5M9 8h4.5" />
     </Icon>
   );
 }
 
-function IconPlus() {
+function IconList() {
   return (
     <Icon>
-      <circle cx="8" cy="8" r="5.5" />
-      <path d="M8 5.5v5M5.5 8h5" />
+      <path d="M5.5 4h8M5.5 8h8M5.5 12h8" />
+      <circle cx="2.8" cy="4" r=".6" fill="currentColor" />
+      <circle cx="2.8" cy="8" r=".6" fill="currentColor" />
+      <circle cx="2.8" cy="12" r=".6" fill="currentColor" />
+    </Icon>
+  );
+}
+
+function IconCheck() {
+  return (
+    <Icon>
+      <path d="M8 1.8 13.2 4v3.8c0 3-2.3 5.4-5.2 6.4-2.9-1-5.2-3.4-5.2-6.4V4Z" />
+      <path d="m5.6 8 1.7 1.7 3.2-3.4" />
+    </Icon>
+  );
+}
+
+function IconHand() {
+  return (
+    <Icon>
+      <path d="M8 13.5s-5-3-5-6.6A2.6 2.6 0 0 1 8 5.3a2.6 2.6 0 0 1 5 1.6c0 3.6-5 6.6-5 6.6Z" />
     </Icon>
   );
 }

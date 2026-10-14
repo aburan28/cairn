@@ -43,6 +43,11 @@ struct SettingsView: View {
     @State private var problem: String?
     @State private var bootstrapAddr = ""
     @State private var bootstrapBusy = false
+    /// Off until asked. Processor, memory, roles, fleet, verifiers and the
+    /// drafting model are real, and together they made this window taller
+    /// than a laptop screen on the first open. Where the node runs and who
+    /// can reach it are the two questions a first visit has.
+    @State private var showAdvanced = false
 
     private var current: NodeSettings { NodeSettings.current() }
     private var bootstrapPaths: [String] { NodeSettings.parseBootstrap(bootstrap) }
@@ -66,6 +71,59 @@ struct SettingsView: View {
 
             // Attached to somebody else's node, these do not apply. Attached
             // to our own launchd agent, they do: the agent is this node.
+            if !attaching || background {
+            Section {
+                network
+            } header: {
+                Text("Network")
+            } footer: {
+                Caption("""
+                    The reader stays on this Mac unless the node is shared on your \
+                    network above. Peers on the local segment find each \
+                    other without a file. A peer elsewhere needs a bootstrap file with \
+                    its address and real transport key; `cairn gen-bootstrap` writes the \
+                    shape, and a placeholder key is warned about at every start until \
+                    the real one replaces it. A bootstrap is a dial hint, never a trust \
+                    decision — the handshake authenticates the key.
+                    """)
+            }
+
+            Section {
+                folder
+                Toggle("Limit storage", isOn: $limitStorage)
+                if limitStorage {
+                    LabeledContent("Up to") {
+                        HStack(spacing: 6) {
+                            TextField("Limit", value: $storageGB, format: .number)
+                                .labelsHidden()
+                                .textFieldStyle(.roundedBorder)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 80)
+                                .onChange(of: storageGB) { storageGB = max(1, $0) }
+                            Text("GB")
+                            Stepper("", value: $storageGB, in: 1...1_000_000, step: 5).labelsHidden()
+                        }
+                    }
+                }
+            } header: {
+                Text("Storage")
+            } footer: {
+                Caption("""
+                    The folder holds the ledger, this node's keys, and copies of \
+                    verifier code it can download again. At the limit, Cairn deletes \
+                    those copies first. If the ledger alone outgrows it, the node stops \
+                    and tells you. It never deletes the ledger to fit.
+                    """)
+            }
+            } // !attaching
+
+            Section {
+                Toggle("More settings", isOn: $showAdvanced)
+            } footer: {
+                Caption("Processor and memory limits, roles, fleet, verifiers, and the model that drafts a challenge.")
+            }
+
+            if showAdvanced {
             if !attaching || background {
             Section {
                 processor
@@ -154,22 +212,6 @@ struct SettingsView: View {
             }
 
             Section {
-                network
-            } header: {
-                Text("Network")
-            } footer: {
-                Caption("""
-                    The reader stays on this Mac unless the node is shared on your \
-                    network above. Peers on the local segment find each \
-                    other without a file. A peer elsewhere needs a bootstrap file with \
-                    its address and real transport key; `cairn gen-bootstrap` writes the \
-                    shape, and a placeholder key is warned about at every start until \
-                    the real one replaces it. A bootstrap is a dial hint, never a trust \
-                    decision — the handshake authenticates the key.
-                    """)
-            }
-
-            Section {
                 fleet
             } header: {
                 Text("Fleet")
@@ -185,43 +227,16 @@ struct SettingsView: View {
                     network you run. docs/fleet.md has the whole arrangement.
                     """)
             }
-
-            Section {
-                folder
-                Toggle("Limit storage", isOn: $limitStorage)
-                if limitStorage {
-                    LabeledContent("Up to") {
-                        HStack(spacing: 6) {
-                            TextField("Limit", value: $storageGB, format: .number)
-                                .labelsHidden()
-                                .textFieldStyle(.roundedBorder)
-                                .multilineTextAlignment(.trailing)
-                                .frame(width: 80)
-                                .onChange(of: storageGB) { storageGB = max(1, $0) }
-                            Text("GB")
-                            Stepper("", value: $storageGB, in: 1...1_000_000, step: 5).labelsHidden()
-                        }
-                    }
-                }
-            } header: {
-                Text("Storage")
-            } footer: {
-                Caption("""
-                    The folder holds the ledger, this node's keys, and copies of \
-                    verifier code it can download again. At the limit, Cairn deletes \
-                    those copies first. If the ledger alone outgrows it, the node stops \
-                    and tells you. It never deletes the ledger to fit.
-                    """)
             }
-            } // !attaching
-
-            UpdatesSection(updates: updates, nodeVersion: node.binaryVersion)
 
             if !attaching {
                 VerifiersSection(node: node)
             }
 
             AISettingsSection(node: node)
+            }
+
+            UpdatesSection(updates: updates, nodeVersion: node.binaryVersion)
 
             if needsRestart {
                 Section {
@@ -394,7 +409,7 @@ struct SettingsView: View {
             Caption("""
                 Same as "Share this node on my network" below. Each machine opens \
                 Contribute in its own Cairn.app and chooses Share this Mac… with \
-                this node's address (or runs `cairn work`), and is paid for what the \
+                this node's address, and is paid for what the \
                 checker accepts, like any solver.
                 """)
             Toggle("Relay — let other nodes connect to this one", isOn: relay)
@@ -409,7 +424,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Toggle("Share this node on my network", isOn: $shareHTTP)
             Text(shareHTTP
-                 ? "Other machines on your network can open this node's pages and work its objectives: in their own Cairn.app, Contribute ▸ Share this Mac… with this node's address, or `cairn work` — the Contribute page here has both. Each machine is paid under its own name; Lead a fleet pays this Mac instead. Anyone on the network can read the log and post answers; nobody can change what has settled."
+                 ? "Other machines on your network can open this node's pages and work its objectives: in their own Cairn.app, open Contribute and set up work with this node's address. Each machine is paid under its own name; Lead a fleet pays this Mac instead. Anyone on the network can read the log and post answers; nobody can change what has settled."
                  : "Only this Mac can open the node's pages or work on it. Turn this on to add machines on your network as workers.")
                 .font(.caption).foregroundStyle(.secondary)
             Toggle("Offline: no internet peers", isOn: $offline)

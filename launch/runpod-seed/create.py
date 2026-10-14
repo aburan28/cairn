@@ -117,9 +117,11 @@ def fetch_key(ip: str, port: str) -> tuple[str, bytes]:
         raw = bytes.fromhex(text)
     except ValueError as exc:
         raise RuntimeError("key file is not hex") from exc
-    digest = hashlib.sha256(raw).hexdigest()
+    # Same derivation as crypto::kem::key_id: the id is not sha256 of the
+    # raw key. Hashing the bytes alone rejects a key cairn itself published.
+    digest = hashlib.sha256(b"proofwork/p2p/peer-id/v1" + raw).hexdigest()
     if digest != transport:
-        raise RuntimeError(f"key hashes to {digest}, file is named {transport}")
+        raise RuntimeError(f"key id is {digest}, file is named {transport}")
     return transport, text.encode() + b"\n"
 
 

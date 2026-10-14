@@ -43,7 +43,12 @@ The **key** names the problem. The **angle path** names the approach, and its
 segments nest: `rho/gpu-kernel` is a refinement of `rho` without any relation
 record saying so, and a page shows it indented under `rho`. An objective
 whose goal names no angle -- every objective posted before this convention --
-has the empty angle, shown as *no particular approach*.
+has the empty angle. The reader shows it as *Approach N · tag*: `N` its place
+among the goal's angles, `tag` the first characters of the first objective
+funded under it, so it can be told apart from the next goal's and matched to
+the challenge it came from. Opening any angle says what it is: its method
+family when the name is one of the words below, otherwise that its funders
+named none, and the statements of what is funded under it.
 
 Why this and not a field: `goal` is a free string the rules never read, so a
 convention inside it costs no consensus surface, moves no digest, and needs

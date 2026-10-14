@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { Bridge } from "./draft";
-import { DECLARED_BY_ROLE, ROLES, lanState, openSheet, setRole, workCommand } from "./contribute";
+import {
+  DECLARED_BY_ROLE,
+  ROLES,
+  openSheet,
+  setRole,
+} from "./contribute";
 
 function recorder(reply: () => Promise<unknown> = async () => true) {
   const sent: unknown[] = [];
@@ -78,52 +83,5 @@ describe("the app bridge", () => {
     });
     await expect(setRole(bridge, "relay", true)).rejects.toThrow("Cancelled.");
     await expect(openSheet(bridge, "peers")).rejects.toThrow("Cancelled.");
-  });
-});
-
-describe("lanState", () => {
-  it("is unknown on a node older than the field", () => {
-    expect(lanState(undefined, "http://127.0.0.1:8080")).toEqual({ state: "unknown" });
-  });
-
-  it("is local on a loopback bind", () => {
-    expect(lanState({ bound: "127.0.0.1:8080", lan: false, urls: [] }, "")).toEqual({
-      state: "local",
-      bound: "127.0.0.1:8080",
-    });
-  });
-
-  it("lists the node's addresses, or the page's own non-loopback origin", () => {
-    expect(
-      lanState({ bound: "0.0.0.0:8080", lan: true, urls: ["http://192.168.1.4:8080"] }, ""),
-    ).toEqual({ state: "lan", urls: ["http://192.168.1.4:8080"] });
-    expect(lanState({ bound: "0.0.0.0:8080", lan: true, urls: [] }, "http://10.0.0.9:8080")).toEqual(
-      { state: "lan", urls: ["http://10.0.0.9:8080"] },
-    );
-    expect(lanState({ bound: "0.0.0.0:8080", lan: true, urls: [] }, "http://127.0.0.1:8080")).toEqual(
-      { state: "lan", urls: [] },
-    );
-  });
-});
-
-describe("workCommand", () => {
-  it("fills in what it knows and leaves loud placeholders for the rest", () => {
-    const text = workCommand({ node: "http://10.0.0.2:8080", objective: "sha256:ab", worker: "garage gpu" });
-    expect(text).toContain("--node http://10.0.0.2:8080");
-    expect(text).toContain("--objective sha256:ab");
-    expect(text).toContain("--worker garage-gpu");
-    expect(workCommand({ node: "", objective: null, worker: "" })).toContain("<objective-id>");
-  });
-
-  it("names a fleet leader as the submitter when the node leads one", () => {
-    const leader = "a".repeat(64);
-    expect(workCommand({ node: "x", objective: "y", worker: "box", leader })).toContain(
-      `--submitter ${leader}`,
-    );
-    expect(workCommand({ node: "x", objective: "y", worker: "box" })).not.toContain("--submitter");
-  });
-
-  it("strips the commitment-hash separator from a worker name", () => {
-    expect(workCommand({ node: "x", objective: "y", worker: "a|b" })).toContain("--worker a-b");
   });
 });

@@ -93,8 +93,7 @@ export async function fetchObjectives(
     response = await fetch(`${base}/objectives`, { cache: "no-store" });
   } catch (cause) {
     throw new NodeUnreachable(
-      `No node answered at ${base}. Start one with \`make serve\`, or set ` +
-        `NEXT_PUBLIC_CAIRN_NODE to where yours is listening.`,
+      `No response from ${base || "this node"}. Check that the node is running, then refresh.`,
       { cause },
     );
   }
@@ -118,8 +117,8 @@ export async function fetchObjectives(
  * which is worth seeing rather than normalising away.
  */
 export function poolFraction(objective: Objective): number | null {
-  if (!objective.frontier || objective.reward <= 0) return null;
-  const fraction = objective.frontier.pool_remaining / objective.reward;
+  if ((!objective.frontier && !objective.piecework) || objective.reward <= 0) return null;
+  const fraction = remainingPool(objective) / objective.reward;
   return Math.max(0, Math.min(1, fraction));
 }
 
@@ -131,9 +130,18 @@ export function poolFraction(objective: Objective): number | null {
  * itself, and the same instinct as `firstBrokenLink` in `chain.ts`.
  */
 export function overspent(objective: Objective): boolean {
-  if (!objective.frontier) return false;
-  const { paid_cumulative, pool_remaining } = objective.frontier;
-  return paid_cumulative + pool_remaining > objective.reward;
+  if (!objective.frontier && !objective.piecework) return false;
+  return paidOut(objective) + remainingPool(objective) > objective.reward;
+}
+
+/** Display the node's standing for all three payment modes. A divided search
+ * has neither a frontier nor one winning settlement, but it still pays. */
+export function paidOut(objective: Pick<Objective, "frontier" | "piecework" | "settlement">): number {
+  return objective.piecework?.paid_total ?? objective.frontier?.paid_cumulative ?? objective.settlement?.reward ?? 0;
+}
+
+export function remainingPool(objective: Pick<Objective, "frontier" | "piecework" | "settled" | "reward">): number {
+  return objective.piecework?.pool_remaining ?? objective.frontier?.pool_remaining ?? (objective.settled ? 0 : objective.reward);
 }
 
 /** A hash or key, short enough to scan a column of them. */

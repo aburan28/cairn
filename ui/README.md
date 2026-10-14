@@ -7,22 +7,37 @@ A small Next.js app that is two things at once, from one build:
 * **the node's own reader**, embedded in the binary and served at `/ui/`, where
   the same pages read the node that served them.
 
-Routes: `/` the landing page, `/how-it-works` the protocol,
-`/challenge?id=…` one objective, `/frontier?id=…` its move
-history, `/chain` the epoch chain, `/objectives`, `/goals` (problem families and
-the angles funded under each), `/peers` (the log's address
-book), `/network` — the peers this node has actually reached, every worker
-heartbeating to it summed by device and class, its declared roles and hardware,
-and the roles the log evidences, kept apart as three kinds of fact —
-`/coordination?id=…` — one divided search's epoch clock, which slices the live
-workers hold, and the advisory task leases over them — `/log`, `/task?id=…` — a
-divided search while it runs: what the log has settled per worker beside
-what the workers report over `POST /progress`, kept apart and labelled, with
-the share of the expected Pollard rho cost and an ETA at the reported rate —
-`/contribute` — the ways to take part, what each is paid today, and the exact
-`cairn work` line for adding a machine on this node's network, from the
-`node.reach` it publishes on `GET /network` — and `/submit` — a form that posts
-an objective to the node that served the page.
+Routes, in the sidebar's order:
+
+* `/` — the landing page, and on a node's own reader a line for that node:
+  its role and what is connected to it;
+* `/objectives` — every challenge and what is still payable, with
+  `/challenge?id=…` (one objective), `/frontier?id=…` (its move history),
+  `/goals` (each problem and the approaches funded against it — an unnamed
+  one reads *Approach N · tag* and every one opens to say what it is about)
+  and `/submit` (post a challenge) under it;
+* `/coordination` — launch a coordinated task from a plain description,
+  through the node's `coordinate_task` prompt and the operator's agent, and
+  watch the running ones; `?id=…` is one divided search's slices, machines
+  and task leases, and `/task?id=…` its settled-versus-reported progress;
+* `/network` — the node's role (Leader, Peer or Mirror, read off what it does
+  and never blank), the agent attached over MCP and how to attach one, the
+  machines working with it and the other nodes it syncs with, and the
+  technical detail folded away; `/peers` is the log's address book;
+* `/log` — every record, interleaved with what the node saw happen
+  (`GET /events`): records as dots, node events as rings, because only the
+  first are re-derivable;
+* `/knowledge` — how well verified each result is (checked, re-checkable here,
+  backed by a bond, replicated) beside the node's confidence under a policy
+  the reader picks, and the chain underneath; `/chain` redirects here;
+* `/contribute` — every way to take part is a button that opens a panel and
+  does it: offering compute writes the `cairn work` line with GPUs, threads
+  and hours a day, inside Cairn.app the roles flip the app's toggles;
+* `/how-it-works` — the network in plain words, and its limits.
+
+There is no URL box. The reader the node serves reads that node, and an
+address field in the corner of every page was furniture nobody used;
+`NEXT_PUBLIC_CAIRN_NODE` still points a development build at a node.
 
 `/how-it-works` is static prose and reads no node; the rest are the reader. Both
 kinds ship in both mounts, which is the same "one app, not two" decision — an
@@ -152,10 +167,12 @@ make ui            # the reader in dev mode, http://localhost:3000
 ```
 
 In dev mode the page is on a different origin from the node, so point it with
-`NEXT_PUBLIC_CAIRN_NODE=http://127.0.0.1:8080` or just edit the URL in the
-page. Served from the node, the default is same-origin and there is nothing to
-configure — and the URL box still retargets it, which is the whole value here:
-comparing one node's head against a peer's must not need a redeploy.
+`NEXT_PUBLIC_CAIRN_NODE=http://127.0.0.1:8080`. Reads work across origins;
+writes do not (`POST /submit`, and rendering a prompt, are same-origin by
+design), so to exercise those in dev put one proxy in front of both: `/ui/*`
+to `next dev`, everything else to the node. Served from the node, the default
+is same-origin and there is nothing to configure. To compare your head with a
+peer's, open the peer's own `/ui/knowledge/`: every node serves its reader.
 
 `make ui` and `make ui-build` both install from the committed lockfile with
 `npm ci` first. `cd ui && npm install && npm run dev` does the same thing by
@@ -174,6 +191,31 @@ every fetch and must say nothing about. The pages themselves are exercised by `n
 build` and by `scripts/node-smoke.sh` against a real node. Each fetcher also
 asserts at runtime that the fields a page reads are present (`lib/shape.ts`),
 because an `as`-cast passes `tsc` for any field name at all.
+
+### Browser journey checks
+
+`npm run test:browser` exercises a running **local** reader against a disposable
+node with at least one objective. Use a production export to keep its assets
+stable throughout the check.
+Build and embed it with `make ui-build`, start that binary on a copied log, and
+set `CAIRN_UX_URL` to its `/ui/` URL:
+
+```sh
+cd ui
+npx playwright install chromium
+CAIRN_UX_URL=http://127.0.0.1:8080/ui/ npm run test:browser
+```
+
+`CAIRN_BROWSER_PATH` can select an installed Chromium;
+`CAIRN_UX_NO_SANDBOX=1` is available for an isolated Linux test container whose
+browser cannot create namespaces. `CAIRN_UX_SCREENSHOTS` saves the phone palette
+image to a directory. The test checks 320, 360 and 1280px layouts, keyboard and
+phone dialog controls, recovery from failed reads and filters, the real digest
+route for attribution, form validation and delayed authorization responses,
+and same-origin posting guidance after finding a seed. Seed the node with a
+piecework objective to include the coordination detail checks. No record is
+submitted; canonicalization is its only POST. The review and remaining product
+work are in [`docs/review/reader-ux.md`](../docs/review/reader-ux.md).
 
 ## How the public site gets there
 
@@ -233,8 +275,8 @@ what `serve-smoke.sh` tests, and it is what a binary built *without* the `ui`
 feature has — `/ui/` then 404s with a message that says so, rather than a
 generic one.
 
-This app is the richer client: three pages, a URL you can retarget, and the
-consistency check below. It used to need a Node toolchain at *run* time, which a
+This app is the richer client: every page above, and the consistency check
+below. It used to need a Node toolchain at *run* time, which a
 node operator should not have to install to look at their own chain. Now the
 toolchain is needed only to *build* it, once, in CI — `release.yml` has a job
 that exports it and every release tarball carries the result.

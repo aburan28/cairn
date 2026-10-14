@@ -37,7 +37,7 @@ final class Node: ObservableObject {
     /// `cairn --version` ("cairn 1.8.1"). Nil in attach mode, where this app
     /// runs no binary and the reader's page says the node's.
     @Published private(set) var binaryVersion: String?
-    /// Drives the Peers sheet from the Node menu and the toolbar.
+    /// Drives the Peers sheet from the Node menu and the status popover.
     @Published var presentPeers = false
     @Published var presentTasks = false
     @Published var presentSecrets = false
@@ -51,7 +51,7 @@ final class Node: ObservableObject {
     /// The one `cairn work` this app runs, against this node or another.
     let worker = Worker()
     /// What New Challenge… opens with: the description the reader's Post a
-    /// challenge page handed over, or nil from the menu and the toolbar.
+    /// challenge page handed over, or nil from the Node menu.
     private(set) var challengeBrief: String?
 
     /// Where the node keeps its log, keys and queue.
@@ -168,9 +168,14 @@ final class Node: ObservableObject {
 
     /// Start `cairn work` as the sheet asked, with the key it is paid to
     /// made first if this Mac has none yet. Returns why not, or nil.
-    func startWork(_ plan: WorkPlan) -> String? {
+    func startWork(_ requested: WorkPlan) -> String? {
         guard let binary = binary ?? Self.locateBinary() else { return "No cairn command was found." }
-        if let identity = plan.identity, !FileManager.default.fileExists(atPath: identity) {
+        do {
+            try Self.prepareScratch(settings)
+        } catch {
+            return "Could not prepare the worker's scratch directory: \(error.localizedDescription)"
+        }
+        if let identity = requested.identity, !FileManager.default.fileExists(atPath: identity) {
             try? FileManager.default.createDirectory(
                 at: URL(fileURLWithPath: identity).deletingLastPathComponent(), withIntermediateDirectories: true)
             let made = Self.runCairn(binary, ["identity", "--out", identity])
@@ -179,7 +184,26 @@ final class Node: ObservableObject {
                     + (made.err.isEmpty ? "cairn identity exited \(made.status)" : made.err)
             }
         }
+        var plan = requested
+        plan.stopFile = dataDir.appendingPathComponent("work-stop-\(UUID().uuidString)").path
+        plan.pauseFile = dataDir.appendingPathComponent("work-pause-\(UUID().uuidString)").path
         return worker.start(plan, binary: binary, environment: Self.childEnvironment(settings), logFile: workLogFile)
+    }
+
+    /// The page selects the objective; the native sheet lets the person review
+    /// resources and solver before the app launches anything.
+    func startWorkFromPage(objective: String) -> String? {
+        guard httpOrigin != nil else { return "The node is not running." }
+        guard !worker.isRunning else { return "This Mac is already working. Stop it before changing objectives." }
+        if sheetIsOpen { return "Close the open Cairn window first." }
+        work(on: objective)
+        return nil
+    }
+
+    func exitWork() -> String? {
+        if let problem = worker.requestExit() { return problem }
+        workObjective = nil
+        return nil
     }
 
     // MARK: finding the binary
@@ -298,8 +322,9 @@ final class Node: ObservableObject {
         }
         do {
             try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+            try Self.prepareScratch(settings)
         } catch {
-            state = .failed("Could not create \(dataDir.path): \(error.localizedDescription)")
+            state = .failed("Could not prepare \(dataDir.path): \(error.localizedDescription)")
             return
         }
 
@@ -598,6 +623,10 @@ final class Node: ObservableObject {
             env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin",
         ].joined(separator: ":")
         env.merge(settings.environment) { _, chosen in chosen }
+        // Installer-launched apps can inherit a PKInstallSandbox TMPDIR that
+        // disappears while the node is still running. Every pinned verifier
+        // then becomes unavailable before its checker even starts.
+        env["TMPDIR"] = settings.dataFolder.appendingPathComponent("tmp", isDirectory: true).path
         // Lean, named the way the node's jail needs it: the toolchain's own
         // binary and its prefix (CAIRN_LEAN, CAIRN_LEAN_ROOT), since elan's
         // proxy and a home-directory toolchain both fail inside the jail.
@@ -607,6 +636,29 @@ final class Node: ObservableObject {
             env.merge(Toolchains.leanEnvironment(lean)) { current, _ in current }
         }
         return env
+    }
+
+    /// A stable private parent for verifier workdirs, under the node's data
+    /// folder. The child environment only names it; launch paths create it.
+    nonisolated static func prepareScratch(_ settings: NodeSettings) throws {
+        let dir = settings.dataFolder.appendingPathComponent("tmp", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: settings.dataFolder.path) {
+            // A chosen folder may be an unmounted disk. Only the default is
+            // safe to create on demand for a worker or background service.
+            guard settings.isDefaultFolder else { throw CocoaError(.fileNoSuchFile) }
+            try FileManager.default.createDirectory(at: settings.dataFolder,
+                                                    withIntermediateDirectories: true)
+        }
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory) {
+            guard isDirectory.boolValue,
+                  (try? FileManager.default.destinationOfSymbolicLink(atPath: dir.path)) == nil
+            else { throw CocoaError(.fileWriteFileExists) }
+        } else {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
     }
 
     /// `cairn identity --out`: an ed25519 keypair whose public half is the
