@@ -91,6 +91,28 @@ final class BackgroundServiceTests: XCTestCase {
         XCTAssertEqual(invited.serveHost, "0.0.0.0", "members still reach the leader over the network")
     }
 
+    func testATailnetFleetServesOnTheTailnetAndProbesEveryInterface() throws {
+        var leader = settings(lead: true, join: .invited)
+        leader.fleetTailnet = true
+        XCTAssertEqual(leader.serveHost, "tailnet", "the node resolves the word; the app cannot bind it")
+        XCTAssertEqual(leader.serveProbeHost, "0.0.0.0", "a port free everywhere is free on both addresses the node takes")
+        XCTAssertTrue(leader.sharesOnNetwork, "tailnet members can reach it")
+        XCTAssertEqual(leader.environment["CAIRN_FLEET"], "enrolled", "the tailnet is not a credential")
+        let args = BackgroundService.definition(settings: leader, binary: binary)["ProgramArguments"] as? [String] ?? []
+        XCTAssertTrue(args.contains("tailnet:8080"))
+        XCTAssertFalse(args.contains("0.0.0.0:8080"), "nothing but the tailnet and loopback")
+
+        var notLeading = settings()
+        notLeading.fleetTailnet = true
+        XCTAssertEqual(notLeading.serveHost, "127.0.0.1", "the switch belongs to a fleet, and does nothing without one")
+
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "cairn-fleet-tailnet-\(UUID().uuidString)"))
+        XCTAssertFalse(NodeSettings.current(defaults).fleetTailnet)
+        defaults.set(true, forKey: NodeSettings.Key.leadFleet)
+        defaults.set(true, forKey: NodeSettings.Key.fleetTailnet)
+        XCTAssertEqual(NodeSettings.current(defaults).serveHost, "tailnet")
+    }
+
     func testANewFleetStartsWithInvitationsAndAnOldOneKeepsItsNetworks() throws {
         let fresh = try XCTUnwrap(UserDefaults(suiteName: "cairn-fleet-new-\(UUID().uuidString)"))
         XCTAssertEqual(NodeSettings.current(fresh).fleetJoin, .invited)

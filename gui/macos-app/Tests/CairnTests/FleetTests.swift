@@ -56,5 +56,15 @@ final class FleetTests: XCTestCase {
         let lanOnly: [String: Any] = ["node": ["reach": lanReach] as [String: Any]]
         XCTAssertEqual(FleetFacts.joinAddress(lanOnly), "http://192.168.1.20:8080")
         XCTAssertNil(FleetFacts.joinAddress([:]))
+
+        // A node on its tailnet is joined by its MagicDNS name, ahead of a LAN
+        // address; a tailnet block without a URL (the HTTP side is not there)
+        // is passed over.
+        let tailnet: [String: Any] = ["dns_name": "leader.tail1234.ts.net", "url": "http://leader.tail1234.ts.net:8080"]
+        let onTailnet: [String: Any] = ["node": ["reach": ["urls": ["http://192.168.1.20:8080"], "tailnet": tailnet] as [String: Any]] as [String: Any]]
+        XCTAssertEqual(FleetFacts.joinAddress(onTailnet), "http://leader.tail1234.ts.net:8080")
+        let unreachable: [String: Any] = ["dns_name": "leader.tail1234.ts.net", "url": NSNull()]
+        let notServing: [String: Any] = ["node": ["reach": ["urls": ["http://192.168.1.20:8080"], "tailnet": unreachable] as [String: Any]] as [String: Any]]
+        XCTAssertEqual(FleetFacts.joinAddress(notServing), "http://192.168.1.20:8080")
     }
 }

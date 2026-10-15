@@ -15,11 +15,13 @@
 //!
 //! So this module does three small things and nothing else:
 //!
-//! 1. **Binds to the tailnet only.** `--serve tailnet:8080` resolves to this
-//!    machine's tailnet address ([`resolve_listen`]), so a leader's HTTP side
-//!    is reachable by tailnet peers and by nobody on the LAN or the internet.
-//!    That is the difference from `0.0.0.0`, which also answers on the tailnet
-//!    but answers the coffee-shop Wi-Fi too.
+//! 1. **Binds to the tailnet and this machine only.** `--serve tailnet:8080`
+//!    resolves to this machine's tailnet address ([`resolve_listen`]) and
+//!    binds its loopback twin on the same port ([`loopback_twin`]), so a
+//!    leader's HTTP side is reachable by tailnet peers and local tools, and by
+//!    nobody on the LAN or the internet. That is the difference from
+//!    `0.0.0.0`, which also answers on the tailnet but answers the coffee-shop
+//!    Wi-Fi too.
 //! 2. **Says where it is.** [`Status::to_value`] is `node.reach.tailnet` on
 //!    `GET /network`: the MagicDNS name, the addresses, and the URL a member
 //!    should be given.
@@ -64,9 +66,15 @@ pub const COMMAND_ENV: &str = "CAIRN_TAILSCALE";
 /// address or a `--node` URL.
 pub const KEYWORD: &str = "tailnet";
 
-/// Where the Mac App Store and standalone Tailscale apps keep the CLI, tried
-/// after `PATH`.
-const MAC_APP_CLI: &str = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+/// Where the CLI usually is when it is not on `PATH`, tried in order: a
+/// launchd agent's `PATH` is `/usr/bin:/bin:/usr/sbin:/sbin`, which has none
+/// of Homebrew's prefixes, and the Mac App Store and standalone apps keep the
+/// CLI inside the bundle.
+const FALLBACK_CLIS: [&str; 3] = [
+    "/opt/homebrew/bin/tailscale",
+    "/usr/local/bin/tailscale",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+];
 
 /// How long `tailscale status` may take. It answers from the local daemon in
 /// milliseconds; a daemon that is wedged should cost a node's start seconds,
@@ -277,7 +285,7 @@ pub fn parse_status(json: &[u8]) -> Result<Status, Error> {
 }
 
 /// The `tailscale` command to run: `$CAIRN_TAILSCALE`, else `tailscale` on
-/// `PATH`, else the Mac app's bundled CLI.
+/// `PATH`, else the usual install locations ([`FALLBACK_CLIS`]).
 fn command_path() -> Option<std::path::PathBuf> {
     if let Some(explicit) = std::env::var_os(COMMAND_ENV).filter(|v| !v.is_empty()) {
         return Some(explicit.into());
@@ -290,8 +298,11 @@ fn command_path() -> Option<std::path::PathBuf> {
             }
         }
     }
-    let mac = std::path::Path::new(MAC_APP_CLI);
-    mac.is_file().then(|| mac.to_path_buf())
+    FALLBACK_CLIS
+        .iter()
+        .map(std::path::Path::new)
+        .find(|path| path.is_file())
+        .map(std::path::Path::to_path_buf)
 }
 
 /// Ask the local Tailscale daemon who this machine is.
@@ -386,6 +397,19 @@ pub fn resolve_listen(
             )
         })?;
     Ok(SocketAddr::new(ip, port))
+}
+
+/// The loopback address on the same port as a tailnet listen address, which
+/// a `tailnet` listener also binds: this machine's own tools, its window and
+/// a systemd unit's `curl 127.0.0.1:8080/network` keep working, and loopback
+/// is exempt from the per-address connection cap a busy reader would hit.
+pub fn loopback_twin(addr: SocketAddr) -> SocketAddr {
+    let ip = if addr.is_ipv6() {
+        IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+    } else {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    };
+    SocketAddr::new(ip, addr.port())
 }
 
 /// Turn a `--node` value into a node URL, resolving `tailnet[:PORT]` to
@@ -542,6 +566,18 @@ mod tests {
         assert!(resolve_listen("nonsense", || Err(Error::NotInstalled)).is_err());
         let err = resolve_listen("tailnet:8080", || Err(Error::NotInstalled)).unwrap_err();
         assert!(err.contains("tailscale up"), "{err}");
+    }
+
+    #[test]
+    fn the_loopback_twin_keeps_the_port_and_the_family() {
+        assert_eq!(
+            loopback_twin("100.101.102.103:8080".parse().unwrap()),
+            "127.0.0.1:8080".parse().unwrap()
+        );
+        assert_eq!(
+            loopback_twin("[fd7a:115c:a1e0::1234]:9090".parse().unwrap()),
+            "[::1]:9090".parse().unwrap()
+        );
     }
 
     #[test]

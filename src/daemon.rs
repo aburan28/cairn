@@ -133,6 +133,11 @@ pub struct Config {
     pub fanout: usize,
     /// Publish the log over HTTP from this same process. `None` runs p2p only.
     pub serve: Option<String>,
+    /// Bind the HTTP side here too, on `serve`'s port once bound: the
+    /// loopback twin of a `tailnet` address ([`crate::tailnet::loopback_twin`]),
+    /// so this machine's own window and tools still reach a node that answers
+    /// nowhere else but its tailnet. `None` binds `serve` alone.
+    pub serve_also: Option<std::net::IpAddr>,
     /// Bound on undrained submissions, when serving.
     pub max_queued: usize,
     /// The at-rest key, when the log is sealed.
@@ -211,6 +216,7 @@ impl Config {
             queue: None,
             fanout: crate::p2p::service::DEFAULT_FANOUT,
             serve: None,
+            serve_also: None,
             max_queued: serve::DEFAULT_MAX_QUEUED,
             key_file: None,
             proxy: None,
@@ -665,12 +671,24 @@ fn bind_http(
     peers: (&str, Option<usize>),
     journal: crate::journal::Shared,
     agents: Option<crate::mcp::SharedPresence>,
-) -> Result<Option<(TcpListener, serve::Serving)>, String> {
+) -> Result<Option<(TcpListener, Vec<TcpListener>, serve::Serving)>, String> {
     let Some(addr) = &config.serve else {
         return Ok(None);
     };
     let listener = TcpListener::bind(addr.as_str())
         .map_err(|error| format!("cannot bind the HTTP listener on {addr}: {error}"))?;
+    let mut also = Vec::new();
+    if let Some(ip) = config.serve_also {
+        let port = listener
+            .local_addr()
+            .map_err(|error| format!("the HTTP listener on {addr}: {error}"))?
+            .port();
+        let twin = std::net::SocketAddr::new(ip, port);
+        also.push(
+            TcpListener::bind(twin)
+                .map_err(|error| format!("cannot bind the HTTP listener on {twin}: {error}"))?,
+        );
+    }
     let mut serving = serve::Serving::new(&config.log, &config.root);
     // The HTTP port, forwarded by the router only when the operator asks
     // (`CAIRN_PORTMAP_HTTP`): a fleet leader behind a home router that rented
@@ -744,7 +762,7 @@ fn bind_http(
     serving
         .check_startup()
         .map_err(|error| format!("cannot publish this log: {error}"))?;
-    Ok(Some((listener, serving)))
+    Ok(Some((listener, also, serving)))
 }
 
 /// Run the node until the process is killed.
@@ -1235,12 +1253,12 @@ pub fn run(config: Config) -> Result<(), String> {
 
     // The HTTP half. Spawned after the checkpoint exists, so the first request
     // for `/checkpoint` finds one.
-    if let Some((listener, serving)) = http {
+    if let Some((listener, also, serving)) = http {
         // `serve` reports its own address and mode; the extra line is about the
         // topology, which is the part that changed.
         log::info!("publishing over HTTP from this process");
         thread::spawn(move || {
-            if let Err(error) = serve::serve_on(listener, serving) {
+            if let Err(error) = serve::serve_on_all(listener, also, serving) {
                 // The p2p half is still a node, so this is not fatal -- but it
                 // is silent otherwise, and a node that stopped publishing an
                 // hour ago looks exactly like one that never was asked.

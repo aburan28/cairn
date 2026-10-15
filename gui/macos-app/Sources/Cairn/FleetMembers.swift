@@ -61,11 +61,18 @@ enum FleetFacts {
             + hosts.filter(live).compactMap { $0["host"] as? String }
     }
 
-    /// The address a machine elsewhere should dial this node at: the router's
-    /// public mapping of the HTTP port when there is one, else its first LAN
-    /// address, else nothing.
+    /// The address a machine elsewhere should dial this node at: its MagicDNS
+    /// URL when the node answers on its tailnet, else the router's public
+    /// mapping of the HTTP port when there is one, else its first LAN
+    /// address, else nothing. The tailnet comes first because a node serving
+    /// there may serve nowhere else, and when it does serve everywhere the
+    /// tailnet is still the path that is sealed and survives a NAT.
     static func joinAddress(_ network: [String: Any]) -> String? {
         let reach = (network["node"] as? [String: Any])?["reach"] as? [String: Any]
+        if let tailnet = reach?["tailnet"] as? [String: Any],
+           let url = tailnet["url"] as? String, !url.isEmpty {
+            return url
+        }
         if let external = reach?["external"] as? [String: Any],
            (external["status"] as? String) == "mapped",
            (external["public"] as? Bool) == true,
@@ -255,7 +262,7 @@ struct InviteSheet: View {
             }
             TextField("This Mac's address, as the machine will dial it", text: $address)
                 .font(.body.monospaced())
-            Text("Behind a home router, a machine elsewhere reaches this Mac only if the router forwards the HTTP port (`CAIRN_PORTMAP_HTTP=on`), which makes this node reachable from the internet. A cloud leader needs nothing.")
+            Text("Behind a home router, a machine elsewhere reaches this Mac only if the router forwards the HTTP port (`CAIRN_PORTMAP_HTTP=on`), which makes this node reachable from the internet, or over Tailscale (Settings → Fleet → Serve members over Tailscale), where it must run `tailscale up` before it joins. A cloud leader needs nothing.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let problem {
