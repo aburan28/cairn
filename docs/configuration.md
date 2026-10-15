@@ -43,7 +43,7 @@ and they are not conveniences.
 | `CAIRN_PUBLIC_URL` | unset | origin of this node behind its TLS proxy (`https://cairn.example`, no path), used to build the redirect when `CAIRN_GOOGLE_REDIRECT_URI` is unset |
 | `CAIRN_GOOGLE_COOKIE_SECURE` | on when the redirect is `https` | `1` sets the `Secure` cookie attribute, `0` leaves it off. A local plaintext node needs it off or the browser drops the session |
 | `CAIRN_PORTMAP_HTTP` | off | asks the router to forward the HTTP port as well (`on`, `natpmp`, `upnp`), so fleet members outside the LAN can reach a leader behind a home router. This makes the node reachable from the internet -- a public seed's surface -- so it is never the default, and an unreadable value is off. What the router said is on `GET /network` as `node.reach.external`. [fleet.md](fleet.md) |
-| `CAIRN_TAILSCALE` | `tailscale` on `PATH`, then the Mac app's bundled CLI | the `tailscale` command, for a launchd agent or systemd unit whose `PATH` does not have it. Read only when an address says `tailnet` (`--serve tailnet:8080`, `fleet invite --node tailnet:8080`), or when the HTTP side binds a tailnet address or every address, to report `node.reach.tailnet` on `GET /network`. [fleet.md](fleet.md#over-a-tailnet) |
+| `CAIRN_TAILSCALE` | `tailscale` on `PATH`, then `/opt/homebrew/bin`, `/usr/local/bin`, and the Tailscale app's bundled CLI | the `tailscale` command, for a launchd agent or systemd unit whose `PATH` does not have it. Read only when an address says `tailnet` (`--serve tailnet:8080`, `fleet invite --node tailnet:8080`), or when the HTTP side binds a tailnet address or every address, to report `node.reach.tailnet` on `GET /network`. [fleet.md](fleet.md#over-a-tailnet) |
 | `CAIRN_PORTMAP` | `auto` | asks the router in front of the node to forward the p2p port, so peers outside can dial in: `auto` tries NAT-PMP, then UPnP IGD; `natpmp` or `upnp` tries one; `off` asks nothing. Off regardless on a loopback listen (nothing outside the host can be forwarded to it) and, unless set, when dials go through `--proxy`. What the router said is on `GET /sessions` as `this_node.external` — a claim until a peer from outside dials in. [two-nodes.md](two-nodes.md) |
 | `CAIRN_LEDGER_FSYNC` | unset | `1` calls `fsync` after every append |
 | `CAIRN_LAB` | `./.cairn-lab` | the lab directory for `cairn lab`, when `--lab` is not given |
@@ -232,7 +232,7 @@ hashes and the same Merkle root. See [storage.md](storage.md).
 | Seeds dialled at start | `launch/seeds.json`, compiled in | `CAIRN_SEEDS=<file>`, or `off` |
 | Router port mapping | NAT-PMP, then UPnP IGD, for the P2P port | `CAIRN_PORTMAP=off`, `natpmp` or `upnp` |
 | Router port mapping of HTTP | off | `CAIRN_PORTMAP_HTTP=on`, `natpmp` or `upnp`: a leader behind a home router that fleet members elsewhere must reach |
-| HTTP side on the tailnet only | off | `--serve tailnet:8080`: bind this machine's Tailscale address and nothing else; members on the tailnet reach it over WireGuard, with no port forwarded |
+| HTTP side on the tailnet only | off | `--serve tailnet:8080`: bind this machine's Tailscale address and its loopback twin (`127.0.0.1:8080`) and nothing else; members on the tailnet reach it over WireGuard, with no port forwarded. Cairn.app: Settings → Fleet → *Serve members over Tailscale only* |
 | MCP | none — stdio | — |
 
 The defaults bind loopback, so a first `cairn run` exposes nothing. Binding

@@ -4648,6 +4648,9 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
         options.root.clone(),
     );
     config.serve = Some(serve.to_string());
+    if cairn::tailnet::is_keyword(&request.serve) {
+        config.serve_also = Some(cairn::tailnet::loopback_twin(serve).ip());
+    }
     config.key_file = options.key_file.as_ref().map(PathBuf::from);
     config.population = request.population.as_ref().map(PathBuf::from);
     config.bootstrap = request.bootstrap.iter().map(PathBuf::from).collect();
