@@ -78,6 +78,7 @@ use crate::piecework::Piecework;
 use crate::progress::{self, Board, Heartbeat};
 use crate::records::{Claim, Commitment, Objective};
 use crate::secrets;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Largest request body accepted, in bytes.
 ///
@@ -234,6 +235,7 @@ impl Spool {
     /// over, and a retry is idempotent rather than a duplicate.
     pub fn offer(&self, kind: &str, body: &Value) -> Result<String, OfferError> {
         std::fs::create_dir_all(&self.dir).map_err(OfferError::Io)?;
+        let _lock = self.queue_lock().map_err(OfferError::Io)?;
         let record = Value::object([("kind", Value::string(kind)), ("record", body.clone())]);
         let bytes = record.canonical_bytes();
         let id = digest_bytes(&bytes);
@@ -243,6 +245,17 @@ impl Spool {
         // no space, so refusing it would turn a full queue into a wall even
         // for submitters whose work is already safely in it.
         if path.exists() {
+            if self.receipt(&id).is_none() {
+                self.write_receipt(
+                    &id,
+                    kind,
+                    &record_id(kind, body),
+                    "queued",
+                    "Waiting for this node to admit the proposal.",
+                    &crate::time::timestamp(),
+                )
+                .map_err(OfferError::Io)?;
+            }
             return Ok(id);
         }
         let queued = self.queued();
@@ -252,10 +265,107 @@ impl Spool {
                 limit: self.max_queued,
             }));
         }
-        let tmp = self.dir.join(format!("{name}.json.tmp"));
-        std::fs::write(&tmp, &bytes).map_err(OfferError::Io)?;
+        // Concurrent retries must not rename each other's temporary file.
+        static NEXT_OFFER: AtomicU64 = AtomicU64::new(0);
+        let tmp = self.dir.join(format!(
+            "{name}.{}.{}.tmp",
+            std::process::id(),
+            NEXT_OFFER.fetch_add(1, Ordering::Relaxed)
+        ));
+        durable_write(&tmp, &bytes).map_err(OfferError::Io)?;
+        self.write_receipt(
+            &id,
+            kind,
+            &record_id(kind, body),
+            "queued",
+            "Waiting for this node to admit the proposal.",
+            &crate::time::timestamp(),
+        )
+        .map_err(OfferError::Io)?;
         std::fs::rename(&tmp, &path).map_err(OfferError::Io)?;
+        sync_directory(&self.dir).map_err(OfferError::Io)?;
         Ok(id)
+    }
+
+    /// Node-local tracking, never a ledger record or a payment decision.
+    pub fn receipt(&self, id: &str) -> Option<Value> {
+        let name = receipt_name(id)?;
+        let text =
+            std::fs::read_to_string(self.dir.join("receipts").join(format!("{name}.json"))).ok()?;
+        let receipt = Value::from_json(&text).ok()?;
+        (receipt.get("queued").and_then(Value::as_str) == Some(id)).then_some(receipt)
+    }
+
+    fn save_receipt(
+        &self,
+        id: &str,
+        kind: &str,
+        record: &str,
+        status: &str,
+        note: &str,
+        ts: &str,
+    ) -> io::Result<()> {
+        let _lock = self.queue_lock()?;
+        self.write_receipt(id, kind, record, status, note, ts)
+    }
+
+    fn queue_lock(&self) -> io::Result<std::fs::File> {
+        std::fs::create_dir_all(&self.dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.dir.join("receipts.lock"))?;
+        file.lock()?;
+        Ok(file)
+    }
+
+    fn write_receipt(
+        &self,
+        id: &str,
+        kind: &str,
+        record: &str,
+        status: &str,
+        note: &str,
+        ts: &str,
+    ) -> io::Result<()> {
+        let name = receipt_name(id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid receipt id"))?;
+        let dir = self.dir.join("receipts");
+        std::fs::create_dir_all(&dir)?;
+        let receipt = Value::object([
+            ("queued", Value::string(id)),
+            ("kind", Value::string(kind)),
+            ("record_id", Value::string(record)),
+            ("status", Value::string(status)),
+            (
+                "note",
+                Value::string(note.chars().take(4096).collect::<String>()),
+            ),
+            ("updated_at", Value::string(ts)),
+        ]);
+        let tmp = dir.join(format!("{name}.tmp"));
+        durable_write(&tmp, &receipt.canonical_bytes())?;
+        std::fs::rename(tmp, dir.join(format!("{name}.json")))?;
+        sync_directory(&dir)?;
+        // Retain a bounded history. Pending receipts are never evicted.
+        let mut terminal: Vec<_> = std::fs::read_dir(&dir)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .filter(|entry| {
+                entry.file_name() != format!("{name}.json").as_str()
+                    && !self.dir.join(entry.file_name()).exists()
+            })
+            .collect();
+        terminal.sort_by_key(|entry| entry.metadata().and_then(|meta| meta.modified()).ok());
+        let excess = terminal
+            .len()
+            .saturating_sub(DEFAULT_MAX_QUEUED - usize::from(status != "queued"));
+        for entry in terminal.into_iter().take(excess) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+        Ok(())
     }
 
     /// Every queued record, oldest file first, as `(path, kind, record)`.
@@ -288,6 +398,44 @@ impl Spool {
     /// Remove a drained file.
     pub fn take(&self, path: &Path) -> io::Result<()> {
         std::fs::remove_file(path)
+    }
+}
+
+fn durable_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn receipt_name(id: &str) -> Option<&str> {
+    let name = id.strip_prefix("sha256:")?;
+    (name.len() == 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then_some(name)
+}
+
+fn record_id(kind: &str, value: &Value) -> String {
+    match kind {
+        "objective" => Objective::from_value(value)
+            .map(|record| record.id())
+            .unwrap_or_default(),
+        "commitment" => Commitment::from_value(value)
+            .map(|record| record.id())
+            .unwrap_or_default(),
+        "claim" => Claim::from_value(value)
+            .map(|record| record.id())
+            .unwrap_or_default(),
+        _ => String::new(),
     }
 }
 
@@ -329,60 +477,76 @@ pub fn drain_into(
 ) -> Vec<(PathBuf, Admission)> {
     let mut out = Vec::new();
     for (path, kind, record) in spool.pending() {
-        let outcome = match kind.as_str() {
-            // Deliberately first, and deliberately no different in kind from
-            // the two below it: a queued objective is a *proposal to spend*
-            // that `post_objective` re-decides from the whole log -- verifier
-            // registration, duplicate id, ratchet coherence, the funding
-            // signature, and whether the funder can afford it in the right
-            // tier. None of that is re-implemented here, which is the same
-            // reason `commit` and `reveal` are called rather than inlined.
-            "objective" => Objective::from_value(&record)
-                .map_err(|error| error.to_string())
-                .and_then(|objective| {
-                    if dry_run {
-                        return Ok(String::from("would admit objective"));
-                    }
-                    node.post_objective(&objective, ts)
-                        .map(|id| {
-                            format!(
-                                "objective {}  reward {}",
-                                crate::canonical::short(&id),
-                                objective.reward
-                            )
-                        })
-                        .map_err(|violation| violation.to_string())
-                }),
-            "commitment" => Commitment::from_value(&record)
-                .map_err(|error| error.to_string())
-                .and_then(|commitment| {
-                    if dry_run {
-                        return Ok(String::from("would admit commitment"));
-                    }
-                    node.commit(&commitment, ts)
-                        .map(|id| format!("commitment {}", crate::canonical::short(&id)))
-                        .map_err(|violation| violation.to_string())
-                }),
-            "claim" => Claim::from_value(&record)
-                .map_err(|error| error.to_string())
-                .and_then(|claim| {
-                    crate::schema::validate_claim(&claim.to_value())
-                        .map_err(|error| error.to_string())?;
-                    if dry_run {
-                        return Ok(String::from("would admit claim"));
-                    }
-                    node.reveal(&claim, ts)
-                        .map(|outcome| {
-                            format!(
-                                "claim {}  {}  reward {}",
-                                crate::canonical::short(&outcome.claim_id),
-                                outcome.verdict.status.as_str(),
-                                outcome.reward
-                            )
-                        })
-                        .map_err(|violation| violation.to_string())
-                }),
-            other => Err(format!("unknown record kind {other:?}")),
+        let id = record_id(&kind, &record);
+        // Recover a crash between ledger append and receipt publication. The
+        // already-admitted bytes remain the authority, not a receipt file.
+        let already = !id.is_empty()
+            && node
+                .ledger()
+                .entries()
+                .iter()
+                .any(|entry| entry.kind == kind && record_id(&kind, &entry.payload) == id);
+        let outcome = if already && !dry_run {
+            Ok(format!(
+                "{kind} {} already admitted",
+                crate::canonical::short(&id)
+            ))
+        } else {
+            match kind.as_str() {
+                // Deliberately first, and deliberately no different in kind from
+                // the two below it: a queued objective is a *proposal to spend*
+                // that `post_objective` re-decides from the whole log -- verifier
+                // registration, duplicate id, ratchet coherence, the funding
+                // signature, and whether the funder can afford it in the right
+                // tier. None of that is re-implemented here, which is the same
+                // reason `commit` and `reveal` are called rather than inlined.
+                "objective" => Objective::from_value(&record)
+                    .map_err(|error| error.to_string())
+                    .and_then(|objective| {
+                        if dry_run {
+                            return Ok(String::from("would admit objective"));
+                        }
+                        node.post_objective(&objective, ts)
+                            .map(|id| {
+                                format!(
+                                    "objective {}  reward {}",
+                                    crate::canonical::short(&id),
+                                    objective.reward
+                                )
+                            })
+                            .map_err(|violation| violation.to_string())
+                    }),
+                "commitment" => Commitment::from_value(&record)
+                    .map_err(|error| error.to_string())
+                    .and_then(|commitment| {
+                        if dry_run {
+                            return Ok(String::from("would admit commitment"));
+                        }
+                        node.commit(&commitment, ts)
+                            .map(|id| format!("commitment {}", crate::canonical::short(&id)))
+                            .map_err(|violation| violation.to_string())
+                    }),
+                "claim" => Claim::from_value(&record)
+                    .map_err(|error| error.to_string())
+                    .and_then(|claim| {
+                        crate::schema::validate_claim(&claim.to_value())
+                            .map_err(|error| error.to_string())?;
+                        if dry_run {
+                            return Ok(String::from("would admit claim"));
+                        }
+                        node.reveal(&claim, ts)
+                            .map(|outcome| {
+                                format!(
+                                    "claim {}  {}  reward {}",
+                                    crate::canonical::short(&outcome.claim_id),
+                                    outcome.verdict.status.as_str(),
+                                    outcome.reward
+                                )
+                            })
+                            .map_err(|violation| violation.to_string())
+                    }),
+                other => Err(format!("unknown record kind {other:?}")),
+            }
         };
         let admission = match outcome {
             Ok(note) => Admission {
@@ -398,6 +562,27 @@ pub fn drain_into(
                 admitted: false,
             },
         };
+        if !dry_run {
+            let queued = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .map(|name| format!("sha256:{name}"))
+                .unwrap_or_default();
+            if let Err(error) = spool.save_receipt(
+                &queued,
+                &kind,
+                &id,
+                if admission.admitted {
+                    "admitted"
+                } else {
+                    "refused"
+                },
+                &admission.note,
+                ts,
+            ) {
+                log::warn!("cannot publish submission receipt: {error}");
+            }
+        }
         out.push((path, admission));
     }
     out
@@ -414,6 +599,9 @@ pub struct Serving {
     log: PathBuf,
     root: PathBuf,
     spool: Option<Spool>,
+    /// Only operator-selected labs are public. Run recipes can contain
+    /// private parameters; discovering a lab on disk is not consent to share.
+    workspaces: Vec<PathBuf>,
     checkpoint: Option<PathBuf>,
     /// Node-local deposit configs and outstanding grants.
     ///
@@ -537,6 +725,9 @@ impl Serving {
             log,
             root: root.into(),
             spool: None,
+            workspaces: std::env::var_os("CAIRN_LAB_HTTP")
+                .map(|paths| std::env::split_paths(&paths).collect())
+                .unwrap_or_default(),
             checkpoint: None,
             deposits,
             key: None,
@@ -945,6 +1136,12 @@ impl Serving {
         self
     }
 
+    /// Explicitly publish a lab's history, run recipes and output metadata.
+    pub fn sharing_lab(mut self, dir: impl Into<PathBuf>) -> Serving {
+        self.workspaces.push(dir.into());
+        self
+    }
+
     /// Bound how many undrained submissions the queue will hold. See
     /// [`DEFAULT_MAX_QUEUED`]. No effect on a read-only server.
     pub fn with_max_queued(mut self, max_queued: usize) -> Serving {
@@ -1328,6 +1525,13 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") | ("GET", "/index") => index(stream, serving),
         ("GET", "/health") => respond(stream, 200, "text/plain", b"ok\n"),
+        ("GET", "/workspaces") => workspaces(stream, serving, None),
+        ("GET", path) if path.starts_with("/workspace/") => {
+            workspaces(stream, serving, Some(&path["/workspace/".len()..]))
+        }
+        ("GET", path) if path.starts_with("/submissions/") => {
+            submission_receipt(stream, serving, &path["/submissions/".len()..])
+        }
         ("GET", "/auth") => auth_status(stream, serving, &request),
         ("GET", "/auth/google") => auth_start(stream, serving, &request),
         ("GET", "/auth/google/callback") => auth_callback(stream, serving, &request),
@@ -4060,12 +4264,115 @@ fn checkpoint(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     }
 }
 
-/// Accept a proposed record into the spool.
-///
-/// Validated only as far as "this is a well-formed record of a kind the node
-/// knows". Whether it may enter the log is decided by the rules engine when
-/// the operator drains the queue, against the whole log -- doing it here would
-/// put a second copy of the admission rules on the network boundary.
+fn workspaces(
+    stream: &mut TcpStream,
+    serving: &Serving,
+    selection: Option<&str>,
+) -> io::Result<()> {
+    use crate::lab::{op, store::Lab, sync};
+    let mut labs = Vec::new();
+    let mut unavailable = 0;
+    for dir in &serving.workspaces {
+        match Lab::open(dir) {
+            Ok(lab) => labs.push(lab),
+            Err(_) => unavailable += 1,
+        }
+    }
+    let Some(selection) = selection else {
+        return json(stream, if labs.is_empty() && unavailable > 0 { 503 } else { 200 }, &Value::object([
+            ("workspaces", Value::array(labs.iter().map(crate::workspace::summary))),
+            ("unavailable", Value::Int(unavailable)),
+            ("note", Value::string("Only explicitly published labs appear here. The operator sets CAIRN_LAB_HTTP to a list of lab directories to publish their history and recipes. Private labs stay private.")),
+        ]));
+    };
+    let (space, blob) = selection
+        .split_once("/blob/")
+        .map(|(space, blob)| (space, Some(blob)))
+        .unwrap_or((selection, None));
+    if op::digest(space).is_err() {
+        return json_error(stream, 400, "invalid workspace id");
+    }
+    let Some(lab) = labs.iter().find(|lab| lab.space() == space) else {
+        return json_error(
+            stream,
+            if unavailable > 0 { 503 } else { 404 },
+            "this workspace is not published or could not be read",
+        );
+    };
+    if let Some(blob) = blob {
+        if op::blob_address(blob).is_err() || !sync::referenced_blobs(lab).contains(blob) {
+            return json_error(stream, 404, "no such published input or output");
+        }
+        if lab.blobs().size(blob).unwrap_or(u64::MAX) > MAX_BODY_BYTES {
+            return json_error(
+                stream,
+                413,
+                "use lab sync for blobs larger than the HTTP body limit",
+            );
+        }
+        if !lab.blobs().verify(blob).unwrap_or(false) {
+            return json_error(
+                stream,
+                503,
+                "this blob is missing or damaged; nothing was learned about the candidate",
+            );
+        }
+        return match lab.blobs().read(blob) {
+            Ok(bytes) => respond(stream, 200, "application/octet-stream", &bytes),
+            Err(_) => json_error(stream, 503, "the blob could not be read"),
+        };
+    }
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(error) => return json_error(stream, 503, &error),
+    };
+    json(stream, 200, &crate::workspace::view(lab, &node))
+}
+
+fn submission_receipt(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<()> {
+    let Some(name) = receipt_name(id) else {
+        return json_error(stream, 400, "invalid submission receipt id");
+    };
+    let Some(spool) = &serving.spool else {
+        return json_error(stream, 404, "this node has no submission queue");
+    };
+    // A queued receipt is written before its proposal is published. Read
+    // both under the offer lock so that short interval never looks lost.
+    let _lock = spool.queue_lock()?;
+    let Some(mut receipt) = spool.receipt(id) else {
+        return json_error(stream, 404, "unknown or expired submission receipt");
+    };
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(error) => return json_error(stream, 503, &format!("could not read the log: {error}")),
+    };
+    let record = receipt
+        .get("record_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let kind = receipt.get("kind").and_then(Value::as_str).unwrap_or("");
+    let admitted = node
+        .ledger()
+        .entries()
+        .iter()
+        .any(|entry| entry.kind == kind && entry.payload.digest() == record);
+    if let Value::Object(ref mut fields) = receipt {
+        if admitted {
+            fields.insert("status".into(), Value::string("admitted"));
+            fields.insert("note".into(), Value::string("This record is in this node's log. Admission is separate from verification and settlement."));
+        } else if fields.get("status").and_then(Value::as_str) == Some("admitted")
+            || (fields.get("status").and_then(Value::as_str) == Some("queued")
+                && !spool.dir.join(format!("{name}.json")).exists())
+        {
+            fields.insert("status".into(), Value::string("unknown"));
+            fields.insert("note".into(), Value::string("This node cannot confirm the receipt's outcome. Refresh or inspect the submitted record; elapsed time does not establish admission or refusal."));
+        }
+    }
+    json(stream, 200, &receipt)
+}
+
+/// Queuing is deliberately not admission. Only the drain's rules engine can
+/// decide against the whole log; the HTTP boundary stores a proposal.
 fn submit(
     stream: &mut TcpStream,
     serving: &Serving,
@@ -4209,6 +4516,7 @@ fn submit(
                 &Value::object([
                     ("reason", Value::string("queued")),
                     ("queued", Value::string(id)),
+                    ("record_id", Value::string(record_id(&kind, &value))),
                     ("kind", Value::string(kind)),
                     ("wait", wait),
                     (
@@ -4230,9 +4538,8 @@ fn submit(
                         Value::string(
                             "Queued, not admitted. The operator's node re-derives every rule \
                          against the whole log when it drains the queue -- epoch, citations, \
-                         duplicate artifacts -- so this is a proposal and not a receipt. \
-                         Watch GET /log for the record, and GET /frontier/{id} for the \
-                         outcome.",
+                         duplicate artifacts. Track this receipt at GET /submissions/{queued}. \
+                         Admission is separate from verification and settlement.",
                         ),
                     ),
                 ]),
@@ -5646,6 +5953,222 @@ mod tests {
         let other = spool.offer("commitment", &different).expect("offer");
         assert_ne!(first, other);
         assert_eq!(spool.pending().len(), 2);
+    }
+
+    #[test]
+    fn submission_receipts_survive_drain_restart_and_an_interrupted_append() {
+        let dir = TempDir::new("receipts");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").unwrap();
+        let queue = dir.path.join("queue");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let serving = Serving::new(&log, ".").accepting_into(&queue);
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let get = |id: &str| {
+            let response = http(
+                addr,
+                &format!("GET /submissions/{id} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+            );
+            (response.status, Value::from_json(&response.body).unwrap())
+        };
+        let body = draft("receipt-test");
+        let (status, offered) = ask_json(addr, "/submit?kind=objective", &body.canonical_string());
+        assert!(status.contains("202"), "{offered:?}");
+        let id = offered.get("queued").unwrap().as_str().unwrap();
+        assert_eq!(
+            get(id).1.get("status").and_then(Value::as_str),
+            Some("queued")
+        );
+        let spool = Spool::at(&queue);
+        let mut node = Node::new(Ledger::open(&log).unwrap(), ".");
+        let admitted = drain_into(&mut node, &spool, "2026-01-01T00:00:10+00:00", false);
+        assert!(admitted[0].1.admitted, "{}", admitted[0].1.note);
+        spool.take(&admitted[0].0).unwrap();
+        // Re-open the queue, including a retry after a crash left only the
+        // ledger append. The log must win over an outdated queued receipt.
+        let restarted = Spool::at(&queue);
+        assert_eq!(
+            get(id).1.get("status").and_then(Value::as_str),
+            Some("admitted")
+        );
+        restarted.offer("objective", &body).unwrap();
+        assert_eq!(
+            get(id).1.get("status").and_then(Value::as_str),
+            Some("admitted")
+        );
+        let retried = drain_into(&mut node, &restarted, "2026-01-01T00:00:11+00:00", false);
+        assert!(retried[0].1.admitted);
+        assert_eq!(node.objectives().len(), 1);
+        restarted.take(&retried[0].0).unwrap();
+
+        let mut bad = draft("receipt-test");
+        if let Value::Object(fields) = &mut bad {
+            fields.insert(
+                "verifier".into(),
+                Value::object([("kind", Value::string("not-installed"))]),
+            );
+        }
+        let (status, offered) = ask_json(addr, "/submit?kind=objective", &bad.canonical_string());
+        assert!(status.contains("202"), "{offered:?}");
+        let refused_id = offered.get("queued").unwrap().as_str().unwrap();
+        let refused = drain_into(&mut node, &restarted, "2026-01-01T00:00:12+00:00", false);
+        assert!(!refused[0].1.admitted);
+        restarted.take(&refused[0].0).unwrap();
+        let receipt = get(refused_id).1;
+        assert_eq!(
+            receipt.get("status").and_then(Value::as_str),
+            Some("refused")
+        );
+        assert_eq!(
+            receipt.get("note").and_then(Value::as_str),
+            Some(refused[0].1.note.as_str())
+        );
+        // A later retry is evaluated against the new context, rather than
+        // permanently caching an epoch- or balance-dependent refusal.
+        restarted.offer("objective", &bad).unwrap();
+        let pending = restarted.pending();
+        restarted.take(&pending[0].0).unwrap();
+        assert_eq!(
+            get(refused_id).1.get("status").and_then(Value::as_str),
+            Some("unknown")
+        );
+        assert!(get("sha256:../receipts").0.contains("400"));
+        assert!(get(&format!("sha256:{}", "a".repeat(64))).0.contains("404"));
+    }
+
+    #[test]
+    fn concurrent_submission_retries_publish_one_intact_receipt() {
+        let dir = TempDir::new("receipt-retries");
+        let spool = Arc::new(Spool::at(dir.path.join("queue")));
+        std::thread::scope(|scope| {
+            for _ in 0..7 {
+                let spool = spool.clone();
+                scope.spawn(move || {
+                    spool.offer("objective", &draft("concurrent")).unwrap();
+                });
+            }
+        });
+        assert_eq!(spool.queued(), 1);
+        let id = spool.offer("objective", &draft("concurrent")).unwrap();
+        assert_eq!(
+            spool
+                .receipt(&id)
+                .unwrap()
+                .get("status")
+                .and_then(Value::as_str),
+            Some("queued")
+        );
+        assert_eq!(spool.pending().len(), 1);
+    }
+
+    #[test]
+    fn only_operator_published_workspaces_and_referenced_blobs_are_readable() {
+        use crate::lab::{
+            op::{Body, FileEntry, Policy},
+            store::Lab,
+        };
+        let dir = TempDir::new("public-workspace");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").unwrap();
+        let identity = Identity::from_secret_bytes([149; 32]);
+        let mut lab = Lab::init(
+            &dir.path.join("lab"),
+            &identity,
+            "Shared experiment",
+            vec![],
+            Policy::default(),
+        )
+        .unwrap();
+        let bytes = br#"{"n":27}"#;
+        let blob = lab.blobs().put_bytes(bytes).unwrap();
+        let private = lab.blobs().put_bytes(b"unreferenced private data").unwrap();
+        lab.append(
+            &identity,
+            Body::Run {
+                receipt: Value::object([("claimed_frontier", Value::Bool(true))]),
+                files: vec![FileEntry {
+                    path: "runs/test/artifact.json".into(),
+                    blob: Some(blob.clone()),
+                    size: bytes.len() as u64,
+                    exec: false,
+                    pred: vec![],
+                }],
+            },
+        )
+        .unwrap();
+        let start = |mut serving: Serving| {
+            serving.workspaces.clear();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                let _ = serve_on(listener, serving);
+            });
+            addr
+        };
+        let hidden = start(Serving::new(&log, &dir.path));
+        let request = |addr, path: &str| {
+            http(
+                addr,
+                &format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+            )
+        };
+        let listing = request(hidden, "/workspaces");
+        assert_eq!(
+            Value::from_json(&listing.body)
+                .unwrap()
+                .get("workspaces")
+                .and_then(Value::as_array)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(request(hidden, &format!("/workspace/{}", lab.space()))
+            .status
+            .contains("404"));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let published = listener.local_addr().unwrap();
+        let mut serving = Serving::new(&log, &dir.path);
+        serving.workspaces.clear();
+        let serving = serving.sharing_lab(lab.root());
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let report = request(published, &format!("/workspace/{}", lab.space()));
+        assert!(report.status.contains("200"), "{}", report.body);
+        let view = Value::from_json(&report.body).unwrap();
+        assert_eq!(
+            view.get("frontier"),
+            Some(&Value::Null),
+            "a lab receipt cannot promote itself"
+        );
+        let candidate = &view.get("runs").unwrap().as_array().unwrap()[0]
+            .get("candidates")
+            .unwrap()
+            .as_array()
+            .unwrap()[0];
+        assert!(candidate
+            .get("claims")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let content = request(
+            published,
+            &format!("/workspace/{}/blob/{blob}", lab.space()),
+        );
+        assert_eq!(content.body.as_bytes(), bytes);
+        assert!(request(
+            published,
+            &format!("/workspace/{}/blob/{private}", lab.space())
+        )
+        .status
+        .contains("404"));
+        assert!(request(published, "/workspace/../private")
+            .status
+            .contains("400"));
     }
 
     #[test]

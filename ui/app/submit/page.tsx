@@ -32,6 +32,7 @@ import { nodeAnswers } from "@/lib/site";
 import { useEvery, useNode } from "@/components/hooks";
 import { Badge, Card, Hash, Note, PageHeader, SectionHeading } from "@/components/ui";
 import { VoiceInput } from "@/components/VoiceInput";
+import { SubmissionTracker } from "@/components/SubmissionTracker";
 
 /**
  * Post a challenge, funded by a key a wallet holds.
@@ -109,6 +110,7 @@ export default function Page() {
   const [prepared, setPrepared] = useState<Prepared | null>(null);
   const [signature, setSignature] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<Queued | null>(null);
+  const [receiptAttempt, setReceiptAttempt] = useState(0);
   const [busy, setBusy] = useState<null | "preparing" | "signing" | "submitting">(null);
   const [error, setError] = useState<string | null>(null);
   // Edits and newer authorization requests supersede any outstanding file,
@@ -119,9 +121,18 @@ export default function Page() {
     draftRevision.current += 1;
     setPrepared(null);
     setSignature(null);
-    setReceipt(null);
     setError(null);
   }, []);
+
+  // Keep a receipt through edits and a reload; authorization never goes into
+  // browser storage. Scope it to the actual node, since receipts are local.
+  useEffect(() => {
+    if (base === null) return;
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(`cairn-submission:${base}`) ?? "null");
+      if (saved && /^sha256:[a-f0-9]{64}$/.test(saved.queued) && typeof saved.note === "string" && typeof saved.kind === "string") setReceipt(saved);
+    } catch { /* Storage may be disabled. Tracking links still work. */ }
+  }, [base]);
 
   // `created_at` is fixed when the page loads rather than at submit time. It is
   // inside the objective's id, so a value that moved between "prepare" and
@@ -296,7 +307,11 @@ export default function Page() {
     try {
       const signed = signature ? { ...record, funding_signature: signature } : record;
       const next = await submit(signed, base ?? "");
-      if (revision === draftRevision.current) setReceipt(next);
+      if (revision === draftRevision.current) {
+        setReceipt(next);
+        setReceiptAttempt((attempt) => attempt + 1);
+        try { sessionStorage.setItem(`cairn-submission:${base ?? ""}`, JSON.stringify(next)); } catch { /* Optional recovery. */ }
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -1173,30 +1188,7 @@ export default function Page() {
               </Card>
             )}
 
-            {receipt && (
-              <Card className="card-pad">
-                <SectionHeading>Queued</SectionHeading>
-                <div className="flex items-center gap-2 text-[12.5px] text-ink-2">
-                  <Badge tone="accent">accepted into the queue</Badge>
-                </div>
-                <div className="mt-2 flex items-center gap-2 text-[12.5px] text-ink-2">
-                  <span>spool id</span>
-                  <Hash value={receipt.queued} chars={10} />
-                </div>
-                {/* The node's own words, not a paraphrase. It is the one place
-                    that can say what a queue receipt is worth, and softening it
-                    here is how a proposal starts reading as a confirmation. */}
-                <p className="hint">{receipt.note}</p>
-                <div className="mt-3 flex gap-2">
-                  <Link href="/objectives" className="btn btn-sm">
-                    Watch objectives
-                  </Link>
-                  <Link href="/log" className="btn btn-sm">
-                    Watch the log
-                  </Link>
-                </div>
-              </Card>
-            )}
+            {receipt && base !== null && <SubmissionTracker key={`${base}:${receipt.queued}:${receiptAttempt}`} receipt={receipt} base={base} />}
 
           </div>
         </aside>

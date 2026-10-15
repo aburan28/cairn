@@ -1,0 +1,9 @@
+{
+  "available": false,
+  "lost": 0,
+  "note": "This process runs no p2p service: it is a plain `cairn serve`, publishing a log another process writes. Sessions live in the process that reconciles -- `cairn run`, or `cairn p2p --serve` -- and its /sessions answers them.",
+  "peers": [],
+  "reached": 0,
+  "recent": 0,
+  "unreached": 0
+}

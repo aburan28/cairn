@@ -282,3 +282,27 @@ read every route it answers; then write the route before the view. Half a
 day of reading, and the finding that mattered -- four readers, one
 disclaimer -- was visible in the first hour from `grep -rn "not open
 connections\|not live sessions\|serves no HTTP"` across `ui/` and `gui/`.
+
+
+## 6. Resolution, 15 October 2026
+
+This is the status of the source changes following the original assessment,
+not a claim that Linux exercised an AppKit or iOS window.
+
+| original finding | resolution |
+|---|---|
+| §2.1, §2.2, §4.1 session/fleet blind spots | Cairn.app polls `/sessions` and `/network` independently of stderr, cancels superseded reads, uses the windowed reached count after HTTP answers and exposes a Connected peers tab. Connectivity reads the route too, including for attached publishers; role warnings appear in Settings. |
+| §4.1 navigation | Network is in the Node menu; its shortcut is ⇧⌘G because Work on This Mac already uses ⇧⌘W. Tasks also opens Coordination. |
+| §4.2 autoresearcher | Reached peers and reported live compute are separate tiles. Connected, Announced and Network panes share the report views. Curated work links to Coordination. Retargeted/failed probes cannot restore another node's data; health requires the `ok` body. |
+| §4.3 phone | `CairnKit` reads the shared session/network decoders; Peers has a live session section and Network has five tiles, hardware classes, the fleet and evidenced roles. Both are reachable from RootView and distinguish missing live data from the snapshot. A successful empty objective list remains empty. |
+| §2.5 shared native chrome | `gui/shared` now owns endpoint URL handling, report decoders/client, session/network panels, secret value entry and ASCII-name validation, the curated task catalogue and external-navigation policy. The autoresearcher WebView also preserves user navigation between refreshes. The specialized process owners remain separate: Cairn.app owns `cairn run` and its stdin; the researcher launcher owns the Python process and its disk status. Combining these different lifecycles into one window remains an architectural option, not a prerequisite for the shared reader fixes. |
+| §2.7 shared web reads | `useNodeRead` handles discovery, stale data, cleanup and non-overlapping refresh for Task, Peers, Network, coordination's chooser, Log records and the new workspace. Specialized event cursors/partition reads use the same `useNode`/`useEvery` primitives. |
+| §2.8 strips | Both have keyboard-readable details, with inclusive unit bounds and browser coverage. |
+| §4.4 chooser | `coordinatedObjectives` lives in `lib/leases.ts`, tested with mixed objective kinds, closed work and reward ordering. |
+| §2.9 reproducible browser sweep | The isolated reader fixture runs in CI and the release reader job; the UI artifact is packaged only after the gate passes. |
+| §2.9 compute status | The docs now say `src/compute.rs` is written, not wired, compiled or tested. This review does not claim an inference routing service exists. |
+
+The shared Swift package has portable fixture/client/navigation tests. Native
+sources and all three package manifests are syntax-checked here; macOS and
+simulator build gates compile the platform views. Native runtime behavior
+still needs its actual operating system.

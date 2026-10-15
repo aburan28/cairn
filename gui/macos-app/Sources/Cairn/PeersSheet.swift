@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import CairnNodeUI
 
 /// Adding a peer, both halves of it, and reading off what to give someone
 /// adding this node.
@@ -14,7 +15,7 @@ struct PeersSheet: View {
     @ObservedObject var node: Node
     @Binding var isPresented: Bool
 
-    @State private var tab = "announce"
+    @State private var tab = "connected"
     @State private var transport = ""
     @State private var addr = ""
     @State private var busy = false
@@ -46,18 +47,19 @@ struct PeersSheet: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
             Picker("", selection: $tab) {
+                Text("Connected").tag("connected")
                 Text("Announce in the log").tag("announce")
                 Text("Bootstrap file").tag("bootstrap")
                 Text("This node").tag("self")
             }
             .pickerStyle(.segmented)
-            .disabled(node.isAttached && tab != "self")
 
             Group {
                 switch tab {
-                case "bootstrap": bootstrapTab
+                case "connected": connectedTab
+                case "bootstrap": bootstrapTab.disabled(node.isAttached)
                 case "self": selfTab
-                default: announceTab
+                default: announceTab.disabled(node.isAttached)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -81,6 +83,16 @@ struct PeersSheet: View {
     }
 
     // MARK: announce
+
+    private var connectedTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                if node.reportsStale { Text("The latest read failed. Any displayed observations are from the last successful read; retrying every 15 seconds.").foregroundStyle(.orange) }
+                if let report = node.sessionReport { SessionsPanel(report) }
+                else { Text("Waiting for this node’s /sessions report. Older nodes need an update; a stopped node has no live roster.").foregroundStyle(.secondary) }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
 
     private var announceTab: some View {
         VStack(alignment: .leading, spacing: 10) {

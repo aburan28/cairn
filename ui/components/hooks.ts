@@ -9,7 +9,7 @@
  * page re-read every 20 s, another never, a third kept polling a hidden tab.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { resolveNode } from "@/lib/site";
 
 /**
@@ -28,6 +28,44 @@ export function useNode(): string | null {
     };
   }, []);
   return base;
+}
+
+/** Share discovery, stale-data retention, non-overlapping reads and cleanup.
+ * A changed key discards the old answer; refreshing the same key keeps it. */
+export function useNodeRead<T>(read: (base: string) => Promise<T>, { seconds = 20, key = "", enabled = true } = {}) {
+  const base = useNode();
+  const [value, setValue] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [failure, setFailure] = useState<unknown>(null);
+  const [readAt, setReadAt] = useState<Date | null>(null);
+  const [loading, setLoading] = useState(false);
+  const latest = useRef(read);
+  latest.current = read;
+  const generation = useRef(0);
+  const pending = useRef(false);
+  useEffect(() => {
+    generation.current += 1;
+    pending.current = false;
+    setValue(null); setError(null); setFailure(null); setReadAt(null);
+    return () => { generation.current += 1; };
+  }, [base, key]);
+  const refresh = useCallback(async () => {
+    if (base === null || !enabled || pending.current) return;
+    const version = generation.current;
+    pending.current = true;
+    setLoading(true);
+    try {
+      const next = await latest.current(base);
+      if (version !== generation.current) return;
+      setValue(next); setReadAt(new Date()); setError(null); setFailure(null);
+    } catch (cause) {
+      if (version === generation.current) { setError(cause instanceof Error ? cause.message : String(cause)); setFailure(cause); }
+    } finally {
+      if (version === generation.current) { pending.current = false; setLoading(false); }
+    }
+  }, [base, enabled]);
+  useEvery(refresh, seconds, enabled && base !== null, `${base}:${key}`);
+  return { base, value, error, failure, readAt, loading, refresh };
 }
 
 /**

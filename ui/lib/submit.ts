@@ -563,7 +563,37 @@ export async function prepare(
 }
 
 /** A queue receipt. Not an admission — see the module docs. */
-export type Queued = { queued: string; kind: string; note: string };
+export type Queued = { queued: string; kind: string; note: string; record_id?: string };
+
+export type SubmissionStatus = {
+  queued: string;
+  kind: string;
+  record_id: string;
+  status: "queued" | "admitted" | "refused" | "unknown";
+  note: string;
+  updated_at: string;
+};
+
+/** A missing receipt is unknown, including on nodes predating tracking. */
+export async function fetchSubmission(id: string, base = NODE_URL): Promise<SubmissionStatus> {
+  if (!/^sha256:[a-f0-9]{64}$/.test(id)) throw new Error("Invalid submission receipt id.");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(`${base}/submissions/${id}`, { cache: "no-store", signal: controller.signal });
+    if (response.status === 404) throw new Error("This node has no receipt for this id. It may have expired or the node may predate tracking. The outcome is unknown.");
+    if (!response.ok) throw new Error(await readError(response));
+    const value = await response.json();
+    if (!value || value.queued !== id ||
+        !["queued", "admitted", "refused", "unknown"].includes(value.status) ||
+        ["kind", "record_id", "note", "updated_at"].some((field) => typeof value[field] !== "string")) {
+      throw new Error("The node returned an unreadable submission receipt. The outcome is unknown.");
+    }
+    return value as SubmissionStatus;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export async function submit(
   record: Record<string, unknown>,

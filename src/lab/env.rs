@@ -553,11 +553,11 @@ fn run_tool(command: &mut Command, name: &str) -> Result<(), LabError> {
 /// name one tree while another was meant.
 pub fn resolve(lab: &Lab, state: &State, wanted: &str) -> Result<Resolved, LabError> {
     let (name, tree, manifest_blob) = if let Some(values) = state.envs.get(wanted) {
-        let distinct: std::collections::BTreeSet<&String> =
-            values.iter().map(|v| &v.tree).collect();
+        let distinct: std::collections::BTreeSet<(&String, &String)> =
+            values.iter().map(|v| (&v.tree, &v.manifest)).collect();
         if distinct.len() > 1 {
             return Err(LabError::Refused(format!(
-                "environment {wanted:?} names {} different trees; resolve it with \
+                "environment {wanted:?} names {} different definitions (tree or manifest); resolve it with \
                  `cairn lab env import` before running in it",
                 distinct.len()
             )));

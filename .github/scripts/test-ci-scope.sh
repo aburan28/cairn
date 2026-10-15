@@ -29,6 +29,7 @@ check frozen-vectors 'conformance/vectors.json' 'interop reference'
 check launch-evidence 'launch/cairn.jsonl' 'interop ui'
 check ui 'ui/app/page.tsx' 'ui'
 check ios 'gui/ios/Cairn.swift' 'ios'
+check shared-native 'gui/shared/Sources/CairnNodeKit/Reports.swift' 'ios macos'
 check workflow '.github/workflows/ci.yml' "$all"
 check merge-group '' "$all" merge_group
 check missing-base 'docs/design.md' "$all" pull_request missing

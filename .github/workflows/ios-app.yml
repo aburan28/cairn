@@ -45,6 +45,8 @@ jobs:
         if: ${{ inputs.run_build }}
       - run: swift test --package-path gui/ios
         if: ${{ inputs.run_build }}
+      - run: swift test --package-path gui/shared
+        if: ${{ inputs.run_build }}
       - run: swift build -c release --package-path gui/ios
         if: ${{ inputs.run_build }}
       - name: compile Cairn.app for the simulator

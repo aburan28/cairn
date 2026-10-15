@@ -391,6 +391,25 @@ impl Server {
                     .collect();
                 Ok(Json::Object(envs).to_string())
             }
+            "lab_replay" => {
+                let run = super::op::op_id(&need("run")?).map_err(|error| error.to_string())?;
+                let mode = match text("mode").as_deref().unwrap_or("exact") {
+                    "exact" => super::replay::Mode::Exact,
+                    "reapply" => super::replay::Mode::Reapply,
+                    _ => return Err("mode must be exact or reapply".into()),
+                };
+                let state = State::of(&self.lab);
+                let prior = state.runs.iter().find(|prior| prior.id == run).ok_or("no such run")?;
+                if prior.receipt.get("network") == Some(&crate::canonical::Value::Bool(true)) && !super::exec::agents_may_use_network() {
+                    return Err("network access is off for agents on this server".into());
+                }
+                let preference = std::env::var(super::exec::SANDBOX_ENV).unwrap_or_else(|_| "auto".into());
+                let sandbox = Preference::parse(&preference).map_err(|error| error.to_string())?;
+                let result = api::replay(&mut self.lab, &self.identity, &run, mode, text("publish"), sandbox, text("baseline")).map_err(|error| error.to_string())?;
+                Ok(json!({ "run": result.op.id, "source": run, "mode": mode.name(), "receipt": serde_json::from_str::<Json>(&result.op.body.to_value().canonical_string()).map_err(|error| error.to_string())?,
+                    "sandbox_error": result.outcome.error,
+                    "note": "A new experiment, not a verified result or a settlement. Score its artifact with the objective's verifier before submitting a claim." }).to_string())
+            }
             "lab_exec" => {
                 let argv: Vec<String> = args
                     .get("argv")
@@ -580,6 +599,9 @@ fn tools() -> Json {
               "timeout_seconds": { "type": "integer" }, "memory_mb": { "type": "integer" },
               "network": { "type": "boolean" }, "task": { "type": "string" }, "note": { "type": "string" } },
             "required": ["env", "argv"] } },
+        { "name": "lab_replay", "title": "Replay a lab run", "annotations": ex.clone(),
+          "description": "Publish a new run from recorded inputs (exact), or run its recipe on current unambiguous lab files (reapply). Preserves lineage and immutable host inputs. Never merges algorithms, verifies a claim, or moves the settlement frontier. Legacy or missing inputs are unavailable. The operator's sandbox and network policy apply.",
+          "inputSchema": { "type": "object", "properties": { "run": { "type": "string" }, "mode": { "type": "string", "enum": ["exact", "reapply"] }, "publish": { "type": "string" }, "baseline": { "type": "string", "description": "Claim id used as the new research baseline in reapply; a declaration, never citation authority or automatic integration." } }, "required": ["run"] } },
         { "name": "lab_runs", "title": "Lab run receipts", "annotations": ro.clone(),
           "description": "Recent run receipts, newest first.",
           "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer" } } } }
@@ -676,6 +698,7 @@ mod tests {
             "lab_send",
             "lab_ack",
             "lab_exec",
+            "lab_replay",
         ];
         for tool in tools().as_array().expect("tools") {
             let name = tool["name"].as_str().expect("name");

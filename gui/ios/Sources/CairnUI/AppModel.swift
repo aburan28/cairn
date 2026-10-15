@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import CairnKit
+import CairnNodeKit
 #if canImport(SwiftUI)
 import SwiftUI
 #endif
@@ -22,6 +23,10 @@ public final class AppModel: ObservableObject {
     @Published public var chain: Sourced<Chain>?
     @Published public var checkpoint: Sourced<CheckpointFacts>
     @Published public var peers: Sourced<[Peer]>?
+    @Published public var sessions: Sourced<SessionReport>?
+    @Published public var network: Sourced<NetworkReport>?
+    @Published public var sessionsError: String?
+    @Published public var networkError: String?
     @Published public var log: Sourced<ParsedLog>?
     @Published public var recentNodes: [String]
     @Published public var loading = false
@@ -113,7 +118,9 @@ public final class AppModel: ObservableObject {
         async let chainLoad: Void = loadChain(from: base, token: token)
         async let checkpointLoad: Void = loadCheckpoint(from: base, token: token)
         async let peersLoad: Void = loadPeers(from: base, token: token)
-        _ = await (objectivesLoad, chainLoad, checkpointLoad, peersLoad)
+        async let sessionsLoad: Void = loadSessions(from: base, token: token)
+        async let networkLoad: Void = loadNetwork(from: base, token: token)
+        _ = await (objectivesLoad, chainLoad, checkpointLoad, peersLoad, sessionsLoad, networkLoad)
     }
 
     public func loadLog(from base: String? = nil) async {
@@ -212,15 +219,6 @@ public final class AppModel: ObservableObject {
         do {
             let list = try await client.fetchObjectives(at: base)
             guard token == generation else { return }
-            if list.isEmpty {
-                // Health, chain and peers on this screen are the live node's,
-                // so the snapshot standing in here has to say so.
-                objectives = Sourced(
-                    value: snapshot.objectives, live: false, origin: snapshot.source,
-                    note: "\(base) has no objectives yet."
-                )
-                return
-            }
             // Publish the summary first. Detail is an enhancement and used
             // to run before this assignment, so Overview stayed on the
             // snapshot and `refresh` held `loading` until every
@@ -329,11 +327,39 @@ public final class AppModel: ObservableObject {
         // here would show them with a live provenance line after a fallback.
         log = nil
         peers = nil
+        sessions = nil; network = nil
+        sessionsError = nil; networkError = nil
     }
 
     /// Drop auxiliary pages that still name a different origin.
     private func dropStale(keeping origin: String) {
         if log?.origin != origin { log = nil }
         if peers?.origin != origin { peers = nil }
+        if sessions?.origin != origin { sessions = nil; sessionsError = nil }
+        if network?.origin != origin { network = nil; networkError = nil }
+    }
+
+    private func loadSessions(from base: String, token: UInt64) async {
+        do {
+            let report = try await client.fetchSessions(at: base)
+            guard token == generation else { return }
+            sessions = Sourced(value: report, live: true, origin: base)
+            sessionsError = nil
+        } catch {
+            guard token == generation else { return }
+            sessionsError = error.localizedDescription
+        }
+    }
+
+    private func loadNetwork(from base: String, token: UInt64) async {
+        do {
+            let report = try await client.fetchNetwork(at: base)
+            guard token == generation else { return }
+            network = Sourced(value: report, live: true, origin: base)
+            networkError = nil
+        } catch {
+            guard token == generation else { return }
+            networkError = error.localizedDescription
+        }
     }
 }

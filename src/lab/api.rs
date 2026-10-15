@@ -12,6 +12,7 @@ use std::time::Duration;
 use super::env;
 use super::exec::{self, Mount, Outcome, Preference, Spec};
 use super::op::{self, Body, EntryRef, FileEntry, Op, Outcome as LeaseOutcome, PathMode};
+use super::replay::{self, Mode};
 use super::state::{State, TaskView};
 use super::store::Lab;
 use super::LabError;
@@ -302,8 +303,66 @@ pub fn exec(
         state.list_unambiguous(input.prefix.trim_end_matches('/'))?;
     }
     let environment = env::resolve(lab, &state, &request.env)?;
-    let backend = exec::backend(request.sandbox)?;
+    if !env::verify(lab, &environment.tree)? {
+        return Err(LabError::Unavailable("the environment tree changed under its recorded digest; import the original image before running".into()));
+    }
+    let mounts = replay::capture(lab, &state, &request.inputs, &request.mounts)?;
+    let heads = lab.heads().iter().cloned().collect::<Vec<_>>();
+    execute(lab, identity, request, environment, &mounts, &heads, None)
+}
 
+/// Exact replay keeps the original input pins. Reapply uses current lab
+/// files, keeping the old command and immutable host inputs. Both publish a
+/// new run; neither mutates history or moves the settlement frontier.
+pub fn replay(
+    lab: &mut Lab,
+    identity: &Identity,
+    run: &str,
+    mode: Mode,
+    publish: Option<String>,
+    sandbox: Preference,
+    baseline: Option<String>,
+) -> Result<ExecResult, LabError> {
+    if baseline.is_some() && mode != Mode::Reapply {
+        return Err(LabError::Invalid(
+            "a new baseline belongs to reapply, not exact replay".into(),
+        ));
+    }
+    let mut lineage = vec![
+        ("of", Value::string(run)),
+        ("mode", Value::string(mode.name())),
+    ];
+    if let Some(baseline) = baseline {
+        // A research reference only. Lab ancestry is never a payment citation
+        // or proof that the named claim was integrated into these files.
+        lineage.push(("baseline", Value::string(op::op_id(&baseline)?)));
+    }
+    let plan = replay::plan(lab, run, mode)?;
+    let mut request = plan.request;
+    request.publish = publish;
+    request.sandbox = sandbox;
+    execute(
+        lab,
+        identity,
+        &request,
+        plan.environment,
+        &plan.mounts,
+        &plan.heads,
+        Some(Value::object(lineage)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute(
+    lab: &mut Lab,
+    identity: &Identity,
+    request: &ExecRequest,
+    environment: env::Resolved,
+    mounts: &[replay::Mount],
+    heads: &[String],
+    lineage: Option<Value>,
+) -> Result<ExecResult, LabError> {
+    let backend = exec::backend(request.sandbox)?;
     let work = lab.root().join("work").join(format!(
         "{}-{}",
         crate::time::unix_seconds(),
@@ -319,7 +378,9 @@ pub fn exec(
         lab,
         identity,
         request,
-        &state,
+        mounts,
+        heads,
+        lineage,
         &environment,
         &backend,
         &work,
@@ -338,7 +399,9 @@ fn exec_in(
     lab: &mut Lab,
     identity: &Identity,
     request: &ExecRequest,
-    state: &State,
+    pinned: &[replay::Mount],
+    input_heads: &[String],
+    lineage: Option<Value>,
     environment: &env::Resolved,
     backend: &exec::Backend,
     work: &Path,
@@ -355,85 +418,18 @@ fn exec_in(
         ("kind", Value::string("output")),
     ])];
 
-    for (n, input) in request.inputs.iter().enumerate() {
-        let prefix = input.prefix.trim_end_matches('/');
-        let dir = work.join(format!("in-{n}"));
-        fs::create_dir_all(&dir)?;
-        // `exec` checked this immutable snapshot before running anything.
-        let listed = state.list(prefix);
-        // A prefix that names one file, and nothing under it, is that file:
-        // `--input x/run.py:/work/run.py` puts a file at `/work/run.py`, not
-        // a directory there holding `run.py`.
-        if let [(path, value)] = listed.as_slice() {
-            if *path == prefix {
-                let blob = value.blob.as_deref().unwrap_or_default();
-                let name = Path::new(path)
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "input".into());
-                let file = dir.join(name);
-                lab.blobs().copy_to(blob, &file)?;
-                mounts.push(Mount {
-                    source: file,
-                    target: input.target.clone(),
-                    writable: false,
-                });
-                mount_records.push(Value::object([
-                    ("target", Value::string(&input.target)),
-                    ("kind", Value::string("lab")),
-                    ("prefix", Value::string(prefix)),
-                    ("blob", Value::string(blob)),
-                ]));
-                continue;
-            }
-        }
-        if listed.is_empty() {
-            return Err(LabError::NotFound(format!(
-                "input {prefix:?} matches no file in the space"
-            )));
-        }
-        for (path, value) in listed {
-            let relative = if path == prefix {
-                Path::new(path)
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.to_string())
-            } else {
-                path[prefix.len()..].trim_start_matches('/').to_string()
-            };
-            let Some(blob) = &value.blob else { continue };
-            lab.blobs().copy_to(blob, &dir.join(&relative))?;
-        }
-        let tree = env::tree_digest(&dir)?;
+    for (n, input) in pinned.iter().enumerate() {
+        let source = input.materialize(lab, &work.join(format!("in-{n}")))?;
         mounts.push(Mount {
-            source: dir,
+            source,
             target: input.target.clone(),
             writable: false,
         });
-        mount_records.push(Value::object([
-            ("target", Value::string(&input.target)),
-            ("kind", Value::string("lab")),
-            ("prefix", Value::string(prefix)),
-            ("tree", Value::string(tree.digest)),
-            ("files", Value::Int(i128::from(tree.files))),
-        ]));
+        mount_records.push(input.to_value());
     }
-    for (source, target) in &request.mounts {
-        let source = fs::canonicalize(source)
-            .map_err(|e| LabError::Io(format!("{}: {e}", source.display())))?;
-        let tree = env::tree_digest(&source)?;
-        mounts.push(Mount {
-            source,
-            target: target.clone(),
-            writable: false,
-        });
-        mount_records.push(Value::object([
-            ("target", Value::string(target)),
-            ("kind", Value::string("host")),
-            ("tree", Value::string(tree.digest)),
-            ("files", Value::Int(i128::from(tree.files))),
-        ]));
-    }
+    let manifest_blob = lab
+        .blobs()
+        .put_bytes(&environment.manifest.canonical_bytes())?;
 
     let mut env_vars = environment.env();
     env_vars.extend(request.env_vars.clone());
@@ -490,11 +486,17 @@ fn exec_in(
 
     let mut receipt = vec![
         ("type", Value::string("cairn.lab.run")),
+        ("replay_version", Value::Int(1)),
+        (
+            "input_heads",
+            Value::array(input_heads.iter().map(Value::string)),
+        ),
         (
             "env",
             Value::object([
                 ("name", Value::string(&environment.name)),
                 ("tree", Value::string(&environment.tree)),
+                ("manifest", Value::string(manifest_blob)),
             ]),
         ),
         ("argv", Value::array(request.argv.iter().map(Value::string))),
@@ -519,6 +521,7 @@ fn exec_in(
                 ("memory_mb", Value::Int(i128::from(request.memory_mb))),
                 ("cpus", Value::Int(i128::from(request.cpus))),
                 ("pids", Value::Int(i128::from(request.pids))),
+                ("tmp_mb", Value::Int(i128::from(request.tmp_mb))),
             ]),
         ),
         ("network", Value::Bool(request.network)),
@@ -535,6 +538,18 @@ fn exec_in(
             ]),
         ),
     ];
+    if let Some(lineage) = lineage {
+        if lineage.get("mode").and_then(Value::as_str) == Some("exact") {
+            if let Some(source) = lineage.get("of").and_then(Value::as_str) {
+                if let Some(comparison) =
+                    replay::compare(lab, source, &publish, &files, &stdout_blob, &stderr_blob)
+                {
+                    receipt.push(("replay_comparison", comparison));
+                }
+            }
+        }
+        receipt.push(("lineage", lineage));
+    }
     receipt.extend(outcome.to_value());
     if let Some(task) = &request.task {
         receipt.push(("task", Value::string(task)));

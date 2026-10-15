@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   EMPTY_DRAFT,
   type Draft,
@@ -6,7 +6,29 @@ import {
   problems,
   reachableForWrites,
   toRecord,
+  fetchSubmission,
 } from "./submit";
+
+describe("submission outcomes", () => {
+  const id = `sha256:${"a".repeat(64)}`;
+  afterEach(() => vi.unstubAllGlobals());
+  it("reads the node outcome without inferring verification or payment", async () => {
+    for (const status of ["queued", "admitted", "refused", "unknown"]) {
+      const receipt = { queued: id, kind: "objective", record_id: "sha256:record", status, note: "node's reason", updated_at: "2026-10-15" };
+      const mock = vi.fn().mockResolvedValue(Response.json(receipt));
+      vi.stubGlobal("fetch", mock);
+      expect(await fetchSubmission(id, "http://node")).toEqual(receipt);
+      expect(mock.mock.calls[0][0]).toBe(`http://node/submissions/${id}`);
+    }
+  });
+  it("treats missing, mismatched and malformed receipts as unknown", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 404 })));
+    await expect(fetchSubmission(id)).rejects.toThrow("unknown");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ queued: id, status: "paid" })));
+    await expect(fetchSubmission(id)).rejects.toThrow("unknown");
+    await expect(fetchSubmission("../secret")).rejects.toThrow("Invalid");
+  });
+});
 
 const CREATED = "2026-01-01T00:00:00+00:00";
 

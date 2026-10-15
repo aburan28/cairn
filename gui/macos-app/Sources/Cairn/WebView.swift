@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import WebKit
+import CairnNodeKit
 
 /// Owns the one web view, so the menu's Reload reaches the page the window
 /// shows.
@@ -87,9 +88,7 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     /// A clicked link, in the main frame or asking for a new window, to
     /// http, https or mailto.
     static func mayOpenExternally(_ url: URL, action: WKNavigationAction) -> Bool {
-        guard action.navigationType == .linkActivated else { return false }
-        if let frame = action.targetFrame, !frame.isMainFrame { return false }
-        return ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "")
+        ReaderNavigation.mayOpenExternally(url, clicked: action.navigationType == .linkActivated, mainFrame: action.targetFrame?.isMainFrame ?? true)
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {

@@ -1,5 +1,6 @@
 import SwiftUI
 import CairnKit
+import CairnNodeUI
 
 public struct PeersView: View {
     @EnvironmentObject private var model: AppModel
@@ -8,8 +9,15 @@ public struct PeersView: View {
 
     public var body: some View {
         List {
+            Section("Recent sessions · observed by the node") {
+                if let error = model.sessionsError { Text("Latest read failed. \(error)").foregroundStyle(.orange) }
+                if let sourced = model.sessions {
+                    SessionsPanel(sourced.value)
+                    ProvenanceLine(sourced.provenance)
+                } else { Text("A live node with /sessions is required. The snapshot has no session roster.").foregroundStyle(.secondary) }
+            }
             Section {
-                Text("These are peers this node has been told about, not peers it is talking to. A peer record is append-only and nothing retracts it, so an entry here may name a machine that has been gone for months. Live session state is not published over HTTP.")
+                Text("Announcements below are addresses in the log. They are append-only and can name machines that are long gone. The session section reports whom this process reached recently.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   type FleetWorker,
   type HostRow,
@@ -28,7 +28,7 @@ import { type NodeEvent, absorb, fetchEvents } from "@/lib/journal";
 import { formatAge, formatMagnitude, formatRate } from "@/lib/progress";
 import { type Bridge, appBridge } from "@/lib/draft";
 import { AgentConnect, AgentStatus } from "@/components/agents";
-import { useEvery, useNode } from "@/components/hooks";
+import { useNodeRead } from "@/components/hooks";
 import {
   Badge,
   Box,
@@ -64,48 +64,30 @@ const SUBTITLE = "Whom this node has reached, what is working with it, and what 
  * is read off what the node does (`primaryRole`), so it is never blank.
  */
 export default function Page() {
-  const base = useNode();
-  const [network, setNetwork] = useState<NetworkResponse | null>(null);
-  const [sessions, setSessions] = useState<SessionsResponse | null>(null);
   const [events, setEvents] = useState<{ events: NodeEvent[]; started_at: string | null }>({
     events: [],
     started_at: null,
   });
-  const [error, setError] = useState<string | null>(null);
-  const [readAt, setReadAt] = useState<Date | null>(null);
   const [bridge, setBridge] = useState<Bridge | null>(null);
 
   useEffect(() => setBridge(appBridge()), []);
 
-  const load = useCallback(async () => {
-    if (base === null) return;
-    try {
-      // Independently: `/network` reads the log, `/sessions` and `/events` do
-      // not, and a node older than either still fills the rest of the page.
-      const [nextNetwork, nextSessions, page] = await Promise.all([
-        fetchNetwork(base),
-        fetchSessions(base).catch((cause: unknown) => {
-          if (cause instanceof RouteMissing) return null;
-          throw cause;
-        }),
-        fetchEvents(base).catch(() => null),
-      ]);
-      setNetwork(nextNetwork);
-      setSessions(nextSessions);
-      if (page) setEvents((held) => absorb(held, page, 200));
-      setReadAt(new Date());
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }, [base]);
-
-  useEvery(load, REFRESH_SECONDS, base !== null);
+  const { value, error, readAt, refresh, loading } = useNodeRead(async (base) => {
+    const [network, sessions, page] = await Promise.all([
+      fetchNetwork(base),
+      fetchSessions(base).catch((cause: unknown) => { if (cause instanceof RouteMissing) return null; throw cause; }),
+      fetchEvents(base).catch(() => null),
+    ]);
+    return { network, sessions, page };
+  }, { seconds: REFRESH_SECONDS });
+  const network = value?.network ?? null;
+  const sessions = value?.sessions ?? null;
+  useEffect(() => { if (value?.page) setEvents((held) => absorb(held, value.page!, 200)); }, [value]);
 
   if (error && !network) {
     return (
       <>
-        <PageHeader title="Network" subtitle={SUBTITLE} />
+        <PageHeader title="Network" subtitle={SUBTITLE} actions={<button className="btn btn-sm" onClick={() => void refresh()}>Retry</button>} />
         <Note title="Could not read this node" tone="bad">
           {error}
         </Note>
@@ -135,6 +117,8 @@ export default function Page() {
       readAt={readAt}
       stale={error}
       bridge={bridge}
+      onRefresh={() => void refresh()}
+      loading={loading}
     />
   );
 }
@@ -146,6 +130,8 @@ function Dashboard({
   readAt,
   stale,
   bridge,
+  onRefresh,
+  loading,
 }: {
   network: NetworkResponse;
   sessions: SessionsResponse | null;
@@ -153,6 +139,8 @@ function Dashboard({
   readAt: Date | null;
   stale: string | null;
   bridge: Bridge | null;
+  onRefresh: () => void;
+  loading: boolean;
 }) {
   const { node, peers, compute } = network;
   const self = peers.this_node ?? sessions?.this_node ?? null;
@@ -167,7 +155,7 @@ function Dashboard({
 
   return (
     <>
-      <PageHeader title="Network" subtitle={SUBTITLE} actions={<LiveStamp at={readAt} error={stale} />} />
+      <PageHeader title="Network" subtitle={SUBTITLE} actions={<><LiveStamp at={readAt} error={stale} /><button className="btn btn-sm" onClick={onRefresh} disabled={loading}>Refresh</button></>} />
 
       {/* -- your node ------------------------------------------------------- */}
       <section className="card card-pad mb-4 grid gap-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">

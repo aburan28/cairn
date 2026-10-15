@@ -1109,6 +1109,209 @@ fn a_run_under_bubblewrap_honours_the_same_plan() {
     exercise(Preference::Bubblewrap, "bwrap");
 }
 
+#[test]
+fn replay_pins_survive_edits_and_reapply_requires_unambiguous_current_inputs() {
+    use cairn::lab::{
+        env,
+        replay::{self, Mode},
+    };
+    let alice = id(120);
+    let bob = id(121);
+    let mut lab = space("replay", &alice, &[&bob], Policy::default());
+    write(&mut lab, &alice, "inputs/params.txt", "original\n");
+    let rootfs = temp("replay-env");
+    fs::create_dir_all(&rootfs).unwrap();
+    env::import(
+        &mut lab,
+        &alice,
+        "tiny",
+        &env::Source::Dir(rootfs),
+        &env::ImportOptions::default(),
+    )
+    .unwrap();
+    let mut request = ExecRequest::new("tiny", vec!["/bin/sh".into(), "-c".into(),
+        "read line < \"$CAIRN_LAB_MOUNT_IN/params.txt\"; printf '%s' \"$line\" > \"$CAIRN_LAB_OUT/result.txt\"".into()]);
+    request.inputs.push(Input {
+        prefix: "inputs".into(),
+        target: "/in".into(),
+    });
+    request.sandbox = Preference::Unconfined;
+    request.tmp_mb = 37;
+    let original = api::exec(&mut lab, &alice, &request).unwrap();
+    assert!(original.outcome.succeeded(), "{:?}", original.outcome);
+    let mut other = replica(&mut lab, "replay-concurrent");
+    write(&mut lab, &alice, "inputs/params.txt", "new\n");
+    let exact = replay::plan(&mut lab, &original.op.id, Mode::Exact).unwrap();
+    assert_eq!(exact.request.tmp_mb, 37);
+    let materialized = temp("pinned-materialization");
+    exact.mounts[0].materialize(&lab, &materialized).unwrap();
+    assert_eq!(
+        fs::read(materialized.join("params.txt")).unwrap(),
+        b"original\n"
+    );
+    let replayed = api::replay(
+        &mut lab,
+        &alice,
+        &original.op.id,
+        Mode::Exact,
+        None,
+        Preference::Unconfined,
+        None,
+    )
+    .unwrap();
+    let Body::Run { receipt, .. } = &replayed.op.body else {
+        panic!("run");
+    };
+    assert_eq!(
+        receipt
+            .get("replay_comparison")
+            .unwrap()
+            .get("outputs_identical"),
+        Some(&cairn::canonical::Value::Bool(true))
+    );
+    assert_eq!(
+        api::read_file(
+            &lab,
+            &State::of(&lab),
+            &format!("{}/result.txt", replayed.publish)
+        )
+        .unwrap(),
+        b"original"
+    );
+    let reapplied = api::replay(
+        &mut lab,
+        &alice,
+        &original.op.id,
+        Mode::Reapply,
+        None,
+        Preference::Unconfined,
+        Some(format!("sha256:{}", "7".repeat(64))),
+    )
+    .unwrap();
+    assert_eq!(
+        api::read_file(
+            &lab,
+            &State::of(&lab),
+            &format!("{}/result.txt", reapplied.publish)
+        )
+        .unwrap(),
+        b"new"
+    );
+    let Body::Run { receipt, .. } = &reapplied.op.body else {
+        panic!("run");
+    };
+    assert_eq!(
+        receipt
+            .get("lineage")
+            .unwrap()
+            .get("baseline")
+            .and_then(|value| value.as_str()),
+        Some(format!("sha256:{}", "7".repeat(64)).as_str())
+    );
+    assert_eq!(
+        receipt
+            .get("lineage")
+            .unwrap()
+            .get("of")
+            .and_then(|v| v.as_str()),
+        Some(original.op.id.as_str())
+    );
+    write(&mut other, &bob, "inputs/params.txt", "concurrent\n");
+    sync::sync(&mut lab, &mut other).unwrap();
+    assert!(matches!(
+        replay::plan(&mut lab, &original.op.id, Mode::Reapply),
+        Err(LabError::Refused(_))
+    ));
+    assert!(replay::plan(&mut lab, &original.op.id, Mode::Exact).is_ok());
+    // Inputs are copied from verified blobs, never silently substituted by
+    // the current file when the original bytes are missing.
+    let blob = exact.mounts[0].files[0].blob.as_ref().unwrap();
+    fs::write(lab.blobs().path(blob).unwrap(), b"corrupt").unwrap();
+    let count = State::of(&lab).runs.len();
+    assert!(matches!(
+        api::replay(
+            &mut lab,
+            &alice,
+            &original.op.id,
+            Mode::Exact,
+            None,
+            Preference::Unconfined,
+            None
+        ),
+        Err(LabError::Unavailable(_))
+    ));
+    assert_eq!(State::of(&lab).runs.len(), count);
+}
+
+#[test]
+fn host_snapshots_sync_with_the_run_and_restore_executable_inputs() {
+    use cairn::lab::replay;
+    let alice = id(122);
+    let mut lab = space("host-pins", &alice, &[], Policy::default());
+    let host = temp("host-pins-input");
+    fs::create_dir_all(host.join("empty")).unwrap();
+    fs::write(host.join("script.sh"), b"#!/bin/sh\necho original\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(host.join("script.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mounts =
+        replay::capture(&lab, &State::of(&lab), &[], &[(host.clone(), "/in".into())]).unwrap();
+    let receipt = cairn::canonical::Value::object([
+        ("replay_version", cairn::canonical::Value::Int(1)),
+        (
+            "mounts",
+            cairn::canonical::Value::array(mounts.iter().map(replay::Mount::to_value)),
+        ),
+    ]);
+    lab.append(
+        &alice,
+        Body::Run {
+            receipt,
+            files: vec![],
+        },
+    )
+    .unwrap();
+    let copy = replica(&mut lab, "host-pins-copy");
+    fs::write(host.join("script.sh"), b"changed").unwrap();
+    let dest = temp("host-pins-output");
+    mounts[0].materialize(&copy, &dest).unwrap();
+    assert_eq!(
+        fs::read(dest.join("script.sh")).unwrap(),
+        b"#!/bin/sh\necho original\n"
+    );
+    assert!(dest.join("empty").is_dir());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(
+            fs::metadata(dest.join("script.sh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+        std::os::unix::fs::symlink("/etc/passwd", host.join("link")).unwrap();
+        assert!(replay::capture(&lab, &State::of(&lab), &[], &[(host, "/in".into())]).is_err());
+    }
+    let invalid = cairn::canonical::Value::object([
+        ("kind", cairn::canonical::Value::string("lab")),
+        ("prefix", cairn::canonical::Value::string("")),
+        ("target", cairn::canonical::Value::string("/in")),
+        ("single", cairn::canonical::Value::Bool(false)),
+        (
+            "snapshot",
+            cairn::canonical::Value::array([cairn::canonical::Value::object([(
+                "path",
+                cairn::canonical::Value::string("../escape"),
+            )])]),
+        ),
+    ]);
+    assert!(replay::Mount::from_value(&invalid).is_err());
+}
+
 /// One scenario, run under one backend: inputs read-only, outputs published,
 /// a read-only root, the program's own exit status passed through, a missing
 /// program reported as an infrastructure error, and a deadline enforced.

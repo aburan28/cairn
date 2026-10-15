@@ -1,7 +1,9 @@
 // Browser regressions against a running local reader and a disposable node.
-// No submissions or external transfers: the only POST is canonicalization.
+// Writes require the isolated fixture wrapper's matching id and manifest.
 import assert from "node:assert/strict";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { join } from "node:path";
 import { chromium } from "playwright";
 
 const reader = new URL(process.env.CAIRN_UX_URL ?? "http://127.0.0.1:3101/ui/");
@@ -49,13 +51,20 @@ const inDialog = () => page.evaluate(() => Boolean(document.activeElement?.close
 
 try {
   const listing = await (await page.request.get(`${reader.origin}/objectives`)).json();
-  const objective = listing.objectives[0];
+  const objective = listing.objectives.find((row) => row.piecework) ?? listing.objectives[0];
   assert(objective, "Seed the test node with at least one objective");
+  let fixture = null;
+  if (process.env.CAIRN_UX_FIXTURE_ROOT) {
+    fixture = JSON.parse(await readFile(join(process.env.CAIRN_UX_FIXTURE_ROOT, "fixture.json"), "utf8"));
+    assert.equal(fixture.id, process.env.CAIRN_UX_FIXTURE_ID);
+    assert(listing.objectives.some((row) => row.goal === `GOAL-ux-${fixture.id}-certificate`), "The node is not this disposable fixture; refusing writes");
+  }
   const detail = await (await page.request.get(`${reader.origin}/objective/${objective.id}`)).json();
   const routes = ["", "objectives/", "coordination/", "network/", "log/", "knowledge/", "goals/",
-    "contribute/", "submit/", "payouts/", "peers/", "how-it-works/",
+    "contribute/", "submit/", "submission/", "workspace/", "payouts/", "peers/", "how-it-works/",
     `challenge/?id=${objective.id}`, `frontier/?id=${objective.id}`, `task/?id=${objective.id}`];
   if (objective.piecework) routes.push(`coordination/?id=${objective.id}`);
+  if (fixture) routes.push(`workspace/?space=${fixture.space}`);
   for (const width of [320, 360, 1280]) {
     await page.setViewportSize({ width, height: 900 });
     for (const route of routes) {
@@ -215,8 +224,60 @@ try {
   assert(await seedPage.getByRole("button", { name: "Canonicalize", exact: true }).isDisabled());
   await seedContext.close();
   console.log("PASS seed-aware node status and same-origin posting guidance");
+  if (fixture) {
+    await go(`workspace/?space=${fixture.space}`);
+    await page.getByRole("heading", { name: "Unresolved choices" }).waitFor();
+    assert(await page.getByText("inputs/artifact.json", { exact: false }).count() > 0);
+    await page.getByRole("button", { name: "Replay recorded inputs", exact: true }).first().click();
+    await page.getByRole("dialog").getByText(/cairn lab replay sha256:/).waitFor();
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Run on current workspace", exact: true }).first().click();
+    await page.getByRole("dialog").getByText(/--reapply/).waitFor();
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Prepare promotion", exact: true }).first().click();
+    await page.getByRole("dialog").getByText(/score_candidate first/).waitFor();
+    await page.keyboard.press("Escape");
+    const artifactURL = new URL(await page.getByRole("link", { name: "Download artifact.json" }).first().getAttribute("href"), reader);
+    const artifact = await (await page.request.get(artifactURL.href)).json();
+    assert.equal(artifact.n, 626331);
+    console.log("PASS causal workspace, conflicts, pinned replay, reapply and promotion guidance");
+
+    const writes = await browser.newContext();
+    const form = await writes.newPage();
+    form.on("pageerror", (error) => errors.push(error.message));
+    await form.goto(url("submit/"));
+    const certificate = listing.objectives.find((row) => row.goal === `GOAL-ux-${fixture.id}-certificate`);
+    const certificateRecord = (await (await form.request.get(`${reader.origin}/objective/${certificate.id}`)).json()).record;
+    const proposal = { ...certificateRecord, goal: `GOAL-ux-${fixture.id}-admission`, funder: "reader-ux-fixture", reward: 1 };
+    await form.locator("input[type=file]").first().setInputFiles({ name: "objective.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(proposal)) });
+    await form.getByRole("button", { name: "Canonicalize", exact: true }).click();
+    await form.getByRole("heading", { name: "What the wallet signs" }).waitFor();
+    const queuedResponse = form.waitForResponse((response) => response.url().endsWith("/submit?kind=objective") && response.request().method() === "POST");
+    await form.getByRole("button", { name: "Submit to the node", exact: true }).click();
+    const offered = await (await queuedResponse).json();
+    assert(/^sha256:[a-f0-9]{64}$/.test(offered.queued));
+    await form.getByText("queued", { exact: true }).waitFor();
+    const drain = () => execFileSync(fixture.binary, ["--log", join(process.env.CAIRN_UX_FIXTURE_ROOT, "log.jsonl"), "--root", process.env.CAIRN_UX_FIXTURE_ROOT, "drain", "--queue", join(process.env.CAIRN_UX_FIXTURE_ROOT, "queue")], { env: process.env, stdio: "pipe" });
+    drain();
+    await form.getByRole("button", { name: "Refresh status", exact: true }).click();
+    await form.getByText("admitted", { exact: true }).waitFor();
+    await form.locator("#reward").fill("2");
+    await form.reload();
+    await form.getByText("admitted", { exact: true }).waitFor();
+    const admitted = await (await form.request.get(`${reader.origin}/objective/${offered.record_id}`)).json();
+    assert.equal(admitted.record.goal, proposal.goal);
+    const refused = await form.request.post(`${reader.origin}/submit?kind=objective`, { data: { ...proposal, verifier: { kind: "unknown-fixture-verifier" } } });
+    assert.equal(refused.status(), 202);
+    const refusal = await refused.json();
+    drain();
+    await form.goto(url(`submission/?id=${refusal.queued}`));
+    await form.getByText("refused", { exact: true }).waitFor();
+    assert((await form.locator("main").innerText()).includes("unknown-fixture-verifier"));
+    await writes.close();
+    console.log("PASS real queue admission, refusal and tracking recovery after editing and reload");
+  }
   assert.deepEqual(errors, [], "Reader raised browser exceptions");
-  console.log("PASS no browser exceptions; no records submitted");
+  console.log(`PASS no browser exceptions; ${fixture ? "writes confined to the disposable fixture" : "no records submitted"}`);
 } finally {
   await browser.close();
 }

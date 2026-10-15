@@ -1,9 +1,11 @@
 # Causal replay and frontier promotion
 
-**Status: proposal.** The lab's causal CRDT, multi-value registers and run
-receipts exist. Conflict-aware document projection and execution preflight are
-implemented. Materializing a historical run, reapplying a contribution to a
-newer frontier, and scheduling those reapplications are not implemented.
+**Status: input replay and workspace implemented; semantic integration and
+automatic scheduling remain design work.** `lab replay`, `lab_replay` and the
+opt-in workspace reader pin and materialize historical inputs, compare output
+identities, rerun recipes against current unambiguous lab files, and preserve
+an explicitly named research baseline. They do not infer patches or prove
+that algorithm changes compose. See [the working interface](../lab.md#replay-and-the-workspace-reader).
 
 ## The problem
 
@@ -16,8 +18,9 @@ algorithm.
 
 The existing lab is the right transport for both investigations: signed ops,
 causal dependencies, immutable blobs, visible sibling values and set-union
-sync. What is missing is an explicit description of which research inputs a
-candidate consumed and how that contribution can be tested on a new baseline.
+sync. Runs now describe the exact research inputs they consumed. The remaining
+design below covers semantic integration recipes and scheduling beyond running
+the recorded recipe on an explicitly prepared new workspace.
 
 This belongs above the CRDT. The lab's `deps` capture an author's observed
 causal context, including unrelated messages, membership changes and files.
@@ -44,7 +47,7 @@ allocation depends on order. A max register cannot replace settlement ordering.
 
 ## Immutable input snapshots
 
-Before starting a run, publish a content-addressed snapshot manifest containing:
+Before starting a run, capture an immutable snapshot containing:
 
 - The lab space and the heads observed at input selection time.
 - Every selected path, its blob address, size, executable flag and version

@@ -259,6 +259,34 @@ pub fn referenced_blobs(lab: &Lab) -> BTreeSet<String> {
                         }
                     }
                 }
+                // Pinned input bytes (including former host mounts) must
+                // travel in the same sync as the run, without a second pass
+                // to discover references hidden in an external manifest.
+                if receipt.get("replay_version").and_then(Value::as_u64) == Some(1) {
+                    if let Some(address) = receipt
+                        .get("env")
+                        .and_then(|env| env.get("manifest"))
+                        .and_then(Value::as_str)
+                    {
+                        if op::blob_address(address).is_ok() {
+                            out.insert(address.to_string());
+                        }
+                    }
+                    if let Some(mounts) = receipt.get("mounts").and_then(Value::as_array) {
+                        for mount in mounts {
+                            if let Some(files) = mount.get("snapshot").and_then(Value::as_array) {
+                                for file in files {
+                                    if let Some(address) = file.get("blob").and_then(Value::as_str)
+                                    {
+                                        if op::blob_address(address).is_ok() {
+                                            out.insert(address.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             _ => {}
         }

@@ -171,7 +171,7 @@ lines; that is the authority, and this table is the index to it.
 | [settlement-convergence.md](design/settlement-convergence.md) — the epoch chain | **built**, in both implementations |
 | [citation-flow-dilution.md](design/citation-flow-dilution.md) — the slicing attack on attribution | **implemented, not the default**; the threat model still carries the row |
 | [confidential-corpus.md](design/confidential-corpus.md) — material the network cannot read | storage and release **built** (`src/corpus.rs`); the rest deliberately undone |
-| [inference-capabilities.md](design/inference-capabilities.md) — capability-aware scheduling | **built** (`src/compute.rs`), outside the ledger on purpose |
+| [inference-capabilities.md](design/inference-capabilities.md) — capability-aware scheduling | **written, not wired** (`src/compute.rs` is not a declared module and is not compiled or tested); not a working routing service |
 | [anchored-time.md](design/anchored-time.md) — what a shared clock would buy | analysis only; one part should probably never be built |
 | [shard-assignment.md](design/shard-assignment.md) — what erasure coding prices | analysis only |
 | [embargo-release.md](design/embargo-release.md) — holding an artifact the log already owes you | design only |

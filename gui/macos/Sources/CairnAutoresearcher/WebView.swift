@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import WebKit
+import CairnNodeKit
 
 /// The node's own reader, embedded. The same pages an operator would open in
 /// a browser, reading the same node -- nothing here is rendered twice.
@@ -11,7 +12,7 @@ import WebKit
 struct WebView: NSViewRepresentable {
     let url: URL
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(url) }
 
     func makeNSView(context: Context) -> WKWebView {
         let view = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
@@ -23,16 +24,19 @@ struct WebView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: WKWebView, context: Context) {
-        if view.url?.absoluteString != url.absoluteString {
+        if context.coordinator.requested != url {
+            context.coordinator.requested = url
             view.load(URLRequest(url: url))
         }
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+        var requested: URL
+        init(_ url: URL) { requested = url; super.init() }
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                      decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
-            if let url = action.request.url, !Self.isLocal(url) {
-                NSWorkspace.shared.open(url)
+            if let url = action.request.url, !ReaderNavigation.staysInReader(url, node: requested) {
+                if ReaderNavigation.mayOpenExternally(url, clicked: action.navigationType == .linkActivated, mainFrame: action.targetFrame?.isMainFrame ?? true) { NSWorkspace.shared.open(url) }
                 decisionHandler(.cancel)
             } else {
                 decisionHandler(.allow)
@@ -42,16 +46,12 @@ struct WebView: NSViewRepresentable {
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
             if let url = action.request.url {
-                if Self.isLocal(url) { webView.load(URLRequest(url: url)) } else { NSWorkspace.shared.open(url) }
+                if ReaderNavigation.staysInReader(url, node: requested) { webView.load(URLRequest(url: url)) }
+                else if ReaderNavigation.mayOpenExternally(url, clicked: action.navigationType == .linkActivated, mainFrame: true) { NSWorkspace.shared.open(url) }
             }
             return nil
         }
 
-        private static func isLocal(_ url: URL) -> Bool {
-            guard let scheme = url.scheme, scheme == "http" || scheme == "https" else {
-                return url.scheme == "about" || url.scheme == "blob" || url.scheme == "data"
-            }
-            return url.host == "127.0.0.1" || url.host == "localhost"
-        }
+
     }
 }
