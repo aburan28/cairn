@@ -57,6 +57,11 @@ Environment=CAIRN_ROLES=coordinator,verifier
 # can do there is what they can do at any public seed, and nothing gets signed
 # for them. With a network in CAIRN_FLEET, the firewall or security group must
 # keep the HTTP side to that network, because the address is the credential.
+# Over Tailscale instead (docs/fleet.md, "Over a tailnet"): `--serve
+# tailnet:8080` answers on this host's tailnet address and nowhere else, and
+# `cairn fleet invite --node tailnet:8080` writes its MagicDNS name into the
+# join line. Add `After=tailscaled.service` and `Wants=tailscaled.service`
+# under [Unit] so the address exists when the node binds.
 # --listen on loopback: this leader peers with nobody over p2p; bind
 # 0.0.0.0:9000 and add --bootstrap files to peer with a fleet node in another
 # region.

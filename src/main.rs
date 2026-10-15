@@ -62,7 +62,6 @@ use std::env;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, IsTerminal, Read as _, Write};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -4239,7 +4238,7 @@ fn print_help(out: &mut dyn Write) {
     );
     say(
         out,
-        "  run [--listen HOST:PORT] [--serve HOST:PORT] [--bootstrap FILE ...]",
+        "  run [--listen HOST:PORT] [--serve HOST:PORT|tailnet[:PORT]] [--bootstrap FILE ...]",
     );
     say(
         out,
@@ -4633,18 +4632,12 @@ fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Res
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| default_path("checkpoint.json"));
-    let listen = request.listen.parse::<SocketAddr>().map_err(|_| {
-        CliError::Usage(format!(
-            "run: --listen needs host:port, got {:?}",
-            request.listen
-        ))
-    })?;
-    let serve = request.serve.parse::<SocketAddr>().map_err(|_| {
-        CliError::Usage(format!(
-            "run: --serve needs host:port, got {:?}",
-            request.serve
-        ))
-    })?;
+    // `tailnet[:PORT]` binds to this machine's tailnet address and nothing
+    // else (`cairn::tailnet`); anything else must be a literal host:port.
+    let listen = cairn::tailnet::resolve_listen(&request.listen, cairn::tailnet::status)
+        .map_err(|error| CliError::Usage(format!("run: --listen: {error}")))?;
+    let serve = cairn::tailnet::resolve_listen(&request.serve, cairn::tailnet::status)
+        .map_err(|error| CliError::Usage(format!("run: --serve: {error}")))?;
 
     let mut config = DaemonConfig::new(
         identity,

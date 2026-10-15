@@ -68,6 +68,7 @@ pub mod secrets;
 pub mod serve;
 pub mod shards;
 pub mod store;
+pub mod tailnet;
 pub mod tier;
 pub mod time;
 pub mod vdf;

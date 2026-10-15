@@ -43,7 +43,8 @@ cairn fleet — enroll the machines that work for this node, from anywhere
 
 On the leader (writes <log dir>/fleet/; never the network):
     invite [--name NAME | --prefix P] [--uses N] [--expires 24h] [--member-ttl 12h]
-           [--note TEXT] [--node URL] [--json] [--identity FILE | --leader KEY]
+           [--note TEXT] [--node URL|tailnet[:PORT]] [--json]
+           [--identity FILE | --leader KEY]
                                     mint an invitation and print its token, once
     admit --key KEY --name NAME [--ttl 12h]
                                     enroll a key by hand: no token on any wire
@@ -73,6 +74,11 @@ or a number with s, m, h or d.
 The node signs for members only when its CAIRN_FLEET lists `enrolled`:
     CAIRN_FLEET=enrolled cairn run …
 
+Over Tailscale (docs/fleet.md, 'Over a tailnet'): serve on the tailnet only and
+put the leader's MagicDNS name in the join line. Members must be on the tailnet.
+    CAIRN_FLEET=enrolled cairn run --serve tailnet:8080 …
+    cairn fleet invite --name gpu-box-1 --node tailnet:8080
+
 EXIT CODES
     0 done   1 refused   2 bad usage   3 the node could not be reached
 ";
@@ -87,6 +93,15 @@ enum Failure {
 
 fn usage(message: impl Into<String>) -> Failure {
     Failure::Usage(message.into())
+}
+
+/// A leader that did not answer, with what to do about it when its address
+/// is on a tailnet this machine may not be on.
+fn unreachable(node: &NodeUrl, error: String) -> Failure {
+    match crate::tailnet::unreachable_hint(&node.host) {
+        Some(hint) => Failure::Unreachable(format!("{error}\n  {hint}")),
+        None => Failure::Unreachable(error),
+    }
 }
 
 fn refused(message: impl Into<String>) -> Failure {
@@ -308,12 +323,18 @@ fn invite(parsed: &Parsed, log: &Path, out: &mut dyn Write) -> Result<(), Failur
         member_ttl: duration(parsed, "member-ttl")?,
         note: parsed.one("note").map(str::to_string),
     };
+    // Resolved before the invite is made, so a machine that is not on its
+    // tailnet fails the command without leaving an invite nobody can use.
+    // `--node tailnet[:PORT]` is this leader's MagicDNS URL.
+    let node = match parsed.one("node") {
+        Some(text) => crate::tailnet::node_url(text, crate::tailnet::status).map_err(usage)?,
+        None => String::from("http://LEADER:8080"),
+    };
     let registry = registry(log, Some(leader));
     let at = now();
     let (token, invite) = registry
         .create_invite(&terms, at)
         .map_err(io_failure("cannot write the invite"))?;
-    let node = parsed.one("node").unwrap_or("http://LEADER:8080");
     let join_line = format!("cairn fleet join --node {node} {}", token.render());
     if parsed.switch("json") {
         let opt = |v: &Option<String>| v.clone().map(Value::string).unwrap_or(Value::Null);
@@ -740,7 +761,7 @@ fn join(parsed: &Parsed, out: &mut dyn Write, input: &mut dyn Read) -> Result<()
     // against an attacker -- the join is bound to the token's leader, and the
     // member's records will name it whatever this answer says.
     let network = http::get(&node, "/network", NODE_TIMEOUT)
-        .map_err(|e| Failure::Unreachable(e.to_string()))?;
+        .map_err(|e| unreachable(&node, e.to_string()))?;
     if !network.ok() {
         return Err(Failure::Unreachable(format!(
             "{}: GET /network answered {}",
@@ -774,7 +795,7 @@ fn join(parsed: &Parsed, out: &mut dyn Write, input: &mut dyn Read) -> Result<()
     let attempt = |name: &str| -> Result<Response, Failure> {
         let request = JoinRequest::sign(&token.leader, &token.invite(), &member, name, now());
         http::post_json(&node, "/fleet/join", &request.to_value(), NODE_TIMEOUT)
-            .map_err(|e| Failure::Unreachable(e.to_string()))
+            .map_err(|e| unreachable(&node, e.to_string()))
     };
     let mut response = attempt(parsed.one("name").unwrap_or(""))?;
     // An invite that names nobody needs a name; this machine's is the default.

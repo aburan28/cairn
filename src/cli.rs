@@ -151,10 +151,13 @@ pub fn p2p(args: Vec<String>, globals: Globals) -> i32 {
         *slot = Some(args.next().unwrap_or_else(|| p2p_usage(2)));
     }
 
-    let listen: SocketAddr = listen
-        .unwrap_or_else(|| p2p_usage(2))
-        .parse()
-        .unwrap_or_else(|_| p2p_usage(2));
+    let listen: SocketAddr = tailnet_or_exit(
+        "cairn p2p: --listen",
+        &listen.unwrap_or_else(|| p2p_usage(2)),
+    )
+    .parse()
+    .unwrap_or_else(|_| p2p_usage(2));
+    let serve = serve.map(|spec| tailnet_or_exit("cairn p2p: --serve", &spec));
     let mut config = Config::new(
         identity.unwrap_or_else(|| p2p_usage(2)),
         root_key.unwrap_or_else(|| p2p_usage(2)),
@@ -290,6 +293,10 @@ pub fn serve(args: Vec<String>, globals: Globals) -> i32 {
         }
     }
 
+    // `tailnet[:PORT]` binds to this machine's tailnet address only.
+    let listen = tailnet_or_exit("cairn serve: --listen", &listen);
+    let p2p_listen = p2p_listen.map(|spec| tailnet_or_exit("cairn serve: --p2p-listen", &spec));
+
     // -- node mode ----------------------------------------------------------
 
     if let Some(addr) = p2p_listen {
@@ -385,6 +392,18 @@ pub fn serve(args: Vec<String>, globals: Globals) -> i32 {
         return 1;
     }
     0
+}
+
+/// Resolve a listen address that may be `tailnet[:PORT]`, or exit with the
+/// reason. A literal `host:port` is returned unchanged and runs nothing.
+fn tailnet_or_exit(what: &str, spec: &str) -> String {
+    if !crate::tailnet::is_keyword(spec) {
+        return spec.to_string();
+    }
+    match crate::tailnet::resolve_listen(spec, crate::tailnet::status) {
+        Ok(addr) => addr.to_string(),
+        Err(error) => exit_with(2, &format!("{what}: {error}")),
+    }
 }
 
 // ---------------------------------------------------------------------------
