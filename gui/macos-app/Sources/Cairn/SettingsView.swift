@@ -18,6 +18,7 @@ struct SettingsView: View {
     @AppStorage(NodeSettings.Key.leadFleet) private var leadFleet = false
     @AppStorage(NodeSettings.Key.fleetNetworks) private var fleetNetworks = NodeSettings.defaultFleetNetworks
     @AppStorage(NodeSettings.Key.fleetJoin) private var fleetJoin = NodeSettings.FleetJoin.invited.rawValue
+    @AppStorage(NodeSettings.Key.fleetTailnet) private var fleetTailnet = false
     @State private var backgroundBusy = false
     @State private var backgroundError: String?
     @AppStorage(NodeSettings.Key.limitMemory) private var limitMemory = true
@@ -298,6 +299,12 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                Toggle("Serve members over Tailscale only", isOn: $fleetTailnet)
+                Text(fleetTailnet
+                     ? "Members on this Mac's tailnet reach it over WireGuard, behind any router and with no port forwarded; nothing on your network or the internet can. Each member runs \"tailscale up\" before it joins. Being on the tailnet admits nobody: members still need an invitation. The node will not start while Tailscale is disconnected."
+                     : "Members reach this Mac on every network it is on. Turn this on to serve them on its Tailscale address instead.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let id = node.leaderId {
                     HStack(spacing: 8) {
                         Text("The fleet is paid to").font(.caption).foregroundStyle(.secondary)

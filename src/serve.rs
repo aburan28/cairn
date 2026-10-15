@@ -1070,11 +1070,27 @@ struct Request {
 /// job -- publishing a log -- and an async runtime would be a dependency and a
 /// rewrite for load this will not see.
 pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
+    listen_also(addr, None, serving)
+}
+
+/// [`listen`], also answering on `also` at the same port: the loopback twin of
+/// a tailnet address (see [`serve_on_all`]).
+pub fn listen_also(
+    addr: impl ToSocketAddrs,
+    also: Option<IpAddr>,
+    serving: Serving,
+) -> io::Result<()> {
     let serving = serving.enable_google_from_env();
     serving.check_startup()?;
     let listener = TcpListener::bind(addr)?;
     let local = listener.local_addr()?;
     eprintln!("cairn serve: listening on {local}");
+    let mut extra = Vec::new();
+    if let Some(ip) = also {
+        let twin = std::net::SocketAddr::new(ip, local.port());
+        extra.push(TcpListener::bind(twin)?);
+        eprintln!("cairn serve: and on {twin}");
+    }
     if let Some(spool) = &serving.spool {
         // Both admitters are named, because which one applies depends on
         // something this process cannot see. `cairn drain` wants the
@@ -1094,12 +1110,26 @@ pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
     } else {
         eprintln!("cairn serve: read-only; POST /submit will answer 405");
     }
-    serve_on(listener, serving)
+    serve_on_all(listener, extra, serving)
 }
 
 /// [`listen`], on a listener the caller already bound. Tests use this to get
 /// an ephemeral port without racing for one.
-pub fn serve_on(listener: TcpListener, mut serving: Serving) -> io::Result<()> {
+pub fn serve_on(listener: TcpListener, serving: Serving) -> io::Result<()> {
+    serve_on_all(listener, Vec::new(), serving)
+}
+
+/// [`serve_on`], answering on more than one listener with one [`Serving`] and
+/// one connection table. `listener` is the one `GET /network` reports; `also`
+/// are further addresses for the same server, such as the loopback twin of a
+/// tailnet address (`--serve tailnet:PORT`), so this machine's own tools and
+/// window keep reaching the node at `127.0.0.1` while nothing but the tailnet
+/// can reach it from outside.
+pub fn serve_on_all(
+    listener: TcpListener,
+    also: Vec<TcpListener>,
+    mut serving: Serving,
+) -> io::Result<()> {
     serving.bound = listener.local_addr().ok();
     // Ask Tailscale only when the tailnet can reach this listener: bound to a
     // tailnet address, or to every address. A loopback or LAN-only server
@@ -1133,6 +1163,17 @@ pub fn serve_on(listener: TcpListener, mut serving: Serving) -> io::Result<()> {
     let serving = Arc::new(serving);
     let open = Arc::new(Mutex::new(Connections::default()));
     reap(Arc::downgrade(&open));
+    for extra in also {
+        let (serving, open) = (Arc::clone(&serving), Arc::clone(&open));
+        std::thread::spawn(move || accept(extra, serving, open));
+    }
+    accept(listener, serving, open);
+    Ok(())
+}
+
+/// Answer every connection a listener accepts, each on its own thread, under
+/// the shared connection caps.
+fn accept(listener: TcpListener, serving: Arc<Serving>, open: Arc<Mutex<Connections>>) {
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(stream) => stream,
@@ -1169,7 +1210,6 @@ pub fn serve_on(listener: TcpListener, mut serving: Serving) -> io::Result<()> {
             linger(&mut stream);
         });
     }
-    Ok(())
 }
 
 /// Close an answered connection without destroying the answer.
@@ -7798,6 +7838,32 @@ mod tests {
         );
         let (_, leases) = get_json(fleet.addr, &format!("/leases/{}", fleet.objective_id));
         assert!(leases.canonical_string().contains(r#""member":true"#));
+    }
+
+    #[test]
+    fn one_server_answers_on_every_listener_it_is_given() {
+        let dir = TempDir::new("serve-also");
+        let (log, _) = orbit_search_log(&dir);
+        let primary = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let twin = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let (a, b) = (primary.local_addr().unwrap(), twin.local_addr().unwrap());
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")));
+        std::thread::spawn(move || {
+            let _ = serve_on_all(primary, vec![twin], serving);
+        });
+        for addr in [a, b] {
+            let (status, _) = ask_raw(addr, "GET", "/health", &[], b"");
+            assert!(status.contains("200"), "{addr}: {status}");
+        }
+        // `GET /network` describes the primary, whichever listener was asked.
+        let (_, network) = get_json(b, "/network");
+        let bound = network
+            .get("node")
+            .and_then(|n| n.get("reach"))
+            .and_then(|r| r.get("bound"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        assert_eq!(bound, Some(a.to_string()));
     }
 
     #[test]

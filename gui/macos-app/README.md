@@ -379,6 +379,7 @@ objective's pinned checker, one at a time, in a jail.
 | Attach to URL | off (run a local node) | — (no process; window loads the URL) |
 | Keep the node running in the background | off | — (a launchd agent, `org.cairn.node`, runs `cairn run --no-mcp` with every setting below; the window attaches to it) |
 | Lead a fleet | off | `--serve 0.0.0.0:<port>`, `--mcp-identity <data folder>/leader.identity.json`, `CAIRN_FLEET=<member networks>` |
+| Serve members over Tailscale only | off | `--serve tailnet:<port>` in place of `0.0.0.0:<port>` |
 | CPU cores | all | `CAIRN_SANDBOX_CPUS` |
 | Memory for each verifier | 4 GB | `CAIRN_SANDBOX_MEMORY_MB` (`0` when switched off) |
 | Share this node on my network | off | `--serve 0.0.0.0:<port>` (else `127.0.0.1`) |
@@ -483,6 +484,17 @@ Copy button, and as `node.fleet.signs_as` on `GET /network` -- and the node
 signs them on the way in, so the pay lands here and the worker never holds the
 key. The HTTP side is plaintext by design: the list of networks must mean a
 network you run, so turn this off before joining Wi-Fi you do not control.
+
+**Serve members over Tailscale only** (under *Lead a fleet*) serves the HTTP
+side on this Mac's Tailscale address instead of every interface: members on
+the same tailnet reach it over WireGuard from behind any router, and nothing on
+your Wi-Fi or the internet reaches it at all. The window keeps working, because
+the node also binds `127.0.0.1` on the same port. *Invite a machine…* fills in
+the MagicDNS URL from `GET /network`, and each member runs `tailscale up`
+before `cairn fleet join`. Being on the tailnet admits nobody: an invited fleet
+still signs only for the machines you invited. The node will not start while
+Tailscale is disconnected; the log says so. See
+[docs/fleet.md](../../docs/fleet.md#over-a-tailnet).
 
 **Changing the data folder** stops the node. If the old folder holds a node
 and the new one does not, you choose between copying it across, which keeps

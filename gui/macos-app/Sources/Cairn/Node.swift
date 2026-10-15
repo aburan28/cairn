@@ -356,7 +356,7 @@ final class Node: ObservableObject {
         // `cairn work` against it; the window reads 127.0.0.1 either way,
         // since 0.0.0.0 includes it. The P2P half uses the host Settings
         // chose -- loopback dials out only; 0.0.0.0 also accepts.
-        let http = Self.freePort(preferring: 8080, on: settings.serveHost)
+        let http = Self.freePort(preferring: 8080, on: settings.serveProbeHost)
         let p2p = Self.freePort(preferring: 9000, on: settings.p2pHost)
         guard http != 0, p2p != 0 else {
             state = .failed("Could not find a free port for the node to bind.")
