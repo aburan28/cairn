@@ -489,6 +489,10 @@ pub struct Serving {
     /// asked it to (`CAIRN_PORTMAP_HTTP`): `node.reach.external` on
     /// `GET /network`, the address a worker outside the LAN would dial.
     http_external: Option<Arc<Mutex<crate::p2p::reach::Report>>>,
+    /// This machine on its tailnet, when the HTTP side answers there:
+    /// `node.reach.tailnet` on `GET /network`, and the one MagicDNS name a
+    /// write may be addressed to without being listed (see [`crate::tailnet`]).
+    tailnet: Option<crate::tailnet::Status>,
     /// Optional Google sign-in. Anonymous unless the process asked for it
     /// ([`Serving::enable_google_from_env`]) or a test pinned one.
     google: GoogleAuth,
@@ -559,6 +563,7 @@ impl Serving {
             goals: goals::Catalog::from_env(),
             released: Mutex::new(BTreeMap::new()),
             http_external: None,
+            tailnet: None,
             google: GoogleAuth::anonymous(),
             google_pinned: false,
             journal: crate::journal::Journal::shared(crate::time::unix_seconds()),
@@ -680,6 +685,13 @@ impl Serving {
             );
         }
         Ok(self.with_fleet(sources, identity))
+    }
+
+    /// Say where this node is on its tailnet. Normally found by [`serve_on`]
+    /// itself; tests pin one.
+    pub fn with_tailnet(mut self, status: crate::tailnet::Status) -> Serving {
+        self.tailnet = Some(status);
+        self
     }
 
     /// Publish the router mapping of the HTTP port, which the daemon keeps.
@@ -1089,6 +1101,35 @@ pub fn listen(addr: impl ToSocketAddrs, serving: Serving) -> io::Result<()> {
 /// an ephemeral port without racing for one.
 pub fn serve_on(listener: TcpListener, mut serving: Serving) -> io::Result<()> {
     serving.bound = listener.local_addr().ok();
+    // Ask Tailscale only when the tailnet can reach this listener: bound to a
+    // tailnet address, or to every address. A loopback or LAN-only server
+    // never runs the command.
+    if let (None, Some(bound)) = (&serving.tailnet, serving.bound) {
+        let ip = bound.ip();
+        if ip.is_unspecified() || crate::tailnet::is_tailnet_ip(ip) {
+            match crate::tailnet::status() {
+                Ok(status) => {
+                    eprintln!(
+                        "cairn serve: on tailnet as {} ({})",
+                        status.host().unwrap_or_default(),
+                        status
+                            .addresses
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    serving.tailnet = Some(status);
+                }
+                // Not having Tailscale is the ordinary case and says nothing.
+                Err(crate::tailnet::Error::NotInstalled) => {}
+                Err(error) if crate::tailnet::is_tailnet_ip(ip) => {
+                    log::warn!("tailnet: bound to {ip} but {error}");
+                }
+                Err(_) => {}
+            }
+        }
+    }
     let serving = Arc::new(serving);
     let open = Arc::new(Mutex::new(Connections::default()));
     reap(Arc::downgrade(&open));
@@ -1315,7 +1356,7 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     if writes
         && verified.is_none()
         && request.path != "/fleet/join"
-        && !host_may_write(request.host.as_deref(), &allowed_hosts())
+        && !host_may_write(request.host.as_deref(), &serving.allowed_hosts())
     {
         return json_refusal(
             stream,
@@ -2551,6 +2592,14 @@ fn network(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                                     .lock()
                                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                                     .to_value(),
+                            );
+                        }
+                        if let (Value::Object(fields), Some(status), Some(bound)) =
+                            (&mut reach, &serving.tailnet, serving.bound)
+                        {
+                            fields.insert(
+                                "tailnet".to_string(),
+                                status.to_value(bound.port(), Some(bound.ip())),
                             );
                         }
                         reach
@@ -4569,6 +4618,22 @@ fn read_bounded_line(
 /// suffixes): the public name of a node behind a TLS proxy, say.
 /// Comma-separated.
 pub const ALLOWED_HOSTS_ENV: &str = "CAIRN_HTTP_HOSTS";
+
+impl Serving {
+    /// [`allowed_hosts`], plus this node's own MagicDNS name. That name is
+    /// not a stranger's page: it resolves to this machine on its tailnet and
+    /// to nothing anyone else controls. Every other `*.ts.net` name still has
+    /// to be listed.
+    fn allowed_hosts(&self) -> Vec<String> {
+        let mut names = allowed_hosts();
+        if let Some(status) = &self.tailnet {
+            if !status.dns_name.is_empty() {
+                names.push(status.dns_name.to_ascii_lowercase());
+            }
+        }
+        names
+    }
+}
 
 fn allowed_hosts() -> Vec<String> {
     std::env::var(ALLOWED_HOSTS_ENV)
@@ -7733,6 +7798,75 @@ mod tests {
         );
         let (_, leases) = get_json(fleet.addr, &format!("/leases/{}", fleet.objective_id));
         assert!(leases.canonical_string().contains(r#""member":true"#));
+    }
+
+    #[test]
+    fn a_node_on_a_tailnet_reports_it_and_takes_writes_to_its_own_magicdns_name() {
+        let dir = TempDir::new("tailnet-host");
+        let (log, objective_id) = orbit_search_log(&dir);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let status = crate::tailnet::parse_status(
+            br#"{"BackendState":"Running","Self":{"DNSName":"leader.tail1234.ts.net.","TailscaleIPs":["100.101.102.103"]}}"#,
+        )
+        .expect("fixture");
+        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")))
+            .accepting_into(dir.path.join("queue"))
+            .with_tailnet(status);
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+
+        let (_, network) = get_json(addr, "/network");
+        let tailnet = network
+            .get("node")
+            .and_then(|n| n.get("reach"))
+            .and_then(|r| r.get("tailnet"))
+            .expect("node.reach.tailnet");
+        assert_eq!(
+            tailnet.get("dns_name").and_then(Value::as_str),
+            Some("leader.tail1234.ts.net")
+        );
+        // Bound to loopback here, so no URL is offered: it would not answer.
+        assert_eq!(tailnet.get("url"), Some(&Value::Null));
+
+        let commitment = |tail: char| {
+            Value::object([
+                ("type", Value::string("commitment")),
+                ("objective_id", Value::string(objective_id.clone())),
+                ("submitter", Value::string("tailnet-test")),
+                (
+                    "hash",
+                    Value::string(format!("sha256:{}", tail.to_string().repeat(64))),
+                ),
+                (
+                    "created_at",
+                    Value::string(crate::time::format_iso8601_utc(
+                        crate::time::unix_seconds() as i64
+                    )),
+                ),
+            ])
+            .canonical_string()
+        };
+        // This node's own MagicDNS name is not a rebinding page.
+        let (status, body) = ask_raw(
+            addr,
+            "POST",
+            "/submit?kind=commitment",
+            &[("Host", "leader.tail1234.ts.net:8080")],
+            commitment('a').as_bytes(),
+        );
+        assert!(status.contains("202"), "{status} {body:?}");
+        // Somebody else's *.ts.net name still is, until it is listed.
+        let (status, body) = ask_raw(
+            addr,
+            "POST",
+            "/submit?kind=commitment",
+            &[("Host", "other.tail9999.ts.net")],
+            commitment('b').as_bytes(),
+        );
+        assert!(status.contains("421"), "{status}");
+        assert_eq!(reason(&body), Some("host_not_allowed"));
     }
 
     #[test]

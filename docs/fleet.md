@@ -186,6 +186,8 @@ out; the leader never dials them.
   /network` reports the result as `node.reach.external`. That makes the node
   reachable from the internet, which is why it is never on by default. Behind
   carrier-grade NAT, or a router that refuses, use a cloud leader or a tunnel.
+- **A leader and members on one tailnet** -- see *Over a tailnet* below. Works
+  behind any NAT, opens no port, and seals the HTTP side in WireGuard.
 
 **A machine you do not trust is a machine that can read your answers.**
 Enrollment authenticates the box to the leader. It does nothing about the
@@ -193,6 +195,64 @@ box's owner, who on a marketplace that rents out strangers' GPUs can read the
 member key and every artifact the walker finds before it is committed, and
 race it under their own name. Rent from providers you would trust with the
 answer.
+
+### Over a tailnet
+
+[Tailscale](https://tailscale.com) (or a self-hosted
+[Headscale](https://headscale.net)) gives every machine that runs `tailscale
+up` an address on a private network, seals every packet between two of them
+with WireGuard, and gets through NAT on its own, with a relay when it cannot.
+That is the tunnel the HTTP side has always wanted, without handing out
+WireGuard keys yourself, and without TLS in this crate: `cairn` only asks the
+`tailscale` command where this machine is.
+
+On the leader:
+
+```sh
+CAIRN_FLEET=enrolled cairn run --serve tailnet:8080 --mcp-identity leader.identity.json
+cairn fleet invite --identity leader.identity.json --name gpu-box-1 --node tailnet:8080
+#   cairn fleet join --node http://leader.tail1234.ts.net:8080 cairn-invite1…
+```
+
+`--serve tailnet:8080` binds the HTTP side to this machine's tailnet address
+**only** (`tailnet6:8080` for its IPv6 one), so nothing on the LAN or the
+internet can reach it; `--serve 0.0.0.0:8080` would answer the tailnet too,
+and everything else with it. The same keyword works for `cairn serve --listen`
+and for `--listen`, the p2p port. `--node tailnet:8080` puts the leader's
+MagicDNS name in the join line, which survives the machine's address changing.
+`GET /network` reports where the node is as `node.reach.tailnet`, with the URL
+to give members once the HTTP side answers there.
+
+On each member, join the tailnet first, then join as usual:
+
+```sh
+tailscale up                                   # a machine you own
+tailscale up --auth-key tskey-… --ephemeral    # a rented one: it leaves the tailnet when it goes
+cairn fleet join --node http://leader.tail1234.ts.net:8080 "$CAIRN_INVITE"
+```
+
+An ephemeral, pre-approved, tagged auth key from the tailnet's admin console is
+the rented-GPU shape: the box joins without a browser, can be limited by ACL to
+the leader's one port, and is removed from the tailnet when it goes offline.
+`cairn fleet join` says so when a tailnet leader does not answer.
+
+What it changes and what it does not:
+
+- **Reachability**: a Mac behind CGNAT can lead rented GPUs with no forwarded
+  port and nothing listening on the internet.
+- **Confidentiality on the path**: the HTTP side is sealed between tailnet
+  peers, so commitments, heartbeats and the fleet's size are no longer visible
+  to the networks in between. Tailscale's relays carry ciphertext only.
+- **Membership is unchanged.** Being on the tailnet admits nothing. An enrolled
+  leader signs only for a member key it invited, and anybody else on the
+  tailnet gets what a stranger at a public seed gets. There is deliberately no
+  `tailnet` value for `CAIRN_FLEET`'s trusted networks: it would make the
+  address the credential again, now chosen by whoever administers the tailnet.
+- **Tailscale is trusted to say who is on the tailnet**, not who may sign.
+  Use ACLs to keep members to the leader's port and away from each other.
+- A launchd agent or systemd unit may not find `tailscale` on its `PATH`;
+  `CAIRN_TAILSCALE=/path/to/tailscale` names it. Cairn.app has no switch for
+  this yet: set `--serve` by hand or run the leader from the CLI.
 
 ### Revoking
 
@@ -284,7 +344,8 @@ second leader enrolls it with an invite of its own.
   sealed: anyone on the path sees commitments (hashes), claims (public on
   admission anyway, and protected from copying by commit–reveal), heartbeats,
   and so the fleet's size and rate. No secret crosses it -- invite seeds and
-  member keys never do.
+  member keys never do. Over a tailnet the path is WireGuard, which
+  seals all of it; the node itself still speaks plaintext to `tailscaled`.
 - **No protection from a machine's owner.** See *Rented GPUs* above.
 - **No per-member rate limit, and no pay split.** The settlement names the
   leader; the journal says which member found what. If the members belong to
