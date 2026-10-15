@@ -90,8 +90,8 @@ export const ROLES: RoleInfo[] = [
     risk: "Power and wear. A machine that finds nothing earns nothing.",
     declares: "executor",
     start: {
-      app: "Node ▸ Work on This Mac…; Settings ▸ Roles ▸ Worker host for other machines",
-      inApp: { role: "worker-host", open: { sheet: "work", label: "Work on this Mac…" } },
+      app: "Node ▸ Share this Mac…; Settings ▸ Shared compute for other machines",
+      inApp: { role: "worker-host", open: { sheet: "work", label: "Share this Mac…" } },
     },
   },
   {

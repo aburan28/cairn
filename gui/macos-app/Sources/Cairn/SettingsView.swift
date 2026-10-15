@@ -27,6 +27,11 @@ struct SettingsView: View {
     @AppStorage(NodeSettings.Key.dataFolder) private var dataFolder = ""
     @AppStorage(NodeSettings.Key.p2pHost) private var p2pHost = NodeSettings.loopbackHost
     @AppStorage(NodeSettings.Key.shareHTTP) private var shareHTTP = false
+    @AppStorage(NodeSettings.Key.shareResources) private var shareResources = false
+    @AppStorage(NodeSettings.Key.resourceCPUs) private var resourceCPUs = 1
+    @AppStorage(NodeSettings.Key.resourceMemoryGB) private var resourceMemoryGB = NodeSettings.defaultSharedMemoryGB
+    @AppStorage(NodeSettings.Key.resourceStorageGB) private var resourceStorageGB = NodeSettings.defaultSharedStorageGB
+    @AppStorage(NodeSettings.Key.resourceConcurrency) private var resourceConcurrency = 1
     @AppStorage(NodeSettings.Key.offline) private var offline = false
     @AppStorage(NodeSettings.Key.validator) private var validator = false
     @AppStorage(NodeSettings.Key.bootstrap) private var bootstrap = ""
@@ -157,6 +162,40 @@ struct SettingsView: View {
             }
 
             Section {
+                Toggle("Offer this Mac for challenge work", isOn: $shareResources)
+                if shareResources {
+                    LabeledContent("CPU") {
+                        Stepper("", value: $resourceCPUs, in: 1...NodeSettings.cores)
+                            .labelsHidden()
+                        Text("\(resourceCPUs) core\(resourceCPUs == 1 ? "" : "s")")
+                            .frame(minWidth: 90, alignment: .leading)
+                    }
+                    LabeledContent("Memory") {
+                        Stepper("", value: $resourceMemoryGB, in: 1...max(1, NodeSettings.physicalMemoryGB))
+                            .labelsHidden()
+                        Text("\(resourceMemoryGB) GB")
+                            .frame(minWidth: 90, alignment: .leading)
+                    }
+                    LabeledContent("Storage") {
+                        Stepper("", value: $resourceStorageGB, in: 1...1_000_000, step: 5)
+                            .labelsHidden()
+                        Text("\(resourceStorageGB) GB")
+                            .frame(minWidth: 90, alignment: .leading)
+                    }
+                    LabeledContent("Concurrent challenges") {
+                        Stepper("", value: $resourceConcurrency, in: 1...64)
+                            .labelsHidden()
+                        Text("\(resourceConcurrency)")
+                            .frame(minWidth: 90, alignment: .leading)
+                    }
+                }
+            } header: {
+                Text("Shared compute")
+            } footer: {
+                Caption("Cairn publishes this offer so compatible challenges can be selected for this Mac. It does not run code, reserve work, or send data until a challenge worker is configured. Changes apply after the node restarts.")
+            }
+
+            Section {
                 roles
             } header: {
                 Text("Roles")
@@ -166,7 +205,7 @@ struct SettingsView: View {
                     readers see on the Network page. None of them gives this node a say \
                     over what is paid: only an objective's pinned checker decides that. \
                     Solving challenges is done by you, your agent (Node ▸ Connect an \
-                    Agent…) or your solver (Node ▸ Work on This Mac…), and is paid when \
+                    Agent…) or your solver (Node ▸ Share this Mac…), and is paid when \
                     an answer is accepted. The Contribute page in the window explains \
                     every role, how each one is paid, and has a button for each.
                     """)
@@ -373,7 +412,7 @@ struct SettingsView: View {
             Toggle("Worker host — let machines on my network work for this node", isOn: $shareHTTP)
             Caption("""
                 Same as "Share this node on my network" below. Each machine opens \
-                Contribute in its own Cairn.app and chooses Work on This Mac… with \
+                Contribute in its own Cairn.app and chooses Share this Mac… with \
                 this node's address, and is paid for what the \
                 checker accepts, like any solver.
                 """)

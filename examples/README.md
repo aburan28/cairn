@@ -24,7 +24,7 @@ column for every committed artifact is what `cairn try` reported on that date.
 and 40 objective files; its own row was measured then. `replay-reproduction`
 was added on 2026-10-04 (21 directories, 41 objective files). `bound-frontier`
 was added on 2026-10-06; `find examples -name 'objective*.json'` then counted
-56 files in 27 directories after adding `crypto-goals/rsa-factoring` (three objectives) and `crypto-goals/secp256k1-dlog` (one objective). The two directories with objective files not shown in this table remain `lab/` (a lab policy and its environments) and `workspace-network/`.
+62 files in 28 directories after adding `crypto-goals/rsa-factoring` (three objectives), `crypto-goals/secp256k1-dlog` (one objective), the ECC2-131 objective in `certicom-ecdlp`, and the NIST prime-curve (`crypto-goals/nist-dlog`) and BLS12-381 G1/G2 (`crypto-goals/bls12-381-dlog`) DLP objectives. The two directories with objective files not shown in this table remain `lab/` (a lab policy and its environments) and `workspace-network/`.
 
 | example | verifier | reward | status | needs | worked artifact |
 |---|---|---|---|---|---|
@@ -46,7 +46,9 @@ was added on 2026-10-06; `find examples -name 'objective*.json'` then counted
 | [`bound-frontier`](bound-frontier/) | evaluator (maximize) + ratchet | 1000000 | worked — a **measured** ECDLP bound rescored from its own counts against the generic floor; an accept is a receipt for a self-consistent record, not a replay | python3 | `artifacts/prime-rho-neg.json` (score 682064), `artifacts/prime-bsgs-neg.json` (866743); `tampered-mean-gae.json` is there to be refused |
 | [`lean`](lean/) | lean | 50000 | worked, if you have Lean — `unavailable` on a node without it | a Lean 4 toolchain on PATH | `artifact.json`; `hole.json` is the `sorry` the verifier refuses |
 | [`elliptic-rank`](elliptic-rank/) | certificate + exact evaluator | 20000000 – 64000000 | **4 open rank-record bounties**; public proven record 31, next target 32 | python3 | `artifacts/rank-30-record.json` — a baseline, rejected by the rank-31 objective |
-| [`certicom-ecdlp`](certicom-ecdlp/) | certificate + piecework | 120000 / 400000 / 2000000 | open answer challenges: NUMS 50/60-bit rungs, ECCp-131 and ECC2K-130; separate rho/orbit piecework objectives pay for search progress | python3 | none |
+| [`certicom-ecdlp`](certicom-ecdlp/) | certificate + piecework | 120000 / 400000 / 2000000 | open answer challenges: NUMS 50/60-bit rungs, ECCp-131, ECC2-131 and ECC2K-130; separate rho/orbit piecework objectives pay for search progress | python3 | none |
+| [`crypto-goals/nist-dlog`](crypto-goals/nist-dlog/) | certificate ×3 | 40960000 / 81920000 / 163840000 | **open bounty** ×3 — standard-curve full-order ECDLP challenges on NIST P-256, P-384, and P-521 | python3 | none |
+| [`crypto-goals/bls12-381-dlog`](crypto-goals/bls12-381-dlog/) | certificate ×2 | 81920000 each | **open bounty** ×2 — full-order DLP in the BLS12-381 G1 and G2 pairing subgroups | python3 | none |
 | [`first-blood`](first-blood/) | certificate | 100000 – 409600000 | **open bounty** ×5 | python3 | none |
 | [`aadp-witness-encryption`](aadp-witness-encryption/) | certificate | 300000 | **open bounty** — an external cryptanalysis challenge, pinned as posted | python3 | none |
 | [`crypto-goals/rsa-factoring`](crypto-goals/rsa-factoring/) | certificate ×3 | 100000000 / 200000000 / 400000000 | three fixed historical RSA challenge moduli (1024, 1536, 2048 bits); Cairn rewards only | python3 | none |

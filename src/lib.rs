@@ -60,6 +60,7 @@ pub mod progress;
 pub mod prompts;
 pub mod records;
 pub mod scaffold;
+pub mod scheduling;
 pub mod schema;
 pub mod sealed;
 pub mod secret_file;

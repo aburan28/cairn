@@ -24,6 +24,7 @@ import type { McpPresence } from "./agents";
 import type { Liveness } from "./progress";
 
 import { expectFields } from "./shape";
+import type { CapabilityEdge, ResourceOffer } from "./scheduling";
 
 export type Reach = "reached" | "recent" | "lost" | "unreached";
 
@@ -185,6 +186,7 @@ export type HostRow = {
   usable_sandboxes: string[];
   jobs: { running?: number; capacity?: number; completed?: number; failed?: number };
   objectives: string[];
+  resources?: ResourceOffer;
   /** Registered by an enrolled fleet member. */
   member?: boolean;
 };
@@ -221,6 +223,8 @@ export type Compute = {
   devices: DeviceRow[];
   classes: ClassRow[];
   objectives: ObjectiveRow[];
+  /** Live host offers matched to open objectives, from this node's view. */
+  assignments?: CapabilityEdge[];
   /** Absent on a node that predates `POST /hosts`. */
   hosts?: Hosts;
   live_within_seconds: number;
@@ -246,6 +250,8 @@ export type NodeFacts = {
   /** Declarations the configuration contradicts, in the node's words. */
   warnings: string[];
   hardware: Hardware;
+  /** This node's opt-in resource offer, absent when sharing is off. */
+  resources?: ResourceOffer | null;
   verifiers: {
     servable: string[];
     unservable: Record<string, string>;

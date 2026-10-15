@@ -1,0 +1,29 @@
+{
+  "artifact_schema": {
+    "description": "The BLS12-381 G2 discrete logarithm, as 64 lowercase hexadecimal digits.",
+    "example": {
+      "k": "0000000000000000000000000000000000000000000000000000000012345678"
+    },
+    "properties": {
+      "k": {
+        "description": "k with k*G = Q, in [1, r), zero-padded to exactly 64 lowercase hexadecimal digits.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "k"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-10-10T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-bls12-381-g2-dlog",
+  "reward": 81920000,
+  "statement": "Find k in the 255-bit prime-order BLS12-381 G2 subgroup such that k*G = Q, where G is the published G2 twist base point and Q is deterministically derived by the pinned checker. The checker samples x in Fp2 by SHAKE256 over the public seed cairn/bls12-381/g2-dlog/v1 and a counter, chooses the first x whose curve equation y\u00b2=x\u00b3+4(u+1) has a square root, and multiplies the point by the full G2 twist cofactor. The extension field is Fp[u]/(u\u00b2+1). The construction chooses no scalar. Submit k in [1,r) as exactly 64 lowercase hexadecimal digits. The checker verifies Q has order r and accepts only k*G=Q. The derived target coordinates are Q=((x0=0a2ea103d8b1c3ccac40e2be10ddfc6d45663f5dafab1e507e258ae0ff19373926f70207cf318f19f5c0fc054acd5e13, x1=08b13a30164276442cd107b60f9fa2bfa8285cef272dc662c3f63c9055d90404114b149248e47c665ada820a18f995dc), (y0=17ab7b18ec23c2bfa8e076087014af9122d7491632d9bcdcef33849ab2acf089e94cae206037dfb838681248e1f23a28, y1=021ff5d36f0e2cda54f7e6307d1d5f4402a11175e7aaf13c417971ffb5e944b5a9b97e2e45c3fd92198f6e373cc3eb8e)); the first valid counter is 0.",
+  "verifier": {
+    "checker": "examples/crypto-goals/bls12-381-dlog/checkers/bls12_381_g2.py",
+    "checker_sha256": "a4f2ca08add50b1738cb552d385f34cf7273f81cd1328ded1a0fb459eefab093",
+    "entrypoint": "check",
+    "kind": "certificate"
+  }
+}

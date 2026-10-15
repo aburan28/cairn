@@ -42,7 +42,7 @@ struct CairnApp: App {
                     .disabled(delegate.node.isAttached)
                 Button("Connect an Agent…") { delegate.node.presentAgents = true }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
-                Button("Work on This Mac…") { delegate.node.work() }
+                Button("Share this Mac…") { delegate.node.work() }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
                 Button("Secrets…") { delegate.node.presentSecrets = true }
                 Button("Peers…") { delegate.node.presentPeers = true }

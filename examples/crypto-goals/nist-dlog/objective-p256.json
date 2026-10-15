@@ -1,0 +1,29 @@
+{
+  "artifact_schema": {
+    "description": "The discrete logarithm k, as 64 lowercase hexadecimal digits.",
+    "example": {
+      "k": "0000000000000000000000000000000000000000000000000000000000003039"
+    },
+    "properties": {
+      "k": {
+        "description": "k with k*G = Q, in [1, n), zero-padded to exactly 64 lowercase hexadecimal digits.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "k"
+    ],
+    "type": "object"
+  },
+  "created_at": "2026-10-10T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-nist-p256-dlog",
+  "reward": 40960000,
+  "statement": "Find the discrete logarithm k for the NIST P-256 curve: k*G = Q. The checker pins the NIST SP 800-186 domain parameters and derives Q by trying x-coordinates from SHAKE256(seed || counter), selecting the first curve point and choosing its y parity from the digest. The seed is cairn/nist-prime-curve-dlog/p256/v1. This deterministic construction does not choose k. Submit k in [1,n), as exactly 64 lowercase hexadecimal digits. The order n is prime and the curve cofactor is 1, so the answer is unique in this range. The derived target is Q=(83395d3abaed1ac2ecd18416e5a6cf1fb7c837347c024d6c490edec8a5e9cd5a, 22986b7bb5352fddecf9699fef80a54f377e9eb3d11d106f35a0d391e76c5b05); the first valid counter is 0.",
+  "verifier": {
+    "checker": "examples/crypto-goals/nist-dlog/checkers/nist_dlog.py",
+    "checker_sha256": "57476e5cc869d3d46f79bf1fd3811ceae45d45c1bf7d8e8593df644451a4ff5f",
+    "entrypoint": "check_p256",
+    "kind": "certificate"
+  }
+}

@@ -190,6 +190,35 @@ remove: `rm ~/.local/bin/cairn`.
 
 On Linux it tells you if `bubblewrap` is missing; it cannot install it for you.
 
+## A cloud workspace: install it and dial the seed
+
+```sh
+scripts/cloud-setup.sh              # install, start a node, dial the seed, report
+scripts/cloud-setup.sh install      # install only
+```
+
+For an ephemeral Linux container (a Claude cloud workspace was the case it was
+written for) where there is no one to run `install.sh`, answer a package
+prompt, or start a service. It needs only `curl` and `tar`, so it can be
+fetched and run on its own. It installs the latest release's static build to
+`~/.cairn/bin` after checking its `.sha256`, creates a signing identity, fetches
+the repository at that release as the `--root` that pinned checkers resolve
+against (without one every claim a node is asked to check answers
+`unavailable`), installs `bubblewrap` where it can and sets
+`CAIRN_REQUIRE_SANDBOX=1`, then starts `cairn run` with the seed list built into
+the binary and prints who it reached. `install` alone starts nothing and does not
+fail when the seed is unreachable, which is what makes it safe as an environment
+setup script: a setup script that exits non-zero breaks every new session.
+
+**It can only use the network the environment gives it.** Such a container
+reaches the internet through a proxy, and when this was written only outbound
+port 443 got through, while a seed's p2p port is not 443. The script's
+preflight says which it is: it tests the seed, then tests other live non-web
+ports, and reports a blocked port as a blocked port rather than as a seed that
+is down. A node started where nothing outbound reaches the seed runs, retries
+once a minute, and has no peers. `--require-seed` turns that into a non-zero
+exit. The script posts nothing, funds nothing and submits no claim.
+
 ## Python
 
 Both verifiers the published launch log pins need **Python 3.9 or later**, and

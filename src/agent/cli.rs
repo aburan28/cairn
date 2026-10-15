@@ -20,6 +20,7 @@ use super::service::{self, Install};
 use super::{AgentError, DATA_ENV, DEFAULT_DATA_DIR, DEFAULT_INTERVAL_SECONDS};
 use crate::canonical::Value;
 use crate::fleet::auth::MemberFile;
+use crate::scheduling::ResourceOffer;
 
 pub const NODES_ENV: &str = "CAIRN_AGENT_NODES";
 pub const NAME_ENV: &str = "CAIRN_AGENT_NAME";
@@ -466,6 +467,13 @@ impl Loop {
             .iter()
             .filter_map(|r| r.job.objective_id.clone())
             .collect();
+        let resources = ResourceOffer {
+            cpus: self.inventory.cgroup_cpus.or(self.inventory.cpus),
+            memory_mb: self.inventory.cgroup_memory_mb.or(self.inventory.memory_mb),
+            gpus: Some(self.inventory.gpus.len() as u64),
+            storage_mb: None,
+            concurrency: Some(self.parallel as u64),
+        };
         Value::object([
             ("host", Value::string(self.name.clone())),
             ("agent", Value::string(super::CLIENT)),
@@ -475,6 +483,7 @@ impl Loop {
             ),
             ("hardware", self.inventory.to_value()),
             ("sandboxes", self.sandboxes.to_value()),
+            ("resources", resources.to_value()),
             (
                 "jobs",
                 Value::object([
