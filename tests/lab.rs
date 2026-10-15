@@ -1312,6 +1312,49 @@ fn host_snapshots_sync_with_the_run_and_restore_executable_inputs() {
     assert!(replay::Mount::from_value(&invalid).is_err());
 }
 
+#[test]
+fn host_mounts_stay_private_until_replication_is_explicitly_requested() {
+    use cairn::lab::{
+        env,
+        replay::{self, Mode},
+    };
+    let alice = id(123);
+    let mut lab = space("private-host", &alice, &[], Policy::default());
+    let image = temp("private-host-env");
+    fs::create_dir_all(&image).unwrap();
+    env::import(
+        &mut lab,
+        &alice,
+        "tiny",
+        &env::Source::Dir(image),
+        &env::ImportOptions::default(),
+    )
+    .unwrap();
+    let host = temp("private-host-data");
+    fs::create_dir_all(&host).unwrap();
+    let secret = b"fixture-private-host-input";
+    fs::write(host.join("secret.txt"), secret).unwrap();
+    let blob = cairn::canonical::digest_bytes(secret);
+    let mut request = ExecRequest::new("tiny", vec!["/bin/sh".into(), "-c".into(), "true".into()]);
+    request.sandbox = Preference::Unconfined;
+    request.mounts.push((host, "/private".into()));
+    let private = api::exec(&mut lab, &alice, &request).unwrap();
+    assert!(private.outcome.succeeded());
+    assert!(!lab.blobs().has(&blob));
+    assert!(!sync::referenced_blobs(&lab).contains(&blob));
+    assert!(matches!(
+        replay::plan(&mut lab, &private.op.id, Mode::Exact),
+        Err(LabError::Unavailable(_))
+    ));
+    request.snapshot_hosts = true;
+    let shared = api::exec(&mut lab, &alice, &request).unwrap();
+    assert!(shared.outcome.succeeded());
+    assert!(lab.blobs().has(&blob));
+    assert!(sync::referenced_blobs(&lab).contains(&blob));
+    let plan = replay::plan(&mut lab, &shared.op.id, Mode::Exact).unwrap();
+    assert_eq!(plan.mounts[0].files[0].blob.as_deref(), Some(blob.as_str()));
+}
+
 /// One scenario, run under one backend: inputs read-only, outputs published,
 /// a read-only root, the program's own exit status passed through, a missing
 /// program reported as an infrastructure error, and a deadline enforced.

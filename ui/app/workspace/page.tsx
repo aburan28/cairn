@@ -84,11 +84,12 @@ function WorkspaceView({ workspace, base }: { workspace: Workspace; base: string
           <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap break-all">{JSON.stringify(run.receipt, null, 2)}</pre>
         </details>
         <div className="mt-3 flex flex-wrap gap-2">
-          <button className="btn btn-sm" disabled={run.receipt.replay_version !== 1} onClick={() => setAction({ run, mode: "exact" })}>Replay recorded inputs</button>
-          <button className="btn btn-sm" disabled={run.receipt.replay_version !== 1} onClick={() => setAction({ run, mode: "reapply" })}>Run on current workspace</button>
+          <button className="btn btn-sm" disabled={run.receipt.replay_version !== 1 || run.receipt.mounts?.some((mount) => mount.kind === "host" && !mount.snapshot)} onClick={() => setAction({ run, mode: "exact" })}>Replay recorded inputs</button>
+          <button className="btn btn-sm" disabled={run.receipt.replay_version !== 1 || run.receipt.mounts?.some((mount) => mount.kind === "host" && !mount.snapshot)} onClick={() => setAction({ run, mode: "reapply" })}>Run on current workspace</button>
           {!!run.candidates.length && objective && <button className="btn btn-sm" onClick={() => setAction({ run, mode: "promote" })}>Prepare promotion</button>}
         </div>
         {run.receipt.replay_version !== 1 && <p className="hint">This older receipt has no replayable input manifest.</p>}
+        {run.receipt.mounts?.some((mount) => mount.kind === "host" && !mount.snapshot) && <p className="hint">A host input was kept private. Its bytes were not shared, so this run cannot be replayed from the lab. Explicitly snapshot host inputs when publishing a replayable experiment.</p>}
         {run.candidates.map((candidate) => <div key={candidate.path} className="mt-3 text-[12px]">
           <a className="text-accent underline" href={`${base}/workspace/${workspace.summary.space}/blob/${candidate.blob}`} download="artifact.json">Download artifact.json</a> · <Hash value={candidate.artifact_hash} />
           {!candidate.claims.length && <p className="hint">No matching claim in this node’s log. A successful experiment is not a verified result.</p>}

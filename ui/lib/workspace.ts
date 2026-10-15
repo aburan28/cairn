@@ -6,7 +6,7 @@ export type Run = {
   receipt: {
     replay_version?: number; input_heads?: string[]; argv?: string[]; cwd?: string;
     env?: { name: string; tree: string; manifest?: string };
-    mounts?: { kind: string; prefix?: string; target: string; single?: boolean; snapshot?: PinnedFile[] }[];
+    mounts?: { kind: string; prefix?: string; target: string; single?: boolean; snapshot?: PinnedFile[] | null }[];
     lineage?: { of: string; mode: string; baseline?: string };
     replay_comparison?: { outputs_identical: boolean; stdout_identical: boolean; stderr_identical: boolean; changed_paths: string[] };
     error?: string | null; exit_status?: number | null;

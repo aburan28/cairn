@@ -219,7 +219,20 @@ PY
 rule "the operator drains the queue through the rules engine"
 "$RUST" --log "$LOG" --root . drain --queue "$QUEUE" | sed 's/^/  /'
 served_has commitment || fail "the commitment never reached the log"
-[ -z "$(ls -A "$QUEUE" 2>/dev/null)" ] || fail "the queue was not emptied"
+[ -z "$(find "$QUEUE" -maxdepth 1 -type f -name '*.json' -print)" ] || fail "the queue was not emptied"
+python3 - "$PORT" "$QUEUE" <<'PY'
+import json, pathlib, sys, urllib.request
+port, queue = sys.argv[1:]
+receipts = list((pathlib.Path(queue) / "receipts").glob("*.json"))
+assert receipts, "drain lost the submission's receipt"
+for path in receipts:
+    saved = json.loads(path.read_text())
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/submissions/{saved['queued']}", timeout=10) as response:
+        tracked = json.load(response)
+    assert tracked["status"] == "admitted", tracked
+    assert tracked["record_id"], tracked
+print("  GET /submissions/{queued} -> admitted after the proposal left the queue")
+PY
 
 rule "reveal in a later epoch, through the queue again"
 sleep 4.2

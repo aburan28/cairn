@@ -44,8 +44,8 @@ keyboard behavior and phone dismissal, failed-read recovery, an actual payout
 lookup, field navigation, a file digest delayed across canonicalization,
 waiting for a wallet, signature invalidation after an edit, and a real node
 reached through a seed alias. With a piecework objective it also checks slice
-details and the coverage disclosure. See `ui/README.md` for setup. The only
-POST it sends is canonicalization; it never queues a record.
+details and the coverage disclosure. See `ui/README.md` for setup. Direct smoke runs send only canonicalization. The isolated wrapper described
+below also exercises real queued submissions against its temporary ledger.
 
 ## Follow-through, 15 October 2026
 
@@ -73,3 +73,18 @@ Portable Swift tests and source syntax checks run on Linux. SwiftUI/AppKit
 compilation and native window/worker behavior require macOS and iOS; their
 build gates include the shared library. Browser results do not certify native
 window behavior.
+
+
+The worker smoke check also exposed a Linux lifecycle bug: an orphaned,
+completed managed worker could remain a zombie under a minimal container
+init, so `kill -0` kept Stop at “stopping” and prevented another Start.
+`live_pid` now distinguishes that kernel state, with an actual unreaped-child
+regression test. The worker demo still requires commitment draining and a
+safe reveal before completion.
+
+
+Challenge composition also rejects fractional thresholds and integer inputs
+outside JavaScript's exact range before canonicalization, including reward,
+ratchet fields and timeout. Statistical checkers must scale fractional scores
+to integers, as the node requires. Zero ratchet spans compare numeric values,
+so `01` and `1` cannot slip through as different endpoints.

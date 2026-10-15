@@ -74,12 +74,12 @@ export default function Page() {
   useEffect(() => setBridge(appBridge()), []);
 
   const { value, error, readAt, refresh, loading } = useNodeRead(async (base) => {
-    const [network, sessions, page] = await Promise.all([
+    const [network, sessionRead, page] = await Promise.all([
       fetchNetwork(base),
-      fetchSessions(base).catch((cause: unknown) => { if (cause instanceof RouteMissing) return null; throw cause; }),
+      fetchSessions(base).then((value) => ({ value, problem: null as string | null }), (cause: unknown) => ({ value: null, problem: cause instanceof RouteMissing ? null : cause instanceof Error ? cause.message : String(cause) })),
       fetchEvents(base).catch(() => null),
     ]);
-    return { network, sessions, page };
+    return { network, sessions: sessionRead.value, sessionProblem: sessionRead.problem, page };
   }, { seconds: REFRESH_SECONDS });
   const network = value?.network ?? null;
   const sessions = value?.sessions ?? null;
@@ -114,6 +114,7 @@ export default function Page() {
     <Dashboard
       network={network}
       sessions={sessions}
+      sessionProblem={value?.sessionProblem ?? null}
       events={events.events}
       readAt={readAt}
       stale={error}
@@ -127,6 +128,7 @@ export default function Page() {
 function Dashboard({
   network,
   sessions,
+  sessionProblem,
   events,
   readAt,
   stale,
@@ -136,6 +138,7 @@ function Dashboard({
 }: {
   network: NetworkResponse;
   sessions: SessionsResponse | null;
+  sessionProblem: string | null;
   events: NodeEvent[];
   readAt: Date | null;
   stale: string | null;
@@ -330,7 +333,7 @@ function Dashboard({
           }
           flush
         >
-          <PeersTable sessions={sessions} announced={peers.announced} />
+          <PeersTable sessions={sessions} announced={peers.announced} problem={sessionProblem} />
         </Box>
       </section>
 
@@ -473,11 +476,11 @@ function MachineLine({ machine }: { machine: Machine }) {
 
 // -- other nodes -----------------------------------------------------------------
 
-function PeersTable({ sessions, announced }: { sessions: SessionsResponse | null; announced: number }) {
+function PeersTable({ sessions, announced, problem }: { sessions: SessionsResponse | null; announced: number; problem: string | null }) {
   if (!sessions) {
     return (
       <p className="px-4 py-6 text-[13px] text-ink-3">
-        This node is older than the session report, so whom it has reached cannot be listed;{" "}
+        {problem ? `The session report could not be read: ${problem} Refresh to retry; ` : "This node is older than the session report, so whom it has reached cannot be listed; "}
         <Link href="/peers" className="text-accent">
           the address book
         </Link>{" "}

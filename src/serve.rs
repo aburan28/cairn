@@ -273,7 +273,13 @@ impl Spool {
             std::process::id(),
             NEXT_OFFER.fetch_add(1, Ordering::Relaxed)
         ));
-        durable_write(&tmp, &bytes).map_err(OfferError::Io)?;
+        // A failed offer is not pending work. Retries must not retain a new
+        // partial copy each time receipt storage or publication fails.
+        let failed = |error| {
+            let _ = std::fs::remove_file(&tmp);
+            OfferError::Io(error)
+        };
+        durable_write(&tmp, &bytes).map_err(failed)?;
         self.write_receipt(
             &id,
             kind,
@@ -282,8 +288,8 @@ impl Spool {
             "Waiting for this node to admit the proposal.",
             &crate::time::timestamp(),
         )
-        .map_err(OfferError::Io)?;
-        std::fs::rename(&tmp, &path).map_err(OfferError::Io)?;
+        .map_err(failed)?;
+        std::fs::rename(&tmp, &path).map_err(failed)?;
         sync_directory(&self.dir).map_err(OfferError::Io)?;
         Ok(id)
     }
@@ -6288,6 +6294,23 @@ mod tests {
             Some("queued")
         );
         assert_eq!(spool.pending().len(), 1);
+    }
+
+    #[test]
+    fn receipt_storage_failure_does_not_accumulate_partial_proposals() {
+        let dir = TempDir::new("receipt-storage-failure");
+        let spool = Spool::at(dir.path.join("queue"));
+        std::fs::create_dir_all(spool.dir()).unwrap();
+        std::fs::write(spool.dir().join("receipts"), b"not a directory").unwrap();
+        for _ in 0..7 {
+            assert!(spool.offer("objective", &draft("storage-failure")).is_err());
+        }
+        assert_eq!(spool.queued(), 0);
+        assert!(!std::fs::read_dir(spool.dir()).unwrap().any(|entry| entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "tmp")));
     }
 
     #[test]

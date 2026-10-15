@@ -222,6 +222,9 @@ pub struct ExecRequest {
     /// Host directories mounted read-only. Recorded in the receipt by tree
     /// digest, since a host path means nothing to anyone else.
     pub mounts: Vec<(PathBuf, String)>,
+    /// Explicit consent to replicate host input bytes. Without it, host
+    /// mounts keep their original hash-only, non-replayable behavior.
+    pub snapshot_hosts: bool,
     /// Lab path the outputs are published under. A fresh `runs/…` when
     /// unset.
     pub publish: Option<String>,
@@ -248,6 +251,7 @@ impl ExecRequest {
             argv,
             inputs: Vec::new(),
             mounts: Vec::new(),
+            snapshot_hosts: false,
             publish: None,
             cwd: None,
             env_vars: BTreeMap::new(),
@@ -306,7 +310,21 @@ pub fn exec(
     if !env::verify(lab, &environment.tree)? {
         return Err(LabError::Unavailable("the environment tree changed under its recorded digest; import the original image before running".into()));
     }
-    let mounts = replay::capture(lab, &state, &request.inputs, &request.mounts)?;
+    let mut mounts = replay::capture(
+        lab,
+        &state,
+        &request.inputs,
+        if request.snapshot_hosts {
+            &request.mounts
+        } else {
+            &[]
+        },
+    )?;
+    if !request.snapshot_hosts {
+        for (source, target) in &request.mounts {
+            mounts.push(replay::Mount::private_host(source, target)?);
+        }
+    }
     let heads = lab.heads().iter().cloned().collect::<Vec<_>>();
     execute(lab, identity, request, environment, &mounts, &heads, None)
 }

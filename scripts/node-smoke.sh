@@ -91,9 +91,9 @@ await_in_log() {  # port pattern -- a line of GET /log matches the grep pattern
   return 1
 }
 await_kind() { await_in_log "$1" "\"kind\": *\"$2\""; }  # port kind
-await_queue_empty() {  # dir -- the daemon's own drain took every spooled file
+await_queue_empty() {  # dir -- drained proposals; receipt history remains
   for _ in $(seq 1 60); do
-    [ -z "$(ls -A "$1" 2>/dev/null)" ] && return 0
+    [ -z "$(find "$1" -maxdepth 1 -type f -name '*.json' -print 2>/dev/null)" ] && return 0
     sleep 0.5
   done
   return 1

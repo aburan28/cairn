@@ -10,8 +10,7 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     let view: WKWebView
     /// Host (and optional port) of the node this window is showing. Links on
     /// that host stay here; everything else opens in the system browser.
-    private var nodeHost: String?
-    private var nodePort: Int?
+    private var nodeOrigin: URL?
     /// What to do when the reader's Post a challenge page hands over a
     /// description: open New Challenge… with it, or return why not.
     var onDraftChallenge: (@MainActor (String) -> String?)?
@@ -49,8 +48,7 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
 
     func show(_ url: URL) {
         let shown = view.url
-        nodeHost = url.host
-        nodePort = url.port
+        nodeOrigin = NodeEndpoint.origin(url)
         // The same node, back from a restart: reload the page the person was
         // on rather than sending them to the overview. Turning a role on
         // from the Contribute page restarts the node, and coming back to a
@@ -124,7 +122,7 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     }
 
     fileprivate var isLocalChallengePage: Bool {
-        guard let nodeHost else { return false }
+        guard let nodeHost = nodeOrigin?.host else { return false }
         return ["localhost", "127.0.0.1", "::1"].contains(nodeHost)
             && view.url?.lastPathComponent == "submit"
     }
@@ -177,21 +175,10 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     }
 
     private func isNode(_ url: URL) -> Bool {
-        guard let scheme = url.scheme, scheme == "http" || scheme == "https" else {
-            return url.scheme == "about" || url.scheme == "blob" || url.scheme == "data"
-        }
-        guard let host = url.host else { return false }
-        // Loopback aliases count as the same node when that is what we opened.
-        let local: Set<String> = ["127.0.0.1", "localhost"]
-        if let nodeHost {
-            if host == nodeHost { return url.port == nodePort || (url.port == nil && nodePort == nil) }
-            if local.contains(host) && local.contains(nodeHost) {
-                return url.port == nodePort || (url.port == nil && (nodePort == nil || nodePort == 80))
-            }
-            return false
-        }
-        return local.contains(host)
+        guard let nodeOrigin else { return url.absoluteString == "about:blank" }
+        return ReaderNavigation.staysInReader(url, node: nodeOrigin)
     }
+
 }
 
 /// What the reader's pages may ask of the app: to open New Challenge… with

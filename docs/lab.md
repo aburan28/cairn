@@ -265,9 +265,11 @@ unambiguous. The root filesystem is re-hashed before use. The signed run
 publishes its input manifest together with the outputs after execution;
 a crash before publication leaves no completed run.
 
-Host directories are snapshotted into blobs and mounted from those copies,
-so a host edit while the command runs cannot change an already selected
-input. Snapshots normalize files to 0644 or 0755, preserve empty directories,
+Host mounts stay private and hash-only by default. Such a run cannot be
+replayed from lab data. With explicit `exec --snapshot-hosts`, host directories
+are copied into blobs and mounted from those copies, so a later host edit
+cannot change an already selected input. This option replicates the input
+bytes to the lab; use it only for data meant to be shared. Snapshots normalize files to 0644 or 0755, preserve empty directories,
 refuse symlinks/special files, and cap each host mount at 4,096 entries and
 1 GiB. These snapshots sync with the run. A host input is consequently a
 published lab input, not a way to keep a mounted secret out of a replica.

@@ -46,10 +46,37 @@ pub struct Mount {
     pub target: String,
     pub single: bool,
     pub files: Vec<File>,
+    local: Option<(PathBuf, env::Tree)>,
 }
 
 impl Mount {
+    /// A digest records an observation; it is not permission to replicate
+    /// host bytes. Preserve private mounts until the operator opts in.
+    pub fn private_host(source: &Path, target: &str) -> Result<Self, LabError> {
+        let source = fs::canonicalize(source)?;
+        let tree = env::tree_digest(&source)?;
+        Ok(Self {
+            kind: "host".into(),
+            prefix: String::new(),
+            target: target.into(),
+            single: false,
+            files: Vec::new(),
+            local: Some((source, tree)),
+        })
+    }
+
     pub fn to_value(&self) -> Value {
+        if let Some((_, tree)) = &self.local {
+            return Value::object([
+                ("kind", Value::string("host")),
+                ("prefix", Value::string("")),
+                ("target", Value::string(&self.target)),
+                ("single", Value::Bool(false)),
+                ("snapshot", Value::Null),
+                ("tree", Value::string(&tree.digest)),
+                ("files", Value::Int(tree.files.into())),
+            ]);
+        }
         Value::object([
             ("kind", Value::string(&self.kind)),
             ("prefix", Value::string(&self.prefix)),
@@ -80,6 +107,9 @@ impl Mount {
         let kind = text(value, "kind")?;
         if !matches!(kind, "lab" | "host") {
             return invalid("unrecognized input kind");
+        }
+        if kind == "host" && !matches!(value.get("snapshot"), Some(Value::Array(_))) {
+            return Err(LabError::Unavailable("a host input was kept private and has no replayable bytes; explicitly run exec with --snapshot-hosts to replicate those inputs".into()));
         }
         let entries = array(value, "snapshot")?;
         if entries.len() > MAX_ENTRIES {
@@ -115,12 +145,16 @@ impl Mount {
             target: text(value, "target")?.into(),
             single,
             files,
+            local: None,
         })
     }
 
     /// Re-hash before consumption; a missing or damaged blob teaches nothing
     /// about the program that would have consumed it.
     pub fn materialize(&self, lab: &Lab, dir: &Path) -> Result<PathBuf, LabError> {
+        if let Some((source, _)) = &self.local {
+            return Ok(source.clone());
+        }
         fs::create_dir_all(dir)?;
         for file in &self.files {
             let path = dir.join(&file.path);
@@ -205,6 +239,7 @@ pub fn capture(
             target: input.target.clone(),
             single,
             files,
+            local: None,
         });
     }
     for (source, target) in hosts {
@@ -219,6 +254,7 @@ pub fn capture(
             target: target.clone(),
             single: false,
             files,
+            local: None,
         });
     }
     Ok(mounts)

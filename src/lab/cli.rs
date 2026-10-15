@@ -82,7 +82,7 @@ ENVIRONMENTS AND RUNS
     exec --env NAME --identity FILE [--input LABPATH[:TARGET]]... [--mount HOSTDIR:TARGET]...
          [--publish PREFIX] [--cwd DIR] [--setenv KEY=VALUE]... [--timeout SECONDS]
          [--memory MB] [--cpus N] [--pids N] [--network] [--sandbox auto|runsc|bwrap|none]
-         [--task TASK] [--note TEXT] [--keep] [--json] -- COMMAND [ARGS]...
+         [--task TASK] [--note TEXT] [--keep] [--snapshot-hosts] [--json] -- COMMAND [ARGS]...
                                     inputs are read-only: a prefix becomes a directory at
                                     TARGET (default /in/LABPATH), a single file that file;
                                     whatever the command writes to /out is published
@@ -1453,7 +1453,7 @@ fn cmd_exec(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32,
         "env", "identity", "input", "mount", "publish", "cwd", "setenv", "timeout", "memory",
         "cpus", "pids", "sandbox", "task", "note", "tmp",
     ])?;
-    parsed.reject_unknown(&["network", "keep", "json"])?;
+    parsed.reject_unknown(&["network", "keep", "json", "snapshot-hosts"])?;
     let identity = load_identity(parsed.one("identity"))?;
     if parsed.trailing.is_empty() {
         return usage("exec needs a command after --");
@@ -1491,6 +1491,7 @@ fn cmd_exec(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32,
     request.pids = u32::try_from(parsed.u64_flag("pids", 0)?).unwrap_or(u32::MAX);
     request.tmp_mb = parsed.u64_flag("tmp", 1024)?;
     request.network = parsed.has("network");
+    request.snapshot_hosts = parsed.has("snapshot-hosts");
     request.keep_work = parsed.has("keep");
     request.task = parsed.one("task").map(str::to_string);
     request.note = parsed.one("note").map(str::to_string);

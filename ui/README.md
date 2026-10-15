@@ -245,9 +245,9 @@ image to a directory. The test checks 320, 360 and 1280px layouts, keyboard and
 phone dialog controls, recovery from failed reads and filters, the real digest
 route for attribution, form validation and delayed authorization responses,
 and same-origin posting guidance after finding a seed. Seed the node with a
-piecework objective to include the coordination detail checks. No record is
-submitted; canonicalization is its only POST. The review and remaining product
-work are in [`docs/review/reader-ux.md`](../docs/review/reader-ux.md).
+piecework objective to include the coordination detail checks. In this direct mode, no record is submitted; canonicalization is its only
+POST. The isolated gate above also submits disposable fixtures. The review
+and implementation status are in [`docs/review/reader-ux.md`](../docs/review/reader-ux.md).
 
 ## How the public site gets there
 

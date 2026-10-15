@@ -147,7 +147,7 @@ describe("toRecord", () => {
         program: "examples/permutation/stat.py",
         programSha256: "ab".repeat(32),
         entrypoint: "statistic",
-        threshold: "0.05",
+        threshold: "500",
         direction: "minimize",
       }),
       CREATED,
@@ -156,7 +156,7 @@ describe("toRecord", () => {
       kind: "statistical",
       statistic: { path: "examples/permutation/stat.py", sha256: "ab".repeat(32) },
       entrypoint: "statistic",
-      threshold: 0.05,
+      threshold: 500,
       direction: "minimize",
     });
   });
@@ -312,6 +312,19 @@ describe("fromRecord", () => {
 });
 
 describe("problems", () => {
+  it("blocks fractional scores and amounts that would be rounded before canonicalization", () => {
+    expect(problems(draft({ reward: "9007199254740993" })).reward).toBeDefined();
+    expect(problems(draft({ reward: "9007199254740991" })).reward).toBeUndefined();
+    for (const threshold of ["0.05", "1.0000000000000001", "Infinity", "9007199254740993"]) {
+      expect(problems(draft({ verifierKind: "statistical", threshold })).threshold).toBeDefined();
+    }
+    expect(problems(draft({ verifierKind: "statistical", threshold: "500" })).threshold).toBeUndefined();
+  });
+  it("checks ratchet spans by numeric value and keeps limits exact", () => {
+    expect(problems(draft({ verifierKind: "evaluator", threshold: "1", useRatchet: true, baseline: "01", target: "1" })).target).toBeDefined();
+    expect(problems(draft({ verifierKind: "evaluator", threshold: "1", useRatchet: true, baseline: "0", target: "9007199254740993" })).target).toBeDefined();
+    expect(problems(draft({ verifierKind: "lean", leanStatement: "theorem t : True", timeoutSeconds: "0.5" })).timeoutSeconds).toBeDefined();
+  });
   it("passes a complete draft", () => {
     expect(problems(draft())).toEqual({});
   });
