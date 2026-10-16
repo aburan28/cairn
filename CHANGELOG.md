@@ -1,5 +1,12 @@
 # Changelog
 
+## [9.2.1](https://github.com/aburan28/cairn/compare/v9.2.0...v9.2.1) (2026-10-16)
+
+
+### Documentation
+
+* **agents:** watch PRs through a small model instead of stopping at the PR ([#316](https://github.com/aburan28/cairn/issues/316)) ([49c61af](https://github.com/aburan28/cairn/commit/49c61afad8f7c4c42ddb12e8463d00ed32cff269))
+
 ## [9.2.0](https://github.com/aburan28/cairn/compare/v9.1.0...v9.2.0) (2026-10-16)
 
 
