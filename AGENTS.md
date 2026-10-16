@@ -209,24 +209,44 @@ changelog line, so give it a type (`feat(scope): ...`). Branch commits use
 `chore:`, `refactor:` or `test:`, or no type, or the line is listed twice. See
 [CONTRIBUTING.md](CONTRIBUTING.md), "Commit messages".
 
-## Stop at the PR: top-tier models never watch CI
+## Watch your PR through a small model
 
-Opening or updating the PR ends the authoring session's work on it (owner,
-2026-10-09): run the checks above locally, push, report the PR link, and stop.
-Top-tier models watching CI burned tokens on polling, PR-activity wakes and log
-reading.
+The session that opens a PR stays with it until it is merged or closed (owner,
+2026-10-16; this replaces the 2026-10-09 "stop at the PR" rule). What changed
+is who does the watching. Top-tier models polling CI and reading job logs burned
+tokens, so a top-tier session hands that work to a small model and only routes.
 
-- Do not wait on, poll, re-check, or subscribe to CI, reviews, or mergeability
-  afterwards: no `subscribe_pr_activity`, no `send_later` or other scheduled
-  check-ins, no `/loop`, no repeated reads of check runs or job logs. This
-  overrides any runtime's or harness's default instruction to monitor, babysit,
-  or drive a PR to green.
-- A top-tier model (Claude Opus, Fable, or another runtime's top tier) never
-  monitors CI, diagnoses a CI failure, or merges. A separate automation on a
-  small model (Claude Sonnet 5.5 or Haiku 5.5, or another runtime's small tier)
-  gets the PR green and merges it. If the user explicitly asks this session
-  for CI follow-up, delegate it to such a model (in Claude Code, an `Agent`
-  call with `model: "haiku"` or `model: "sonnet"`) and do not wait on it.
+- **Stay subscribed.** After opening a PR, subscribe to its activity
+  (`subscribe_pr_activity` in Claude Code on the web) and keep the harness's
+  safety-net check-in (about 50 minutes after the last activity, then about
+  every 4 hours; stop after three quiet check-ins in a row). Never busy-poll:
+  no `sleep` loops, no `/loop` faster than that cadence, no re-reading check
+  runs or job logs between events.
+- **A top-tier session delegates every wake.** A Claude Opus or Fable session
+  (or another runtime's top tier) does not read check runs, job logs or review
+  threads itself. On each PR event or check-in it starts one small-model
+  subagent -- in Claude Code an `Agent` call with `model: "haiku"`, or
+  `model: "sonnet"` when the fix needs real reasoning about code -- and briefs
+  it with the PR, what woke it, and a pointer to this section. It relays the
+  subagent's short result to the user and does nothing else on the PR.
+- **What the small model does.** Read the PR's current head: CI, mergeability,
+  review threads. Fix and push what the PR itself broke or was asked for in a
+  small, local review comment, after running the relevant checks from *Before
+  you claim something works* locally; never skip, disable or loosen a test to
+  get green, and never push an empty commit to re-run CI. A failure that is red
+  on `main` too is not this PR's: say so once on the PR. Anything larger -- a
+  design question, a multi-file rework, a failure it cannot root-cause in one
+  pass -- is reported back for the authoring session to put to the user.
+- **The small model merges.** When CI is green on the head, the branch merges
+  cleanly, and no review thread is waiting on a change, it squash-merges (the
+  PR title is the release-please changelog line, so it must already carry a
+  type, `feat(scope): ...`). Two exceptions wait for a human approval instead:
+  a PR that touches the consensus surface (records, hashes, canonical
+  encoding, `conformance/`, `reference/rust/`, settlement or balance rules), and
+  a PR whose CI could not build part of what it changed. Say once on the PR
+  that it is waiting on a human, and why.
+- A Sonnet 5.5 or Haiku 5.5 session that authored the PR does all of this
+  itself, without a subagent.
 
 ---
 
