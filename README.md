@@ -1126,6 +1126,8 @@ The design, in the order the ideas depend on each other:
 - [diagrams.md](docs/diagrams.md) — architecture and detailed design, drawn from the code
 - [architecture.md](docs/architecture.md) — the full design and which work shapes fit
 - [verification.md](docs/verification.md) — the verification ladder; authoring verifiers
+- [publishing.md](docs/publishing.md) — putting a node on the internet over
+  Tailscale: tailnet HTTPS, funnel, and the p2p port needing neither
 - [economics.md](docs/economics.md) — what mints, why demand-gating, citation flow
 - [coordination.md](docs/coordination.md) — the hoarding trap, the ratchet, CRDT gossip
 - [agent-market.md](docs/agent-market.md) — agent-to-agent rewards: what a peer-to-peer mechanism would be, and what it breaks

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { Command } from "@/components/ui";
 
 export const metadata: Metadata = {
   title: "how it works",
@@ -281,6 +282,27 @@ export default function Page() {
         implementation that shares no code with the first re-derives the same ids and the same Merkle roots, and{" "}
         <b>448 frozen conformance vectors</b>, produced by a Python implementation that no longer exists, pin the byte
         encoding both must agree on. An inclusion proof and a signed checkpoint let a reader check one entry on its own.
+      </p>
+
+      <h2>Getting a node onto the internet</h2>
+      <p className="lede">
+        A node that only loopback can reach publishes nothing. The shortest verified path is{" "}
+        <b>Tailscale</b>: the HTTP half — this reader and the API — gets HTTPS on your tailnet and, behind a
+        funnel, a public URL, while other nodes dial the p2p port directly at your Tailscale IP (it binds the
+        wildcard, so no forwarding is needed for it). The commands, in order:
+      </p>
+      <div className="grid gap-3">
+        <Command text="cairn run --listen 0.0.0.0:9000 --serve 127.0.0.1:8080" />
+        <Command text="tailscale up" />
+        <Command text="tailscale serve --bg --https=8443 http://127.0.0.1:8080" />
+        <Command text="tailscale funnel --https=8443 --bg http://127.0.0.1:8080" />
+      </div>
+      <p className="lede">
+        The result is <code>https://&lt;your-magicdns-name&gt;:8443</code> for the reader and API, and{" "}
+        <code>&lt;your-tailscale-ip&gt;:9000</code> for peers. Check the public half with{" "}
+        <code>tailscale funnel status</code>, and always give funnel the <code>--https=</code> flag plus the full
+        backend URL — a bare port number is read as the target and can clobber other routes. The full recipe is{" "}
+        <code>docs/publishing.md</code> in the repository.
       </p>
 
       <h2>What this is not</h2>

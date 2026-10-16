@@ -18,6 +18,7 @@ below is either reference (what a command, a setting, or a word does) or design
 | point an agent at open objectives and get paid | [agents.md](agents.md) |
 | write an objective other people can solve | [verification.md](verification.md) |
 | run a node strangers submit to | [serving.md](serving.md), then [storage.md](storage.md) |
+| put a node on the internet over Tailscale, HTTPS and funnel included | [publishing.md](publishing.md) |
 | connect two nodes in two places, each behind its own router | [two-nodes.md](two-nodes.md) |
 | run a leader that is paid, and machines that work for it from anywhere, rented GPUs included | [fleet.md](fleet.md) |
 | see what the network is trying to beat, and post on a problem without inventing a second name for it | [goals.md](goals.md) |
@@ -66,6 +67,9 @@ The six pages a user needs and nothing else in this repository provides.
   submissions queue instead of appending, and the progress route behind the
   reader's per-task dashboard: settled work from the log beside unverified
   worker heartbeats, kept apart.
+- [publishing.md](publishing.md) — getting that node onto the internet over
+  Tailscale: HTTPS on the tailnet, funnel for strangers, the p2p port needing
+  neither, and the funnel flag footgun.
 - [storage.md](storage.md) — encryption at rest, the data directory, the size
   cap, and sync.
 - [tiers.md](tiers.md) — why a unit earned on a millisecond certificate check
