@@ -79,6 +79,7 @@ use crate::progress::{self, Board, Heartbeat};
 use crate::records::{Claim, Commitment, Objective};
 use crate::scheduling::{self, ObjectiveCapabilities, ResourceOffer};
 use crate::secrets;
+use crate::swarm_calls;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Largest request body accepted, in bytes.
@@ -93,7 +94,14 @@ pub const MAX_BODY_BYTES: u64 = 1 << 20;
 /// The routes on which a fleet member's signature means something
 /// (`docs/design/fleet-enrollment.md` §7). Their bodies are read before
 /// routing, so the signature is checked over the bytes the handler parses.
-const MEMBER_ROUTES: [&str; 5] = ["/submit", "/progress", "/hosts", "/lease", "/lease/release"];
+const MEMBER_ROUTES: [&str; 6] = [
+    "/submit",
+    "/progress",
+    "/hosts",
+    "/lease",
+    "/lease/release",
+    "/swarm/report",
+];
 
 /// How long a single request may take to arrive before the connection is
 /// dropped. A slow-loris holding sockets open is the cheapest attack on a
@@ -643,6 +651,10 @@ pub struct Serving {
     /// Hosts that registered their hardware, held exactly as heartbeats are.
     /// See [`crate::hosts`].
     hosts: Mutex<hosts::Roster>,
+    /// Swarm calls this node's operator raised, and the contributions
+    /// volunteers reported against them. Node-local and advisory, like
+    /// leases: see [`crate::swarm_calls`].
+    swarm: Mutex<(swarm_calls::Calls, swarm_calls::Ledger)>,
     /// The daemon's session roster, when this server runs inside a daemon.
     ///
     /// `None` on a plain `cairn serve`, which runs no p2p service and says so
@@ -750,6 +762,7 @@ impl Serving {
             progress: Mutex::new(Board::default()),
             leases: Mutex::new(Leases::default()),
             hosts: Mutex::new(hosts::Roster::default()),
+            swarm: Mutex::new(Default::default()),
             sessions: None,
             roles: Roles::from_env(),
             hardware,
@@ -1582,8 +1595,8 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 &Refusal::new(
                     400,
                     "not_a_member_route",
-                    "a member signature is read on POST /submit, /progress, /hosts, /lease \
-                     and /lease/release; this route takes none",
+                    "a member signature is read on POST /submit, /progress, /hosts, /lease, \
+                     /lease/release and /swarm/report; this route takes none",
                 ),
             )
         }
@@ -1677,6 +1690,8 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             knowledge_of(stream, serving, &path["/knowledge/".len()..], &request)
         }
         ("GET", "/leases") => leases_index(stream, serving),
+        ("GET", "/swarm") => swarm_index(stream, serving),
+        ("GET", "/swarm/advice") => swarm_advice(stream, serving, &request),
         ("GET", path) if path.starts_with("/leases/") => {
             leases_of(stream, serving, &path["/leases/".len()..])
         }
@@ -1728,6 +1743,35 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             body.as_deref().unwrap_or_default(),
             verified.as_ref(),
         ),
+        ("POST", "/swarm/report") => swarm_report(
+            stream,
+            serving,
+            &request,
+            body.as_deref().unwrap_or_default(),
+            verified.as_ref(),
+        ),
+        ("POST", "/swarm/call") | ("POST", "/swarm/withdraw") => {
+            // Raising a call steers other people's machines, so only this
+            // node's operator may: a connection from this host that no proxy
+            // says it forwarded. Anyone may read the calls and ask for advice.
+            let operator = remote.is_some_and(|ip| ip.is_loopback()) && !request.forwarded;
+            if !operator {
+                return json_refusal(
+                    stream,
+                    &Refusal::new(
+                        403,
+                        "operator_only",
+                        "swarm calls are raised by this node's operator, from this host",
+                    ),
+                );
+            }
+            let route = request.path.clone();
+            match read_json_body(&mut reader, &request, &route) {
+                Ok(body) if route == "/swarm/call" => swarm_call(stream, serving, &body),
+                Ok(body) => swarm_withdraw(stream, serving, &body),
+                Err((status, message)) => json_error(stream, status, &message),
+            }
+        }
         ("POST", "/fleet/join") => fleet_join(stream, &mut reader, serving, &request),
         ("POST", "/objective/prepare") => prepare_objective(stream, &mut reader, &request),
         // A description can be longer than a request line may be, so the
@@ -3789,6 +3833,286 @@ fn leases_of(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .report(id, now);
     json(stream, 200, &report)
+}
+
+// -- swarm calls ---------------------------------------------------------------------
+
+/// What the log and the heartbeat roster say about every objective, as
+/// [`swarm_calls`] needs it: open reward, live workers, closed, requirements.
+fn swarm_openings(node: &Node, serving: &Serving) -> Vec<swarm_calls::Opening> {
+    let objectives = node.objectives();
+    let empty = goals::Catalog::default();
+    let catalog = serving.goals.as_ref().unwrap_or(&empty);
+    let mut out = Vec::new();
+    for goal in grouped_goals(node, catalog, serving) {
+        for angle in goal.angles {
+            for entry in angle.objectives {
+                let requirements = objectives
+                    .get(&entry.id)
+                    .map(|o| ObjectiveCapabilities::for_objective(o).resources)
+                    .unwrap_or_default();
+                out.push(swarm_calls::Opening {
+                    objective_id: entry.id,
+                    open_reward: if entry.settled {
+                        0
+                    } else {
+                        u128::from(entry.reward)
+                    },
+                    live_workers: entry.live_workers,
+                    closed: entry.settled,
+                    requirements,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// `GET /swarm`: the open calls, highest bid first, and what volunteers
+/// reported contributing.
+fn swarm_index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let openings = swarm_openings(&node, serving);
+    let now = crate::time::unix_seconds();
+    let swarm = serving.swarm.lock().unwrap_or_else(|p| p.into_inner());
+    let (calls, ledger) = &*swarm;
+    let int = |n: u128| Value::Int(i128::try_from(n).unwrap_or(i128::MAX));
+    let rows: Vec<Value> = swarm_calls::ranked(calls, &openings, now)
+        .iter()
+        .map(|r| {
+            Value::object([
+                ("objective_id", Value::string(r.call.objective_id.clone())),
+                ("want", Value::Int(i128::from(r.call.want))),
+                (
+                    "live_workers",
+                    Value::Int(i128::from(r.opening.live_workers)),
+                ),
+                ("open_reward", int(r.opening.open_reward)),
+                ("bid", int(r.bid)),
+                ("full", Value::Bool(r.full)),
+                (
+                    "until",
+                    Value::string(crate::time::format_iso8601_utc(r.call.until as i64)),
+                ),
+                ("note", Value::string(r.call.note.clone())),
+                (
+                    "contributed_core_seconds",
+                    Value::Int(i128::from(ledger.contributed_to(&r.call.objective_id))),
+                ),
+                (
+                    "displaced_core_seconds",
+                    Value::Int(i128::from(ledger.displaced_by(&r.call.objective_id))),
+                ),
+            ])
+        })
+        .collect();
+    json(
+        stream,
+        200,
+        &Value::object([
+            ("calls", Value::Array(rows)),
+            ("contributions", ledger.to_value()),
+            (
+                "note",
+                Value::string(
+                    "Advice, never a rule: a call's bid is its objective's open escrowed reward \
+                     per worker, and a volunteer that ignores the advice is paid for verified \
+                     results exactly as before.",
+                ),
+            ),
+        ]),
+    )
+}
+
+/// `GET /swarm/advice?host=NAME&current=OBJ&held_for=S&preemptible=1`: what a
+/// volunteer should do now. Its resources come from its host registration
+/// when it has one, else from `cpus`, `memory_mb` and `gpus` here.
+fn swarm_advice(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    let q = &request.query;
+    let Some(host) = q.get("host").filter(|h| !h.is_empty() && h.len() <= 128) else {
+        return json_error(stream, 400, "GET /swarm/advice needs host=NAME");
+    };
+    let number = |name: &str| q.get(name).and_then(|v| v.parse::<u64>().ok());
+    let now = crate::time::unix_seconds();
+    let registered = serving
+        .hosts
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .list(now)
+        .into_iter()
+        .find(|row| &row.registration.host == host && row.status == crate::progress::Liveness::Live)
+        .map(|row| row.registration.resources);
+    let offer = registered.unwrap_or(ResourceOffer {
+        cpus: number("cpus"),
+        memory_mb: number("memory_mb"),
+        gpus: number("gpus"),
+        ..Default::default()
+    });
+    let volunteer = swarm_calls::Volunteer {
+        name: host.clone(),
+        offer,
+        current: q.get("current").filter(|c| !c.is_empty()).cloned(),
+        held_for: number("held_for").unwrap_or(0),
+        // Consent is explicit: a volunteer is asked to yield only if it said
+        // it may be.
+        preemptible: q
+            .get("preemptible")
+            .is_some_and(|v| v == "1" || v == "true"),
+        min_hold: number("min_hold").unwrap_or(0),
+        yields_last_hour: number("yields").unwrap_or(0).min(u64::from(u32::MAX)) as u32,
+    };
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let openings = swarm_openings(&node, serving);
+    let swarm = serving.swarm.lock().unwrap_or_else(|p| p.into_inner());
+    let advice = swarm_calls::advise(&volunteer, &swarm.0, &openings, now);
+    json(stream, 200, &advice.to_value())
+}
+
+/// `POST /swarm/call {objective_id, want, for_seconds?, note?}`: raise or
+/// renew a call. Operator only (checked by the caller).
+fn swarm_call(stream: &mut TcpStream, serving: &Serving, body: &Value) -> io::Result<()> {
+    let Some(objective_id) = body.get("objective_id").and_then(Value::as_str) else {
+        return json_error(stream, 400, "objective_id is required");
+    };
+    let want = body.get("want").and_then(Value::as_u64).unwrap_or(0);
+    let for_seconds = body
+        .get("for_seconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(3_600);
+    let note = body.get("note").and_then(Value::as_str).unwrap_or("");
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let openings = swarm_openings(&node, serving);
+    match openings.iter().find(|o| o.objective_id == objective_id) {
+        None => return json_error(stream, 404, "no such objective in this log"),
+        Some(o) if o.closed || o.open_reward == 0 => {
+            return json_refusal(
+                stream,
+                &Refusal::new(
+                    409,
+                    "nothing_to_pay_for",
+                    "a call steers machines toward open reward; this objective has none left \
+                     (settled or unfunded). Fund it first.",
+                ),
+            )
+        }
+        Some(_) => {}
+    }
+    let now = crate::time::unix_seconds();
+    let mut swarm = serving.swarm.lock().unwrap_or_else(|p| p.into_inner());
+    match swarm.0.raise(objective_id, want, for_seconds, note, now) {
+        Ok(call) => json(
+            stream,
+            201,
+            &Value::object([
+                ("objective_id", Value::string(call.objective_id.clone())),
+                ("want", Value::Int(i128::from(call.want))),
+                (
+                    "until",
+                    Value::string(crate::time::format_iso8601_utc(call.until as i64)),
+                ),
+            ]),
+        ),
+        Err(why) => json_error(stream, 400, &why.to_string()),
+    }
+}
+
+/// `POST /swarm/withdraw {objective_id}`: end a call. Operator only.
+fn swarm_withdraw(stream: &mut TcpStream, serving: &Serving, body: &Value) -> io::Result<()> {
+    let Some(objective_id) = body.get("objective_id").and_then(Value::as_str) else {
+        return json_error(stream, 400, "objective_id is required");
+    };
+    let mut swarm = serving.swarm.lock().unwrap_or_else(|p| p.into_inner());
+    if swarm.0.withdraw(objective_id) {
+        json(
+            stream,
+            200,
+            &Value::object([("withdrawn", Value::Bool(true))]),
+        )
+    } else {
+        json_error(stream, 404, "no open call on that objective")
+    }
+}
+
+/// `POST /swarm/report {volunteer, objective_id, core_seconds, yielded_to?,
+/// unsaved_core_seconds?}`: a volunteer says what it gave an objective, and
+/// what it lost yielding. Recorded as reported; never a balance.
+fn swarm_report(
+    stream: &mut TcpStream,
+    serving: &Serving,
+    request: &Request,
+    body: &[u8],
+    verified: Option<&Verified>,
+) -> io::Result<()> {
+    let value = match json_body(body, request, "/swarm/report") {
+        Ok(value) => value,
+        Err((status, message)) => return json_error(stream, status, &message),
+    };
+    let text = |name: &str| value.get(name).and_then(Value::as_str).map(str::to_string);
+    let (Some(volunteer), Some(objective_id)) = (text("volunteer"), text("objective_id")) else {
+        return json_error(stream, 400, "volunteer and objective_id are required");
+    };
+    if volunteer.is_empty() || volunteer.len() > 128 {
+        return json_error(stream, 400, "volunteer must be a short name");
+    }
+    if let Err(refusal) = serving.may_use_name(&volunteer, verified, false) {
+        return json_refusal(stream, &refusal);
+    }
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    // Only objectives this log holds, so a stranger cannot fill the ledger
+    // with rows against ids nobody is working.
+    if !node.objectives().contains_key(&objective_id) {
+        return json_error(stream, 404, "no such objective in this log");
+    }
+    let core_seconds = value
+        .get("core_seconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let ended = match text("yielded_to") {
+        Some(by) if !by.is_empty() => swarm_calls::Ended::Yielded {
+            by,
+            unsaved: value
+                .get("unsaved_core_seconds")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        },
+        _ => swarm_calls::Ended::Worked,
+    };
+    let report = swarm_calls::Report {
+        volunteer,
+        objective_id,
+        core_seconds,
+        ended,
+    };
+    let mut swarm = serving.swarm.lock().unwrap_or_else(|p| p.into_inner());
+    match swarm.1.record(&report) {
+        Ok(()) => json(
+            stream,
+            202,
+            &Value::object([
+                ("recorded", Value::Bool(true)),
+                (
+                    "note",
+                    Value::string(
+                        "Recorded as reported. A contribution is evidence of compute given, \
+                         never a balance; payment is settlement, for verified results.",
+                    ),
+                ),
+            ]),
+        ),
+        Err(why) => json_error(stream, 400, &why.to_string()),
+    }
 }
 
 /// Take or renew an advisory lease. See [`crate::lease`] for what that is and
@@ -7537,6 +7861,85 @@ mod tests {
         assert_eq!(peers[0].get("entries_after"), Some(&Value::Int(25)));
         assert_eq!(int(&body, "address_book.endpoints"), 2);
         assert_eq!(int(&body, "address_book.hints"), 9);
+    }
+
+    #[test]
+    fn swarm_calls_rank_advise_and_record_without_touching_the_log() {
+        let dir = TempDir::new("swarm-route");
+        let (addr, id) = serve_orbit_search(&dir);
+        let before = get_json(addr, "/chain").1;
+
+        let (status, body) = ask_json(
+            addr,
+            "/swarm/call",
+            &format!(r#"{{"objective_id":"{id}","want":2,"note":"push the last orbits"}}"#),
+        );
+        assert!(
+            status.starts_with("HTTP/1.1 201"),
+            "{status}: {}",
+            body.canonical_string()
+        );
+
+        let (status, index) = get_json(addr, "/swarm");
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        let calls = at(&index, "calls").as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].get("objective_id").unwrap().as_str(),
+            Some(id.as_str())
+        );
+        assert!(calls[0].get("bid").unwrap().as_i128().unwrap() > 0);
+
+        let (status, advice) = get_json(addr, "/swarm/advice?host=v1&cpus=4&memory_mb=4096");
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert_eq!(
+            at(&advice, "action").as_str(),
+            Some("start"),
+            "{}",
+            advice.canonical_string()
+        );
+        assert_eq!(at(&advice, "objective_id").as_str(), Some(id.as_str()));
+
+        let report = format!(r#"{{"volunteer":"v1","objective_id":"{id}","core_seconds":100}}"#);
+        let (status, _) = ask_json(addr, "/swarm/report", &report);
+        assert!(status.starts_with("HTTP/1.1 202"), "{status}");
+        let (_, index) = get_json(addr, "/swarm");
+        let call = &at(&index, "calls").as_array().unwrap()[0];
+        assert_eq!(
+            call.get("contributed_core_seconds").unwrap().as_i128(),
+            Some(100)
+        );
+
+        // A call from behind a proxy is not the operator's.
+        let (status, _) = ask_raw(
+            addr,
+            "POST",
+            "/swarm/call",
+            &[("Forwarded", "for=1.2.3.4")],
+            format!(r#"{{"objective_id":"{id}","want":1}}"#).as_bytes(),
+        );
+        assert!(status.starts_with("HTTP/1.1 403"), "{status}");
+        let (status, _) = ask_json(
+            addr,
+            "/swarm/call",
+            r#"{"objective_id":"sha256:nope","want":1}"#,
+        );
+        assert!(status.starts_with("HTTP/1.1 404"), "{status}");
+
+        let (status, _) = ask_json(
+            addr,
+            "/swarm/withdraw",
+            &format!(r#"{{"objective_id":"{id}"}}"#),
+        );
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        let (_, advice) = get_json(addr, "/swarm/advice?host=v1&cpus=4&memory_mb=4096");
+        assert_eq!(at(&advice, "action").as_str(), Some("idle"));
+
+        assert_eq!(
+            get_json(addr, "/chain").1,
+            before,
+            "swarm calls never write the log"
+        );
     }
 
     #[test]
