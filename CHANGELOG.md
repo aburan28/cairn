@@ -1,5 +1,17 @@
 # Changelog
 
+## [9.2.0](https://github.com/aburan28/cairn/compare/v9.1.0...v9.2.0) (2026-10-16)
+
+
+### Features
+
+* **ux:** complete audit workflows and causal replay ([#311](https://github.com/aburan28/cairn/issues/311)) ([fc74e7d](https://github.com/aburan28/cairn/commit/fc74e7d8ce2c94987a656270f0a7dbc694c4a38b))
+
+
+### Documentation
+
+* getting a node onto the internet over Tailscale ([#313](https://github.com/aburan28/cairn/issues/313)) ([1ba6a8a](https://github.com/aburan28/cairn/commit/1ba6a8ad85c16341a0e9bf1454d551a82741dae2))
+
 ## [9.1.0](https://github.com/aburan28/cairn/compare/v9.0.0...v9.1.0) (2026-10-14)
 
 
