@@ -21,6 +21,7 @@ import { type LogEvent, eventsFor, indexObjectives } from "@/lib/events";
 import { following, onFollowingChange } from "@/lib/follow";
 import { goalSlug, objectiveTitle } from "@/lib/title";
 import { EventRow } from "@/components/events";
+import { GetOnline, GetOnlineLink } from "@/components/GetOnline";
 import { useNode } from "@/components/hooks";
 import { type NetworkResponse, fetchNetwork, primaryRole } from "@/lib/network";
 import {
@@ -149,6 +150,11 @@ export default function Page() {
       </div>
 
       <YourNode />
+
+      {/* The Tailscale recipe, only on a node's own reader: a visitor to the
+          public site has no node to publish. It dismisses per-browser, so the
+          link beside it stays for the operator who closed it last week. */}
+      <OnlineHint />
 
       <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
         <Stat label="Objectives" value={String(objectives.length)} from={objectivesFrom} />
@@ -326,6 +332,7 @@ export default function Page() {
               which is the point: they need not trust the server that served it.
             </p>
             <Link href="/network" className="mt-auto text-[12.5px] text-accent hover:underline">See the network →</Link>
+            <GetOnlineLink className="mt-1 text-[12.5px]" />
           </Card>
         </ul>
       </section>
@@ -382,6 +389,18 @@ function YourNode() {
       <span className="ml-auto text-[12.5px] text-accent">Network →</span>
     </Link>
   );
+}
+
+/**
+ * The "Get this node online" pop-up, rendered only when the page is served by
+ * a node (same-origin). On the public site the reader may be talking to
+ * somebody's seed, and telling that visitor how to publish a node they do not
+ * run would be the same claim about them `YourNode` declines to make.
+ */
+function OnlineHint() {
+  const base = useNode();
+  if (base !== "") return null;
+  return <GetOnline />;
 }
 
 function NodeFact({ label, value, hint }: { label: string; value: string; hint?: string }) {
