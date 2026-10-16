@@ -59,11 +59,16 @@ flags win. [cli.md](cli.md#agent) has every flag, and
 
 ## The probe
 
+CPU profiles distinguish reported flags from runtime-usable instructions,
+base/boost/sample clocks, and fractional cgroup CPU capacity. Requirements,
+rate cards, quotes and experiment cost provenance are described in
+[CPU capabilities and compute estimates](hardware-compute.md).
+
 ```
 $ cairn agent probe
 cairn-agent/1.15.3 on gpu-box-1
   linux/x86_64 kernel 6.8.0
-  cpus: 128 (AMD EPYC 7763 64-Core Processor; 2 socket(s), 2 numa node(s)) [adx aes avx avx2 bmi2 fma sha_ni]
+  cpus: 128 (AMD EPYC 7763 64-Core Processor; 2 socket(s), 2 numa node(s)) [adx aes avx avx2 bmi2 fma sha]
   memory: 515821 MiB (cgroup caps: no cpus, no MiB)
   gpu 0: nvidia NVIDIA A100-SXM4-80GB 81920 MiB 0000:17:00.0
   gpu 1: nvidia NVIDIA A100-SXM4-80GB 81920 MiB 0000:65:00.0
@@ -79,8 +84,8 @@ Everything comes from `/proc` and `/sys`, plus one `nvidia-smi` for GPU
 memory where there is one and one `docker info` (or `podman`, `nerdctl`) for
 the runtimes the engine has configured. A number the host does not state is
 `null`, never guessed: the node sums these, and a guess is the kind of number
-a reader multiplies. The CPU features listed are the ones a solver cares
-about -- AVX-512, SHA, carry-less multiply, SVE -- not the whole flags line.
+a reader multiplies. CPU features are runtime-usable extensions, intersected
+across Linux processors rather than combined into a union.
 `cgroup` is what the agent's own cgroup caps it to, so a unit with
 `CPUQuota=` shows the quota, not the socket count.
 

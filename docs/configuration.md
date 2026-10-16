@@ -63,6 +63,7 @@ and they are not conveniences.
 | `CAIRN_AGENT_SANDBOX` | `auto` | sandbox preference for jobs that name none: `auto` (gVisor, else Kata, else bubblewrap), `strongest` (Kata, else gVisor), `kata`, `runsc`, `bwrap`, or `none`. `none` is never chosen by `auto`; a job must ask |
 | `CAIRN_AGENT_INTERVAL` | `60` | seconds between registrations; at least 5 |
 | `CAIRN_AGENT_PARALLEL` | `1` | jobs the agent runs at once |
+| `CAIRN_AGENT_RATE_CARD` | unset | JSON CPU/memory compute rate card loaded at agent startup; `--rate-card` wins. [Hardware and compute estimates](hardware-compute.md) |
 | `CAIRN_AGENT_KATA_RUNTIME` | `kata` | the name the container engine knows the Kata runtime by, when `daemon.json` spells it differently |
 | `CAIRN_AGENT_RUNSC_RUNTIME` | `runsc` | the same for gVisor |
 | `CAIRN_AGENT_ENGINE` | first found | prefer `docker`, `podman` or `nerdctl` when more than one answers |

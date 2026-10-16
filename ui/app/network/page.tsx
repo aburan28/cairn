@@ -26,7 +26,7 @@ import {
 } from "@/lib/network";
 import { type NodeEvent, absorb, fetchEvents } from "@/lib/journal";
 import { formatAge, formatMagnitude, formatRate } from "@/lib/progress";
-import { resourceSummary, workerModeLabel } from "@/lib/scheduling";
+import { cpuSummary, resourceSummary, workerModeLabel } from "@/lib/scheduling";
 import { type Bridge, appBridge } from "@/lib/draft";
 import { AgentConnect, AgentStatus } from "@/components/agents";
 import { useNodeRead } from "@/components/hooks";
@@ -415,11 +415,9 @@ function machineRows(workers: FleetWorker[], hosts: HostRow[]): Machine[] {
       status: worker.status,
       work: { id: worker.objective_id, title: worker.goal ?? worker.objective_id.slice(7, 15) },
       hardware:
-        worker.device !== "unreported"
+        host ? describeHost(host) : worker.device !== "unreported"
           ? `${worker.device} · ${classLabel(worker.class)}${worker.lanes ? ` · ${worker.lanes} lanes` : ""}`
-          : host
-            ? describeHost(host)
-            : "unreported",
+          : "unreported",
       rate: worker.status === "live" ? worker.steps_per_second : null,
       age: worker.age_seconds,
     });
@@ -587,6 +585,7 @@ function TechnicalDetails({ network }: { network: NetworkResponse }) {
           <dd className="mono text-[12px]">
             {node.hardware.cpus ?? "?"} cpus · {formatMemory(node.hardware.memory_mb)} · {node.hardware.os}/
             {node.hardware.arch}
+            {node.hardware.cpu && <span className="mt-1 block text-ink-3">{cpuSummary(node.hardware.cpu)}</span>}
           </dd>
           <dt>per checker</dt>
           <dd className="mono text-[12px]">

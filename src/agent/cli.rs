@@ -28,6 +28,7 @@ pub const ROLES_ENV: &str = "CAIRN_AGENT_ROLES";
 pub const SANDBOX_ENV: &str = "CAIRN_AGENT_SANDBOX";
 pub const INTERVAL_ENV: &str = "CAIRN_AGENT_INTERVAL";
 pub const PARALLEL_ENV: &str = "CAIRN_AGENT_PARALLEL";
+pub const RATE_CARD_ENV: &str = "CAIRN_AGENT_RATE_CARD";
 
 /// How long one request to a node may take. Registrations are small and a
 /// node that takes longer than this is one to report, not wait for.
@@ -45,18 +46,20 @@ USAGE
         [--name HOST] [--roles R,R] run jobs dropped into <data>/jobs/queue, each under
         [--data-dir DIR]            gVisor or Kata; the loop a service runs
         [--interval SECONDS] [--sandbox PREF] [--parallel N] [--once]
+        [--rate-card FILE]          publish operator-set CPU/memory compute rates
         [--fleet FILE]              as an enrolled fleet member (`cairn fleet join`):
                                     requests to its leader are signed, from any address
     exec (--image IMAGE | --rootfs DIR) [--sandbox PREF] [--cpus N] [--memory MB]
          [--gpus N] [--pids N] [--timeout SECONDS] [--network] [--env K=V]...
          [--input SRC[:TARGET]]... [--cwd DIR] [--objective ID --task T]
-         [--data-dir DIR] [--json] -- COMMAND [ARGS]...
+         [--data-dir DIR] [--json] [--rate-card FILE] [--workload KEY]
+         [--cpu-requirements FILE] -- COMMAND [ARGS]...
                                     run one job now and print its receipt
     submit FILE [--data-dir DIR]    validate a job spec and queue it for `run`
     jobs [--data-dir DIR] [--json]  queued, running and finished jobs, with receipts
     install --node URL [--node URL]... [--name HOST] [--roles R,R] [--user USER]
             [--data-dir DIR] [--sandbox PREF] [--interval S] [--parallel N]
-            [--fleet FILE] [--print] [--no-start]
+            [--fleet FILE] [--rate-card FILE] [--print] [--no-start]
                                     write cairn-agent.service and its environment file,
                                     create the user, enable and start it (root); a member
                                     file is handed over with LoadCredential=, never put
@@ -76,6 +79,7 @@ ENVIRONMENT  (flags win; these are what the service's environment file sets)
     CAIRN_AGENT_ROLES      declared roles (executor)      CAIRN_AGENT_DATA       /var/lib/cairn-agent
     CAIRN_AGENT_SANDBOX    preference (auto)              CAIRN_AGENT_INTERVAL   seconds (60)
     CAIRN_AGENT_PARALLEL   jobs at once (1)
+    CAIRN_AGENT_RATE_CARD  compute rate card JSON (optional)
     CAIRN_FLEET_FILE       a fleet member file, as --fleet
     CAIRN_AGENT_KATA_RUNTIME / CAIRN_AGENT_RUNSC_RUNTIME   the engine's names for them
     CAIRN_AGENT_ENGINE     prefer docker, podman or nerdctl when several answer
@@ -340,6 +344,18 @@ fn probe(args: &[String], out: &mut impl io::Write) -> Result<i32, AgentError> {
             .unwrap_or_else(|| "?".into()),
         inventory.cpu_features.join(" ")
     )?;
+    let khz = |value: Option<u64>| value.map_or_else(|| "?".into(), |n| n.to_string());
+    writeln!(
+        out,
+        "  CPU clocks (kHz): base {}; boost ceiling {}; sampled {}..{}",
+        khz(inventory.cpu.base_khz),
+        khz(inventory.cpu.max_khz),
+        khz(inventory.cpu.observed_min_khz),
+        khz(inventory.cpu.observed_max_khz)
+    )?;
+    if let Some(millis) = inventory.cgroup_cpu_millis {
+        writeln!(out, "  CPU time quota: {millis} milliCPUs (1000 = one CPU)")?;
+    }
     writeln!(
         out,
         "  memory: {} MiB{}",
@@ -442,6 +458,7 @@ struct Loop {
     running: Vec<Running>,
     completed: u64,
     failed: u64,
+    pricing: Option<crate::pricing::RateCard>,
 }
 
 /// A member file and the leader URL it was issued for, parsed once.
@@ -467,13 +484,11 @@ impl Loop {
             .iter()
             .filter_map(|r| r.job.objective_id.clone())
             .collect();
-        let resources = ResourceOffer {
-            cpus: self.inventory.cgroup_cpus.or(self.inventory.cpus),
-            memory_mb: self.inventory.cgroup_memory_mb.or(self.inventory.memory_mb),
-            gpus: Some(self.inventory.gpus.len() as u64),
-            storage_mb: None,
-            concurrency: Some(self.parallel as u64),
-        };
+        let mut resources = ResourceOffer::from_host_facts(
+            &self.inventory.to_value(),
+            &Value::object([("capacity", Value::Int(self.parallel as i128))]),
+        );
+        resources.pricing = self.pricing.clone();
         Value::object([
             ("host", Value::string(self.name.clone())),
             ("agent", Value::string(super::CLIENT)),
@@ -503,6 +518,9 @@ impl Loop {
 
     /// Post the registration to every node. Returns how many accepted it.
     fn register(&mut self) -> usize {
+        // Cgroup allocations and frequencies are observations, not lifetime
+        // constants. Refresh before publishing another live offer.
+        self.inventory.refresh_cpu();
         let body = self.registration();
         let mut accepted = 0;
         for (index, node) in self.nodes.iter().enumerate() {
@@ -732,8 +750,15 @@ impl Loop {
                 dir.clone(),
                 self.name.clone(),
             );
+            let pricing = self.pricing.clone();
             let handle = std::thread::spawn(move || {
-                job::run(&thread_job, &thread_sandboxes, &thread_dir, &host)
+                job::run_with_pricing(
+                    &thread_job,
+                    &thread_sandboxes,
+                    &thread_dir,
+                    &host,
+                    pricing.as_ref(),
+                )
             });
             self.running.push(Running {
                 job,
@@ -811,15 +836,35 @@ fn count_done(done: &Path) -> (u64, u64) {
     (completed, failed)
 }
 
+fn pricing(parsed: &Parsed) -> Result<Option<crate::pricing::RateCard>, AgentError> {
+    env_or(parsed.one("rate-card"), RATE_CARD_ENV)
+        .map(|path| -> Result<_, AgentError> {
+            let contents = fs::read_to_string(path)?;
+            let value = Value::from_json(&contents)
+                .map_err(|e| AgentError::Invalid(format!("rate card: {e}")))?;
+            crate::pricing::RateCard::from_value(&value).map_err(AgentError::Invalid)
+        })
+        .transpose()
+}
+
 fn run_loop(args: &[String], out: &mut impl io::Write) -> Result<i32, AgentError> {
     let parsed = parse(
         args,
         &[
-            "node", "name", "roles", "data-dir", "interval", "sandbox", "parallel", "fleet",
+            "node",
+            "name",
+            "roles",
+            "data-dir",
+            "interval",
+            "sandbox",
+            "parallel",
+            "fleet",
+            "rate-card",
         ],
         &["once"],
     )?;
     let inventory = Inventory::probe();
+    let pricing = pricing(&parsed)?;
     let (nodes, member, name) = match member_file(&parsed)? {
         Some((_, file)) => {
             let (nodes, leader, name) = as_member(&parsed, &file, nodes(&parsed)?)?;
@@ -900,6 +945,7 @@ fn run_loop(args: &[String], out: &mut impl io::Write) -> Result<i32, AgentError
         running: Vec::new(),
         completed,
         failed,
+        pricing,
     };
     let once = parsed.switch("once");
     let accepted = state.register();
@@ -952,9 +998,13 @@ fn exec(args: &[String], out: &mut impl io::Write) -> Result<i32, AgentError> {
             "task",
             "data-dir",
             "id",
+            "rate-card",
+            "workload",
+            "cpu-requirements",
         ],
         &["network", "json"],
     )?;
+    let pricing = pricing(&parsed)?;
     if parsed.trailing.is_empty() {
         return Err(AgentError::Invalid(
             "exec needs a command after `--`".into(),
@@ -975,6 +1025,12 @@ fn exec(args: &[String], out: &mut impl io::Write) -> Result<i32, AgentError> {
     text("cwd", "cwd");
     text("objective_id", "objective");
     text("task", "task");
+    text("workload", "workload");
+    if let Some(path) = parsed.one("cpu-requirements") {
+        let value = Value::from_json(&fs::read_to_string(path)?)
+            .map_err(|e| AgentError::Invalid(format!("CPU requirements: {e}")))?;
+        spec.push(("cpu_requirements", value));
+    }
     if let Some(value) = env_or(parsed.one("sandbox"), SANDBOX_ENV) {
         spec.push(("sandbox", Value::string(value)));
     }
@@ -1041,7 +1097,13 @@ fn exec(args: &[String], out: &mut impl io::Write) -> Result<i32, AgentError> {
     )?;
     let inventory = Inventory::probe();
     let sandboxes = Sandboxes::probe(&Names::from_env());
-    let receipt = job::run(&job, &sandboxes, &dir, &inventory.hostname);
+    let receipt = job::run_with_pricing(
+        &job,
+        &sandboxes,
+        &dir,
+        &inventory.hostname,
+        pricing.as_ref(),
+    );
     if parsed.switch("json") {
         writeln!(out, "{}", receipt.to_value().canonical_string())?;
     } else {
@@ -1187,7 +1249,16 @@ fn install(args: &[String], out: &mut impl io::Write) -> Result<i32, AgentError>
     let parsed = parse(
         args,
         &[
-            "node", "name", "roles", "user", "data-dir", "sandbox", "interval", "parallel", "fleet",
+            "node",
+            "name",
+            "roles",
+            "user",
+            "data-dir",
+            "sandbox",
+            "interval",
+            "parallel",
+            "fleet",
+            "rate-card",
         ],
         &["print", "no-start"],
     )?;
@@ -1237,6 +1308,11 @@ fn install(args: &[String], out: &mut impl io::Write) -> Result<i32, AgentError>
         (PARALLEL_ENV.to_string(), parallel.to_string()),
         ("CAIRN_LOG_LEVEL".to_string(), "info".to_string()),
     ];
+    if let Some(path) = env_or(parsed.one("rate-card"), RATE_CARD_ENV) {
+        pricing(&parsed)?;
+        let path = fs::canonicalize(path)?;
+        env.push((RATE_CARD_ENV.to_string(), path.display().to_string()));
+    }
     for passthrough in [
         super::sandbox::KATA_RUNTIME_ENV,
         super::sandbox::RUNSC_RUNTIME_ENV,

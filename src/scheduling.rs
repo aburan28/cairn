@@ -16,6 +16,8 @@
 use std::fmt;
 
 use crate::canonical::Value;
+use crate::hardware::{CpuProfile, CpuRequirements};
+use crate::pricing::RateCard;
 use crate::records::Objective;
 
 const CAPABILITIES_KEY: &str = "capabilities";
@@ -72,6 +74,9 @@ pub struct ResourceRequirements {
     pub gpus: Option<u64>,
     pub storage_mb: Option<u64>,
     pub concurrency: Option<u64>,
+    pub cpu: CpuRequirements,
+    /// A malformed hint must never silently become an unconstrained match.
+    pub invalid: bool,
 }
 
 impl ResourceRequirements {
@@ -82,6 +87,8 @@ impl ResourceRequirements {
             ("gpus", optional_int(self.gpus)),
             ("storage_mb", optional_int(self.storage_mb)),
             ("concurrency", optional_int(self.concurrency)),
+            ("cpu", self.cpu.to_value()),
+            ("invalid", Value::Bool(self.invalid)),
         ])
     }
 }
@@ -94,6 +101,10 @@ pub struct ResourceOffer {
     pub gpus: Option<u64>,
     pub storage_mb: Option<u64>,
     pub concurrency: Option<u64>,
+    pub cpu: Option<CpuProfile>,
+    pub pricing: Option<RateCard>,
+    /// CPU time quota in thousandths of one core, independent of thread count.
+    pub cpu_millis: Option<u64>,
 }
 
 impl ResourceOffer {
@@ -106,6 +117,27 @@ impl ResourceOffer {
             gpus: field("gpus")?,
             storage_mb: field("storage_mb")?,
             concurrency: field("concurrency")?,
+            cpu_millis: field("cpu_millis")?,
+            cpu: match object.get("cpu") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(CpuProfile::from_value(value).map_err(|_| {
+                    ScheduleError::InvalidField {
+                        field: "cpu",
+                        expected: "a CPU profile with an architecture and exact feature names",
+                    }
+                })?),
+            },
+            pricing: match object.get("pricing") {
+                None | Some(Value::Null) => None,
+                Some(value) => {
+                    Some(
+                        RateCard::from_value(value).map_err(|_| ScheduleError::InvalidField {
+                            field: "pricing",
+                            expected: "a valid compute rate card",
+                        })?,
+                    )
+                }
+            },
         })
     }
 
@@ -116,6 +148,17 @@ impl ResourceOffer {
             ("gpus", optional_int(self.gpus)),
             ("storage_mb", optional_int(self.storage_mb)),
             ("concurrency", optional_int(self.concurrency)),
+            (
+                "cpu",
+                self.cpu.as_ref().map_or(Value::Null, CpuProfile::to_value),
+            ),
+            (
+                "pricing",
+                self.pricing
+                    .as_ref()
+                    .map_or(Value::Null, RateCard::to_value),
+            ),
+            ("cpu_millis", optional_int(self.cpu_millis)),
         ])
     }
 
@@ -125,14 +168,28 @@ impl ResourceOffer {
     pub fn from_host_facts(hardware: &Value, jobs: &Value) -> Self {
         let number = |object: &Value, name| object.get(name).and_then(Value::as_u64);
         Self {
-            cpus: number(hardware, "cpus"),
-            memory_mb: number(hardware, "memory_mb"),
+            cpus: limited(
+                number(hardware, "cpus"),
+                hardware.get("cgroup").and_then(|v| number(v, "cpus")),
+            ),
+            memory_mb: limited(
+                number(hardware, "memory_mb"),
+                hardware.get("cgroup").and_then(|v| number(v, "memory_mb")),
+            ),
             gpus: hardware
                 .get("gpus")
                 .and_then(Value::as_array)
                 .map(|items| items.len() as u64),
             storage_mb: None,
             concurrency: number(jobs, "capacity"),
+            cpu: hardware
+                .get("cpu")
+                .and_then(|v| CpuProfile::from_value(v).ok()),
+            pricing: None,
+            cpu_millis: limited(
+                number(hardware, "cpus").and_then(|cpus| cpus.checked_mul(1000)),
+                hardware.get("cgroup").and_then(|v| number(v, "cpu_millis")),
+            ),
         }
     }
 }
@@ -164,7 +221,13 @@ impl ObjectiveCapabilities {
             return Self::default();
         };
         let Some(object) = capabilities.as_object() else {
-            return Self::default();
+            return Self {
+                resources: ResourceRequirements {
+                    invalid: true,
+                    ..ResourceRequirements::default()
+                },
+                ..Self::default()
+            };
         };
         let worker = match object.get("worker") {
             Some(Value::String(mode)) if mode == "built_in" || mode == "builtin" => {
@@ -187,17 +250,15 @@ impl ObjectiveCapabilities {
             Some("queued") => AssignmentMode::Queued,
             _ => AssignmentMode::Partitioned,
         };
-        let resources = object
-            .get("resources")
-            .and_then(|value| ResourceOffer::from_value(value).ok())
-            .map(|offer| ResourceRequirements {
-                cpus: offer.cpus,
-                memory_mb: offer.memory_mb,
-                gpus: offer.gpus,
-                storage_mb: offer.storage_mb,
-                concurrency: offer.concurrency,
-            })
-            .unwrap_or_default();
+        let resources = match object.get("resources") {
+            None => ResourceRequirements::default(),
+            Some(value) => {
+                requirements_from_value(value).unwrap_or_else(|_| ResourceRequirements {
+                    invalid: true,
+                    ..ResourceRequirements::default()
+                })
+            }
+        };
         Self {
             worker,
             assignment,
@@ -222,11 +283,64 @@ pub fn matches(requirements: &ResourceRequirements, offer: &ResourceOffer) -> bo
             None => true,
         }
     }
-    enough(requirements.cpus, offer.cpus)
+    !requirements.invalid
+        && requirements.cpu.matches(offer.cpu.as_ref())
+        && requirements.cpus.is_none_or(|cpus| {
+            offer
+                .cpu_millis
+                .is_none_or(|millis| u128::from(millis) >= u128::from(cpus) * 1000)
+        })
+        && enough(requirements.cpus, offer.cpus)
         && enough(requirements.memory_mb, offer.memory_mb)
         && enough(requirements.gpus, offer.gpus)
         && enough(requirements.storage_mb, offer.storage_mb)
         && enough(requirements.concurrency, offer.concurrency)
+}
+
+/// Keep capacity parsing distinct from offer parsing: requirements describe a
+/// predicate, while a profile describes an observation.
+fn requirements_from_value(value: &Value) -> Result<ResourceRequirements, ScheduleError> {
+    let object = value.as_object().ok_or(ScheduleError::NotAnObject)?;
+    if object.keys().any(|key| {
+        ![
+            "cpus",
+            "memory_mb",
+            "gpus",
+            "storage_mb",
+            "concurrency",
+            "cpu",
+        ]
+        .contains(&key.as_str())
+    }) {
+        return Err(ScheduleError::InvalidField {
+            field: "resources",
+            expected: "known resource dimensions",
+        });
+    }
+    Ok(ResourceRequirements {
+        cpus: optional_u64(object.get("cpus"), "cpus")?,
+        memory_mb: optional_u64(object.get("memory_mb"), "memory_mb")?,
+        gpus: optional_u64(object.get("gpus"), "gpus")?,
+        storage_mb: optional_u64(object.get("storage_mb"), "storage_mb")?,
+        concurrency: optional_u64(object.get("concurrency"), "concurrency")?,
+        cpu: object
+            .get("cpu")
+            .map(CpuRequirements::from_value)
+            .transpose()
+            .map_err(|_| ScheduleError::InvalidField {
+                field: "cpu",
+                expected: "valid CPU requirements",
+            })?
+            .unwrap_or_default(),
+        invalid: false,
+    })
+}
+
+fn limited(physical: Option<u64>, limit: Option<u64>) -> Option<u64> {
+    match (physical, limit) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,7 +390,56 @@ mod tests {
             gpus: Some(1),
             storage_mb: Some(100_000),
             concurrency: Some(2),
+            ..ResourceOffer::default()
         }
+    }
+
+    #[test]
+    fn instruction_requirements_and_malformed_metadata_fail_closed() {
+        let mut host = offer();
+        let required = requirements_from_value(
+            &Value::from_json(
+                r#"{"cpus":1,"cpu":{"arch":"x86_64","features":["avx512f","avx512bw"]}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!matches(&required, &host));
+        host.cpu = Some(CpuProfile {
+            arch: "x86_64".into(),
+            features: vec!["avx512f".into()],
+            ..CpuProfile::default()
+        });
+        assert!(!matches(&required, &host));
+        host.cpu.as_mut().unwrap().features.push("avx512bw".into());
+        assert!(matches(&required, &host));
+        host.cpu_millis = Some(500);
+        assert!(!matches(&required, &host));
+        let mut objective = Objective::from_value(&Value::from_json(r#"{"goal":"g","statement":"s","verifier":{"kind":"certificate"},"reward":1,"funder":"f","created_at":"2026-01-01T00:00:00Z"}"#).unwrap()).unwrap();
+        for bad in [
+            r#"{"resources":{"cpus":-1}}"#,
+            r#"{"resources":{"cpu":{"feautres":["avx2"]}}}"#,
+            r#"{"resources":null}"#,
+            "42",
+        ] {
+            objective.verifier = Value::object([("capabilities", Value::from_json(bad).unwrap())]);
+            let capabilities = ObjectiveCapabilities::for_objective(&objective);
+            assert!(capabilities.resources.invalid, "{bad}");
+            assert!(!matches(&capabilities.resources, &offer()));
+        }
+    }
+
+    #[test]
+    fn host_caps_never_replace_a_smaller_affinity_with_a_larger_quota() {
+        let hardware = Value::from_json(
+            r#"{"cpus":2,"memory_mb":1024,"cgroup":{"cpus":8,"memory_mb":8192,"cpu_millis":500}}"#,
+        )
+        .unwrap();
+        let offer = ResourceOffer::from_host_facts(&hardware, &Value::Null);
+        assert_eq!(offer.cpus, Some(2));
+        assert_eq!(offer.memory_mb, Some(1024));
+        assert_eq!(offer.cpu_millis, Some(500));
+        assert_eq!(ResourceOffer::from_value(&offer.to_value()).unwrap(), offer);
     }
 
     #[test]
@@ -287,6 +450,7 @@ mod tests {
             gpus: Some(1),
             storage_mb: None,
             concurrency: Some(1),
+            ..ResourceRequirements::default()
         };
         assert!(matches(&requirements, &offer()));
         assert!(!matches(

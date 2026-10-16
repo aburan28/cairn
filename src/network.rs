@@ -250,8 +250,8 @@ pub struct NodeFacts {
     pub servable_kinds: Vec<String>,
 }
 
-/// This machine, as the process sees it. Probed once; nothing here changes
-/// while the process runs, and a request handler should not be reading
+/// This machine, as the process sees it. Probed once at node startup; the
+/// host agent refreshes its own profile. A request handler should not be reading
 /// `/proc` or spawning `sysctl`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hardware {
@@ -261,6 +261,8 @@ pub struct Hardware {
     pub memory_mb: Option<u64>,
     pub os: &'static str,
     pub arch: &'static str,
+    pub cpu: crate::hardware::CpuProfile,
+    pub cpu_millis: Option<u64>,
     /// What the operator lets one verifier's process tree keep busy.
     pub verifier_cpus: Option<u64>,
     /// What the operator lets one verifier's process tree hold.
@@ -276,6 +278,10 @@ impl Hardware {
             memory_mb: total_memory_mb(),
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
+            cpu: crate::hardware::CpuProfile::probe(),
+            cpu_millis: crate::agent::probe::cgroup_cpu_millis(std::path::Path::new(
+                "/sys/fs/cgroup",
+            )),
             verifier_cpus: env_u64(crate::verifiers::limits::CPUS_ENV),
             verifier_memory_mb: env_u64(crate::verifiers::sandbox::MEMORY_ENV),
         }
@@ -291,6 +297,8 @@ impl Hardware {
             ("memory_mb", opt(self.memory_mb)),
             ("os", Value::string(self.os)),
             ("arch", Value::string(self.arch)),
+            ("cpu", self.cpu.to_value()),
+            ("cpu_millis", opt(self.cpu_millis)),
             (
                 "verifier_limits",
                 Value::object([

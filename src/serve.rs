@@ -1667,6 +1667,12 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         }
         ("GET", "/work_assignment") => work_assignment(stream, serving, &request),
         ("GET", "/assignments") => assignments(stream, serving, &request),
+        ("POST", "/compute/quote") => {
+            match read_json_body(&mut reader, &request, "/compute/quote") {
+                Ok(body) => compute_quote(stream, serving, &body),
+                Err((status, why)) => json_error(stream, status, &why),
+            }
+        }
         ("GET", "/goals") => goals_index(stream, serving, &request),
         ("GET", path) if path.starts_with("/goals/") => {
             goal_of(stream, serving, &path["/goals/".len()..])
@@ -2001,6 +2007,15 @@ fn resource_offer_from_env(hardware: &Hardware) -> Option<ResourceOffer> {
         gpus: read("CAIRN_RESOURCE_GPUS", None),
         storage_mb: read("CAIRN_RESOURCE_STORAGE_MB", None),
         concurrency: read("CAIRN_RESOURCE_CONCURRENCY", Some(1)),
+        cpu: Some(hardware.cpu.clone()),
+        pricing: None,
+        cpu_millis: match (
+            read("CAIRN_RESOURCE_CPUS", hardware.cpus).and_then(|cpus| cpus.checked_mul(1000)),
+            hardware.cpu_millis,
+        ) {
+            (Some(budget), Some(quota)) => Some(budget.min(quota)),
+            (budget, quota) => budget.or(quota),
+        },
     })
 }
 
@@ -2023,6 +2038,7 @@ fn index(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 Value::string("GET /progress/{id}"),
                 Value::string("GET /work_assignment?objective_id=&node_id="),
                 Value::string("GET /assignments?host="),
+                Value::string("POST /compute/quote"),
                 Value::string("GET /leases"),
                 Value::string("GET /leases/{id}"),
                 Value::string("GET /hosts"),
@@ -4538,6 +4554,47 @@ fn work_assignment(stream: &mut TcpStream, serving: &Serving, request: &Request)
 /// a slice, start a process, or claim that a host ran anything. A dispatcher
 /// can later turn the same capability match into a queued job without changing
 /// the reader contract or making an unverified host report authoritative.
+fn compute_quote(stream: &mut TcpStream, serving: &Serving, body: &Value) -> io::Result<()> {
+    let request = match crate::pricing::QuoteRequest::from_value(body) {
+        Ok(request) => request,
+        Err(why) => return json_error(stream, 400, &why),
+    };
+    let host = match crate::hardware::text(body, "host") {
+        Ok(Some(host)) => host,
+        _ => return json_error(stream, 400, "host is required"),
+    };
+    let now = crate::time::unix_seconds();
+    let row = {
+        let roster = serving
+            .hosts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        roster
+            .list(now)
+            .into_iter()
+            .find(|row| row.registration.host == host)
+    };
+    let Some(row) = row else {
+        return json_error(stream, 404, "no host with that name is registered here");
+    };
+    if row.status != progress::Liveness::Live {
+        return json_error(stream, 409, "that host is not live");
+    }
+    match crate::pricing::quote(&row.registration.resources, &request) {
+        Ok(quote) => json(
+            stream,
+            200,
+            &Value::object([
+                ("host", Value::string(host)),
+                ("quoted_at_unix", Value::Int(i128::from(now))),
+                ("host_reported_at", Value::Int(i128::from(row.received_at))),
+                ("quote", quote),
+            ]),
+        ),
+        Err(why) => json_error(stream, 409, &why),
+    }
+}
+
 fn assignments(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
     let now = crate::time::unix_seconds();
     let requested_host = request.query.get("host").filter(|host| !host.is_empty());
@@ -8021,6 +8078,98 @@ mod tests {
         assert!(int(&body, "roles.coordinators.total") >= 1);
         assert_eq!(int(&body, "roles.executors.total"), 2);
         assert_eq!(int(&body, "roles.verifiers.total"), 0);
+    }
+
+    #[test]
+    fn cpu_aware_assignments_and_compute_quotes_use_live_reports_without_touching_the_log() {
+        let dir = TempDir::new("compute-quote");
+        let log = dir.path.join("ledger.jsonl");
+        let objective = Objective::from_value(&Value::from_json(r#"{"goal":"experiment","statement":"needs AVX-512 byte operations","verifier":{"kind":"certificate","capabilities":{"resources":{"cpus":2,"cpu":{"arch":"x86_64","features":["avx512f","avx512bw"]}}}},"reward":1,"funder":"f","created_at":"2026-01-01T00:00:00Z"}"#).unwrap()).unwrap();
+        Ledger::open(&log)
+            .unwrap()
+            .append("objective", objective.to_value(), "2026-01-01T00:00:00Z")
+            .unwrap();
+        let serving = Serving::new(&log, env!("CARGO_MANIFEST_DIR"));
+        let registration = Value::from_json(r#"{"host":"test-host","hardware":{"cpus":8,"memory_mb":8192},"resources":{"cpus":8,"memory_mb":8192,"cpu_millis":8000,"concurrency":1,"cpu":{"arch":"x86_64","features":["avx512f","avx512bw"],"base_khz":2400000,"max_khz":4000000,"model":"Test CPU"},"pricing":{"unit":"USD","rates":[{"id":"vector","workload":"boomer-v1","cpu":{"features":["avx512f","avx512bw"],"model":"Test CPU","min_base_khz":2000000},"cpu_second_microunits":3,"memory_gib_second_microunits":2},{"id":"scalar","workload":"boomer-v1","cpu_second_microunits":1,"memory_gib_second_microunits":2}]}}}"#).unwrap();
+        let mut old = registration.clone();
+        if let Value::Object(fields) = &mut old {
+            fields.insert("host".into(), Value::string("stale-host"));
+        }
+        serving
+            .hosts
+            .lock()
+            .unwrap()
+            .record(
+                hosts::Registration::from_value(&old).unwrap().0,
+                crate::time::unix_seconds() - progress::LIVE_SECONDS - 1,
+            )
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let before = get_json(addr, "/chain").1;
+        let (status, _) = ask_json(addr, "/hosts", &registration.canonical_string());
+        assert!(status.starts_with("HTTP/1.1 202"), "{status}");
+        let (_, assignments) = get_json(addr, "/assignments?host=test-host");
+        let row = &at(&assignments, "assignments").as_array().unwrap()[0];
+        assert_eq!(row.get("eligible"), Some(&Value::Bool(true)));
+        let request = r#"{"host":"test-host","workload":"boomer-v1","cpus":2,"memory_mb":512,"duration_ms":1500,"cpu":{"features":["avx512bw"]}}"#;
+        let (status, price) = ask_json(addr, "/compute/quote", request);
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}: {price:?}");
+        assert_eq!(int(&price, "quote.amount_microunits"), 11);
+        assert_eq!(at(&price, "quote.rate_id").as_str(), Some("vector"));
+        assert_eq!(at(&price, "quote.cpu.max_khz").as_u64(), Some(4_000_000));
+        // Refreshing a host removes eligibility and the premium immediately.
+        let mut changed = registration.clone();
+        if let Value::Object(fields) = &mut changed {
+            if let Some(Value::Object(resources)) = fields.get_mut("resources") {
+                resources.insert(
+                    "cpu".into(),
+                    Value::object([
+                        ("arch", Value::string("x86_64")),
+                        ("features", Value::array([Value::string("avx2")])),
+                    ]),
+                );
+            }
+        }
+        assert!(ask_json(addr, "/hosts", &changed.canonical_string())
+            .0
+            .starts_with("HTTP/1.1 202"));
+        let (_, assignments) = get_json(addr, "/assignments?host=test-host");
+        assert_eq!(
+            at(&assignments, "assignments").as_array().unwrap()[0].get("eligible"),
+            Some(&Value::Bool(false))
+        );
+        assert!(ask_json(addr, "/compute/quote", request)
+            .0
+            .starts_with("HTTP/1.1 409"));
+        let scalar_request = r#"{"host":"test-host","workload":"boomer-v1","cpu_millis":500,"memory_mb":512,"duration_ms":1000}"#;
+        let (status, price) = ask_json(addr, "/compute/quote", scalar_request);
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert_eq!(int(&price, "quote.amount_microunits"), 2);
+        assert_eq!(at(&price, "quote.rate_id").as_str(), Some("scalar"));
+        assert!(ask_json(
+            addr,
+            "/compute/quote",
+            &scalar_request.replace("test-host", "stale-host")
+        )
+        .0
+        .starts_with("HTTP/1.1 409"));
+        assert!(ask_json(
+            addr,
+            "/compute/quote",
+            &scalar_request.replace("test-host", "missing-host")
+        )
+        .0
+        .starts_with("HTTP/1.1 404"));
+        assert!(
+            ask_json(addr, "/compute/quote", &scalar_request.replace("500", "0"))
+                .0
+                .starts_with("HTTP/1.1 400")
+        );
+        assert_eq!(get_json(addr, "/chain").1, before);
     }
 
     #[test]

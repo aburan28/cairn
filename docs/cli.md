@@ -328,6 +328,12 @@ enables and starts it; `uninstall [--purge]` reverses that. Every flag has a
 `3` nothing could be learned (no sandbox, no node answered, no systemd).
 [agent.md](agent.md) has the job format, the receipt and the unit.
 
+`run`, `exec` and `install` accept `--rate-card FILE` (or
+`CAIRN_AGENT_RATE_CARD`). `exec` also accepts `--workload KEY` and
+`--cpu-requirements FILE`. [Hardware and compute estimates](hardware-compute.md)
+documents CPU preflight, rate selection, `POST /compute/quote` and the
+allocation estimates retained in executor receipts.
+
 ### `work --node URL --objective ID --worker NAME [options] -- SOLVER [ARGS]...`
 
 Work one objective from this machine with a solver you supply. Each round

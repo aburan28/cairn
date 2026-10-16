@@ -195,15 +195,30 @@ impl Registration {
         let host = text("host", MAX_NAME_LEN)?.ok_or(RegistrationError::Missing("host"))?;
         let hardware = object_field("hardware")?;
         let jobs = object_field("jobs")?;
-        let resources = match object.get("resources") {
+        let mut resources = match object.get("resources") {
             None | Some(Value::Null) => ResourceOffer::from_host_facts(&hardware, &jobs),
             Some(value) => {
                 ResourceOffer::from_value(value).map_err(|_| RegistrationError::Invalid {
                     field: "resources",
-                    expected: "an object of non-negative integer capacities",
+                    expected:
+                        "valid integer capacities, CPU profile, and optional compute rate card",
                 })?
             }
         };
+        // Older senders may omit the profile from resources. Only the typed
+        // hardware.cpu observation can fill it; legacy flag lists have no OS
+        // usability semantics and must not become executable guarantees.
+        if resources.cpu.is_none() {
+            resources.cpu = hardware
+                .get("cpu")
+                .filter(|value| **value != Value::Null)
+                .map(crate::hardware::CpuProfile::from_value)
+                .transpose()
+                .map_err(|_| RegistrationError::Invalid {
+                    field: "hardware.cpu",
+                    expected: "a valid CPU profile",
+                })?;
+        }
         let registration = Registration {
             host,
             agent: text("agent", MAX_TEXT_LEN)?,
