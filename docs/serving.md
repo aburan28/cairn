@@ -67,6 +67,10 @@ record instead.
 | `POST /progress` | a worker's heartbeat: kept in this node's memory for `GET /progress/{id}`, never written to the log, accepted on a read-only node too |
 | `POST /lease` | take or renew an advisory lease on a task of an objective this log holds: held in memory like a heartbeat, never written, never a lock |
 | `POST /lease/release` | end a lease you hold, as `completed`, `failed` or `abandoned` |
+| `GET /swarm` | open swarm calls ranked by bid, with what volunteers reported giving each: memory, never the log — see [design/swarm-calls.md](design/swarm-calls.md) |
+| `GET /swarm/advice?host=NAME` | what a volunteer machine should do now: `idle`, `stay`, `start` or `yield` (with a checkpoint deadline); advice, never a rule |
+| `POST /swarm/call` / `POST /swarm/withdraw` | raise or withdraw a call on a funded objective; the operator's only, from loopback and not forwarded |
+| `POST /swarm/report` | a volunteer's report of core-seconds given (and, on a yield, unsaved): unverified, capped, never a balance |
 | `POST /hosts` | a host agent's registration: its hardware and sandboxes, kept in this node's memory for `GET /hosts` and `GET /network`, never written to the log, accepted on a read-only node too |
 | `POST /fleet/join` | enroll a machine with an invite token, on a leader whose `CAIRN_FLEET` lists `enrolled`: signed by the invite key and by the new member key, answered with the member's name and expiry — see [Fleet](#fleet-signing-for-your-own-machines) |
 | `POST /deposit/grant` | issue a short-lived upload grant against a node-local deposit; response never includes cloud keys |
@@ -494,7 +498,7 @@ A fleet member's signed request can also be refused before it reaches the
 record, with the reasons in [Fleet](#fleet-signing-for-your-own-machines):
 `malformed_authorization`, `member_unknown`, `member_revoked`,
 `member_expired`, `clock_skew`, `bad_signature`, `enrollment_off`,
-`not_a_member_route`. The heartbeat, lease and host routes refuse a reserved
+`not_a_member_route`. The heartbeat, lease, host and swarm-report routes refuse a reserved
 name with `name_reserved` or `name_not_yours`.
 
 **`wait`, on a `202`**, says what the record waits for, in fields:
@@ -613,8 +617,8 @@ id>"`, and `"member": "<name>"` for an enrolled member.
   A header that is present and fails is a `401` with its reason
   (`malformed_authorization`, `member_unknown`, `member_revoked`,
   `member_expired`, `clock_skew`, `bad_signature`), never an anonymous request.
-  The header is read on `POST /submit`, `/progress`, `/hosts`, `/lease` and
-  `/lease/release`; anywhere else it is refused with `400 not_a_member_route`.
+  The header is read on `POST /submit`, `/progress`, `/hosts`, `/lease`,
+  `/lease/release` and `/swarm/report`; anywhere else it is refused with `400 not_a_member_route`.
   A verified member also passes the Host rule above, which stops web pages
   and not machines holding a key.
 - **Networks** (`private`, `loopback`, CIDRs): any request from inside them,
