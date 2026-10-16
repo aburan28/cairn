@@ -157,6 +157,7 @@ pub fn p2p(args: Vec<String>, globals: Globals) -> i32 {
     )
     .parse()
     .unwrap_or_else(|_| p2p_usage(2));
+    let serve_on_tailnet = serve.as_deref().is_some_and(crate::tailnet::is_keyword);
     let serve = serve.map(|spec| tailnet_or_exit("cairn p2p: --serve", &spec));
     let mut config = Config::new(
         identity.unwrap_or_else(|| p2p_usage(2)),
@@ -169,6 +170,7 @@ pub fn p2p(args: Vec<String>, globals: Globals) -> i32 {
     config.bootstrap = bootstrap.into_iter().map(PathBuf::from).collect();
     config.population = population.map(PathBuf::from);
     config.queue = queue.map(PathBuf::from);
+    config.serve_also = serve_twin(serve_on_tailnet, serve.as_deref());
     config.serve = serve;
     config.key_file = key_file.map(PathBuf::from);
     config.proxy = proxy;
@@ -294,7 +296,9 @@ pub fn serve(args: Vec<String>, globals: Globals) -> i32 {
     }
 
     // `tailnet[:PORT]` binds to this machine's tailnet address only.
+    let listen_on_tailnet = crate::tailnet::is_keyword(&listen);
     let listen = tailnet_or_exit("cairn serve: --listen", &listen);
+    let twin = serve_twin(listen_on_tailnet, Some(&listen));
     let p2p_listen = p2p_listen.map(|spec| tailnet_or_exit("cairn serve: --p2p-listen", &spec));
 
     // -- node mode ----------------------------------------------------------
@@ -323,6 +327,7 @@ pub fn serve(args: Vec<String>, globals: Globals) -> i32 {
         config.population = population;
         config.queue = queue;
         config.serve = Some(listen);
+        config.serve_also = twin;
         config.max_queued = max_queue;
         config.key_file = key_file;
         if let Some(text) = fanout {
@@ -387,11 +392,17 @@ pub fn serve(args: Vec<String>, globals: Globals) -> i32 {
         eprintln!("cairn serve: {error}");
         return 1;
     }
-    if let Err(error) = serve::listen(&listen, serving) {
+    if let Err(error) = serve::listen_also(&listen, twin, serving) {
         eprintln!("cairn serve: cannot listen on {listen}: {error}");
         return 1;
     }
     0
+}
+
+/// The loopback twin a `tailnet` HTTP address also binds, once resolved.
+fn serve_twin(was_tailnet: bool, resolved: Option<&str>) -> Option<std::net::IpAddr> {
+    let addr = resolved?.parse::<SocketAddr>().ok()?;
+    was_tailnet.then(|| crate::tailnet::loopback_twin(addr).ip())
 }
 
 /// Resolve a listen address that may be `tailnet[:PORT]`, or exit with the

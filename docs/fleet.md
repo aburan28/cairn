@@ -215,9 +215,11 @@ cairn fleet invite --identity leader.identity.json --name gpu-box-1 --node tailn
 ```
 
 `--serve tailnet:8080` binds the HTTP side to this machine's tailnet address
-**only** (`tailnet6:8080` for its IPv6 one), so nothing on the LAN or the
-internet can reach it; `--serve 0.0.0.0:8080` would answer the tailnet too,
-and everything else with it. The same keyword works for `cairn serve --listen`
+and its loopback twin, `127.0.0.1:8080`, and nothing else (`tailnet6:8080` for
+the IPv6 pair), so nothing on the LAN or the internet can reach it while this
+machine's own tools -- `curl 127.0.0.1:8080/network`, Cairn.app's window --
+still can. `--serve 0.0.0.0:8080` would answer the tailnet too, and everything
+else with it. The same keyword works for `cairn serve --listen`
 and for `--listen`, the p2p port. `--node tailnet:8080` puts the leader's
 MagicDNS name in the join line, which survives the machine's address changing.
 `GET /network` reports where the node is as `node.reach.tailnet`, with the URL
@@ -251,8 +253,11 @@ What it changes and what it does not:
 - **Tailscale is trusted to say who is on the tailnet**, not who may sign.
   Use ACLs to keep members to the leader's port and away from each other.
 - A launchd agent or systemd unit may not find `tailscale` on its `PATH`;
-  `CAIRN_TAILSCALE=/path/to/tailscale` names it. Cairn.app has no switch for
-  this yet: set `--serve` by hand or run the leader from the CLI.
+  `CAIRN_TAILSCALE=/path/to/tailscale` names it; Homebrew's two prefixes and
+  the Tailscale app's bundled CLI are tried after `PATH`.
+- **On a Mac**: Cairn.app, Settings → Fleet → *Serve members over Tailscale
+  only*, beside *Lead a fleet*. Invite a machine… then fills in the MagicDNS
+  URL. The node will not start while Tailscale is disconnected, and says so.
 
 ### Revoking
 

@@ -48,6 +48,9 @@ struct NodeSettings: Equatable {
         /// See `FleetJoin`. Never registered as a default: its absence is how
         /// `current()` tells a fleet led before invitations existed.
         static let fleetJoin = "fleetJoin"
+        /// Serve a fleet this node leads on the tailnet, not every interface:
+        /// `--serve tailnet:PORT`. See `fleetTailnet`.
+        static let fleetTailnet = "fleetTailnet"
     }
 
     /// Who may join a fleet this node leads.
@@ -74,6 +77,11 @@ struct NodeSettings: Equatable {
     /// file you hand out -- the listen address is never itself a dial hint
     /// (a cloud public IP is not on any local interface).
     static let anyHost = "0.0.0.0"
+    /// The node's own word for this Mac's Tailscale address. `cairn run`
+    /// resolves it with `tailscale status`, binds that address and its
+    /// loopback twin on the same port, and refuses to start, saying why, when
+    /// Tailscale is not connected (`src/tailnet.rs`).
+    static let tailnetHost = "tailnet"
 
     /// Where the data lives unless a person chose somewhere else. One fixed
     /// folder rather than "wherever you started it", because an app has no
@@ -128,6 +136,13 @@ struct NodeSettings: Equatable {
     /// Invitations by default: the setting `docs/design/fleet-enrollment.md`
     /// recommends, and the one a new fleet starts with.
     var fleetJoin: FleetJoin = .invited
+    /// Serve the fleet on this Mac's tailnet only: members on the same
+    /// tailnet reach it over WireGuard, behind any router and with no port
+    /// forwarded, and nothing on the LAN or the internet reaches it at all.
+    /// This window still reads 127.0.0.1, which the node binds beside the
+    /// tailnet address. Membership is unchanged: being on the tailnet admits
+    /// nobody, and an invited fleet still signs only for invited keys.
+    var fleetTailnet: Bool = false
 
     /// `CAIRN_FLEET` for this fleet.
     var fleetSources: String {
@@ -140,7 +155,15 @@ struct NodeSettings: Equatable {
     /// network or leads a fleet -- both exist so another machine there can
     /// reach it; leading also signs that machine's records as this node.
     var serveHost: String {
-        leadFleet || httpHost == Self.anyHost ? Self.anyHost : Self.loopbackHost
+        if leadFleet && fleetTailnet { return Self.tailnetHost }
+        return leadFleet || httpHost == Self.anyHost ? Self.anyHost : Self.loopbackHost
+    }
+
+    /// Where to look for a free HTTP port before starting. `tailnet` is not an
+    /// address this app can bind; a port free on every interface is free on
+    /// the tailnet address and on loopback, the two the node will take.
+    var serveProbeHost: String {
+        serveHost == Self.tailnetHost ? Self.anyHost : serveHost
     }
 
     /// The ed25519 identity a fleet is paid to, beside the node's other keys.
@@ -197,6 +220,7 @@ struct NodeSettings: Equatable {
             Key.backgroundService: false,
             Key.leadFleet: false,
             Key.fleetNetworks: defaultFleetNetworks,
+            Key.fleetTailnet: false,
         ]
     }
 
@@ -245,7 +269,8 @@ struct NodeSettings: Equatable {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 return text.isEmpty ? defaultFleetNetworks : text
             }(),
-            fleetJoin: FleetJoin(rawValue: defaults.string(forKey: Key.fleetJoin) ?? "") ?? .invited
+            fleetJoin: FleetJoin(rawValue: defaults.string(forKey: Key.fleetJoin) ?? "") ?? .invited,
+            fleetTailnet: defaults.bool(forKey: Key.fleetTailnet)
         )
     }
 
@@ -338,9 +363,9 @@ struct NodeSettings: Equatable {
         return env
     }
 
-    /// True when another machine on the LAN can reach the node's pages and
-    /// its worker routes.
-    var sharesOnNetwork: Bool { serveHost == Self.anyHost }
+    /// True when another machine -- on the LAN, or on the tailnet -- can reach
+    /// the node's pages and its worker routes.
+    var sharesOnNetwork: Bool { serveHost != Self.loopbackHost }
 }
 
 /// The data folder as files: what it holds, whether it holds a node, and
