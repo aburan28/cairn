@@ -38,8 +38,13 @@ reason [p2p.md](p2p.md) prefers a DNS name in a bootstrap file.
 ## HTTPS on the tailnet
 
 The node's HTTP API and the reader terminate no TLS ([serving.md](serving.md),
-"Not TLS"), and the binary refuses a serve bind outside loopback. Tailscale
-can terminate TLS for it, on the tailnet, in one command:
+"Not TLS"). Keeping `--serve` on loopback is deliberate here: Tailscale is
+what answers on the tailnet (and, with funnel, on the open internet), so the
+node itself never listens past this machine. A fleet that wants plaintext HTTP
+on the WireGuard mesh without TLS termination uses `--serve tailnet:PORT`
+instead — that path is [fleet.md](fleet.md#over-a-tailnet), not this recipe.
+
+Tailscale terminates TLS for the loopback listener in one command:
 
 ```sh
 tailscale serve --bg --https=8443 http://127.0.0.1:8080
