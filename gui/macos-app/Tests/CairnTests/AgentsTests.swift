@@ -27,11 +27,12 @@ final class AgentsTests: XCTestCase {
         let server = try XCTUnwrap((json["mcpServers"] as? [String: Any])?["cairn"] as? [String: Any])
         XCTAssertEqual(server["command"] as? String, binary)
         XCTAssertEqual(server["args"] as? [String], args)
+        XCTAssertEqual((server["env"] as? [String: String])?["CAIRN_REQUIRE_SANDBOX"], "1")
         XCTAssertEqual((server["env"] as? [String: String])?["CAIRN_SANDBOX_CPUS"], "4")
         XCTAssertEqual((server["env"] as? [String: String])?["CAIRN_SANDBOX_MEMORY_MB"], "4096")
 
         let add = AgentStanza.claudeAdd(i)
-        XCTAssertTrue(add.hasPrefix("claude mcp add cairn --scope user --env CAIRN_SANDBOX_CPUS=4 --env CAIRN_SANDBOX_MEMORY_MB=4096 -- \(binary) --data-dir '\(dir)' --root '\(dir)' run"), add)
+        XCTAssertTrue(add.hasPrefix("claude mcp add cairn --scope user --env CAIRN_REQUIRE_SANDBOX=1 --env CAIRN_SANDBOX_CPUS=4 --env CAIRN_SANDBOX_MEMORY_MB=4096 -- \(binary) --data-dir '\(dir)' --root '\(dir)' run"), add)
     }
 
     func testAnOfflineLogIsItsOwnAndSigned() {
@@ -40,7 +41,7 @@ final class AgentsTests: XCTestCase {
         XCTAssertEqual(AgentStanza.arguments(i), ["--log", dir + "/agents/codex.jsonl", "--root", dir, "mcp", "--identity", identity])
         let toml = AgentStanza.render(i)
         XCTAssertTrue(toml.hasPrefix("[mcp_servers.cairn]\ncommand = \"\(binary)\"\nargs = [\"--log\", \"\(dir)/agents/codex.jsonl\", "), toml)
-        XCTAssertTrue(toml.contains("\n[mcp_servers.cairn.env]\nCAIRN_SANDBOX_CPUS = \"4\"\nCAIRN_SANDBOX_MEMORY_MB = \"4096\"\n"), toml)
+        XCTAssertTrue(toml.contains("\n[mcp_servers.cairn.env]\nCAIRN_REQUIRE_SANDBOX = \"1\"\nCAIRN_SANDBOX_CPUS = \"4\"\nCAIRN_SANDBOX_MEMORY_MB = \"4096\"\n"), toml)
         XCTAssertEqual(AgentStanza.arguments(inputs(.runNode, .claudeCode, identity: identity)).suffix(2), ["--mcp-identity", identity])
     }
 

@@ -20,6 +20,7 @@ and they are not conveniences.
 | `CAIRN_SECRETS_DIR` | `~/.cairn/secrets` | directory for named operator secrets (`cairn secret`) |
 | `CAIRN_PASSPHRASE` | — | passphrase for a wrapped at-rest key |
 | `CAIRN_REQUIRE_SANDBOX` | unset | `1` refuses to run objective code at all without a working jail |
+| `CAIRN_SWARM_OPERATOR_TOKEN` | unset (operator controls disabled) | random 32-byte token encoded as 64 lowercase hexadecimal characters; `/swarm/call` and `/swarm/withdraw` require it as a Bearer credential, loopback and no forwarding headers. An invalid configured token refuses server startup. See [swarm-calls.md](design/swarm-calls.md#operator-credential) |
 | `CAIRN_SANDBOX_MEMORY_MB` | `4096` (MiB) | memory cap for pinned pure functions: `RLIMIT_AS` on Linux, the process tree's measured footprint on macOS; `0` disables it |
 | `CAIRN_SANDBOX_CPUS` | unset (no cap) | cores one verifier's process tree may keep busy, on average; enforced by pausing it |
 | `CAIRN_LEAN` | `lean` on `PATH` | the Lean binary the `lean` verifier runs. Name the toolchain's real binary (`<prefix>/bin/lean`), not elan's `~/.elan/bin/lean` proxy, which finds its toolchain through `$HOME` and the jail scrubs `$HOME`. The reference implementation reads the same variable |
@@ -145,7 +146,7 @@ node rather than one verifier at a time.
 ### The two refusal switches
 
 `CAIRN_REQUIRE_SANDBOX=1` and `CAIRN_REQUIRE_BEACON=1` both turn a documented
-weaker mode into a refusal. Neither is the default, for the same reason in both
+weaker mode into a refusal. Neither is the CLI default, for the same reason in both
 cases: defaulting them on would fail hosts and logs that are working today —
 every machine with no jail mechanism, and every log written before the beacon
 record existed, including the published one. An audit that cries wolf is an
@@ -155,6 +156,16 @@ Set `CAIRN_REQUIRE_SANDBOX=1` on any node that verifies objectives it did not
 write. That is the whole point of the switch: objective-authored code runs on
 your machine, and without a jail it runs unconfined. With the switch, a host
 that cannot jail it answers `unavailable` instead of running it.
+
+Cairn.app sets `CAIRN_REQUIRE_SANDBOX=1` for both its foreground node and its
+background login service. A desktop node imports other people's verifier code;
+losing its sandbox must make that code unavailable. Attaching the app to an
+existing node does not change that node's policy: Settings → Verifiers reports
+the attached node's own tools and whether it requires isolation.
+After upgrading an existing background service, restart it once from the app
+to rewrite its stored launchd environment. Verifiers offers **Restart Node to
+Require Sandbox** when an app-owned node still reports optional isolation;
+reopening its window alone does not update an already-running process.
 
 `CAIRN_REQUIRE_BEACON=1` is a *reader's* policy, not a writer's. It gates
 acceptance, not settlement — refusing to settle an epoch that already closed
