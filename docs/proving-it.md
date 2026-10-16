@@ -27,6 +27,7 @@ about exactly how much.
 |---|---|---|
 | 1 | the rules are what the code says | **proved**, as strongly as anything here: two independent implementations agree on every id and Merkle root, bound by `conformance/vectors.json` |
 | 2 | an accepted artifact satisfies its verifier | **proved by construction** for `certificate` and `evaluator` — acceptance *is* recomputation |
+| 2a | a result that promises prescribed execution is bound to that program, its inputs, complete workload and raw outputs | **required, not implemented** — [execution-proof chain](design/execution-proof-chain.md); a witness certificate or a hashed process receipt does not establish this |
 | 3 | the verifier is a faithful encoding of the statement | **never provable.** This is V4, the judgement tier, and [verification.md](verification.md) says so |
 | 4 | honest play is an equilibrium of the node game | **conditionally proved** — `src/incentive/`, and the conditional is the rest of this document |
 | 5 | a population actually lands there | **conditionally**, via better-reply dynamics and `tipping_point` |
@@ -38,6 +39,14 @@ is a bad encoding of the question, the network settles confidently on the wrong
 thing, and no amount of mechanism design detects it. That is why "authoring a
 verifier is the scarce skill" is a claim about security and not about
 convenience.
+
+Link 2a is an integral dependency for prescribed-computation claims, not an
+optional receipt beside link 2. It must connect the approved protocol to a
+verified executable/input/output statement and carry that exact output into
+metrics, research evidence and settlement. The design's release gates require
+real proofs, both implementations' offline audits, and rejection of substituted
+results or omitted trials. The current verifier registry provides no such
+backend. This requirement therefore adds no claim of protection today.
 
 ## What "conditionally" is hiding
 

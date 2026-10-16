@@ -91,6 +91,14 @@ claim and you hand every submitter a free lottery ticket per restamp.
 
 ## Before you claim something works
 
+**Prescribed execution belongs in the proof chain.** For work on that
+integration, follow [docs/design/execution-proof-chain.md](docs/design/execution-proof-chain.md).
+The owner requires protocol/program/input/output bindings through metrics,
+research evidence and settlement. Do not claim the feature is implemented
+until real proofs and both implementations' offline audits satisfy its release
+gates. Existing process receipts, endpoint certificates and schemas do not
+establish prescribed execution.
+
 - `cargo test --all-targets`
 - `cargo test --manifest-path reference/rust/Cargo.toml` and
   `cairn-reference conformance conformance/vectors.json`.
