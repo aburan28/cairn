@@ -3949,8 +3949,7 @@ fn swarm_advice(stream: &mut TcpStream, serving: &Serving, request: &Request) ->
         cpus: number("cpus"),
         memory_mb: number("memory_mb"),
         gpus: number("gpus"),
-        storage_mb: None,
-        concurrency: None,
+        ..Default::default()
     });
     let volunteer = swarm_calls::Volunteer {
         name: host.clone(),
