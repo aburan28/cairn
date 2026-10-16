@@ -24,7 +24,7 @@ import type { McpPresence } from "./agents";
 import type { Liveness } from "./progress";
 
 import { expectFields } from "./shape";
-import type { CapabilityEdge, ResourceOffer } from "./scheduling";
+import { cpuSummary, type CapabilityEdge, type CpuProfile, type ResourceOffer } from "./scheduling";
 
 export type Reach = "reached" | "recent" | "lost" | "unreached";
 
@@ -175,6 +175,8 @@ export type HostRow = {
   hardware: {
     cpus?: number | null;
     cpu_model?: string | null;
+    cpu?: CpuProfile | null;
+    cgroup?: { cpu_millis?: number | null; memory_mb?: number | null };
     memory_mb?: number | null;
     gpus?: HostGpu[];
     os?: string;
@@ -241,6 +243,7 @@ export type Hardware = {
   memory_mb: number | null;
   os: string;
   arch: string;
+  cpu?: CpuProfile;
   verifier_limits: { cpus: number | null; memory_mb: number | null };
   note: string;
 };
@@ -618,6 +621,10 @@ export function describeHost(row: Pick<HostRow, "hardware">): string {
   const hw = row.hardware ?? {};
   const parts: string[] = [];
   if (typeof hw.cpus === "number") parts.push(`${hw.cpus} cpus`);
+  if (hw.cgroup?.cpu_millis != null) parts.push(`${hw.cgroup.cpu_millis / 1000} CPU quota`);
+  const cpu = cpuSummary(hw.cpu);
+  if (cpu) parts.push(cpu);
+  else if (hw.cpu_model) parts.push(hw.cpu_model);
   if (typeof hw.memory_mb === "number") parts.push(formatMemory(hw.memory_mb));
   const gpus = hw.gpus ?? [];
   if (gpus.length > 0) {

@@ -62,6 +62,7 @@ pub struct Inventory {
     /// Logical CPUs this process may use.
     pub cpus: Option<u64>,
     pub cpu_model: Option<String>,
+    pub cpu: crate::hardware::CpuProfile,
     pub sockets: Option<u64>,
     pub numa_nodes: Option<u64>,
     /// Instruction-set features a solver cares about: `avx2`, `avx512f`,
@@ -73,6 +74,7 @@ pub struct Inventory {
     /// unit with `CPUQuota=` or `MemoryMax=` shows here, and so does a VM
     /// handed less than its socket count.
     pub cgroup_cpus: Option<u64>,
+    pub cgroup_cpu_millis: Option<u64>,
     pub cgroup_memory_mb: Option<u64>,
     /// `/dev/kvm` is usable: the precondition for Kata with its default
     /// hypervisor.
@@ -80,10 +82,40 @@ pub struct Inventory {
 }
 
 impl Inventory {
+    /// Refresh the cheap observations without rerunning a GPU management tool
+    /// on the registration loop. A stalled driver must not stall heartbeats.
+    pub fn refresh_cpu(&mut self) {
+        self.cpu = crate::hardware::CpuProfile::probe();
+        self.cpu_model = self.cpu.model.clone();
+        self.cpu_features = self.cpu.features.clone();
+        self.cpus = std::thread::available_parallelism()
+            .ok()
+            .map(|n| n.get() as u64);
+        (self.cgroup_cpus, self.cgroup_memory_mb) = cgroup_limits(Path::new("/sys/fs/cgroup"));
+        self.cgroup_cpu_millis = cgroup_cpu_millis(Path::new("/sys/fs/cgroup"));
+        self.memory_mb = fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|text| parse_meminfo_mb(&text));
+    }
+
     /// Read the machine. Spawns `nvidia-smi` once if it is present.
     pub fn probe() -> Inventory {
+        Self::sample(true)
+    }
+
+    /// An experiment must not wait on an external GPU management command
+    /// before its execution deadline even starts. Kernel GPU facts remain
+    /// available, with absent fields left unknown.
+    pub(crate) fn probe_for_job() -> Inventory {
+        Self::sample(false)
+    }
+
+    fn sample(with_gpu_tool: bool) -> Inventory {
         let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
-        let (cpu_model, sockets, cpu_features) = parse_cpuinfo(&cpuinfo);
+        let (cpu_model, sockets, _) = parse_cpuinfo(&cpuinfo);
+        let cpu = crate::hardware::CpuProfile::probe();
+        let cpu_model = cpu.model.clone().or(cpu_model);
+        let cpu_features = cpu.features.clone();
         let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
         let (cgroup_cpus, cgroup_memory_mb) = cgroup_limits(Path::new("/sys/fs/cgroup"));
         Inventory {
@@ -98,12 +130,14 @@ impl Inventory {
                 .ok()
                 .map(|n| n.get() as u64),
             cpu_model,
+            cpu,
             sockets,
             numa_nodes: numa_nodes(Path::new("/sys/devices/system/node")),
             cpu_features,
             memory_mb: parse_meminfo_mb(&meminfo),
-            gpus: gpus(),
+            gpus: gpus(with_gpu_tool),
             cgroup_cpus,
+            cgroup_cpu_millis: cgroup_cpu_millis(Path::new("/sys/fs/cgroup")),
             cgroup_memory_mb,
             kvm: Path::new("/dev/kvm").exists(),
         }
@@ -126,6 +160,7 @@ impl Inventory {
             ("kernel", text(&self.kernel)),
             ("cpus", opt(self.cpus)),
             ("cpu_model", text(&self.cpu_model)),
+            ("cpu", self.cpu.to_value()),
             ("sockets", opt(self.sockets)),
             ("numa_nodes", opt(self.numa_nodes)),
             (
@@ -138,6 +173,7 @@ impl Inventory {
                 "cgroup",
                 Value::object([
                     ("cpus", opt(self.cgroup_cpus)),
+                    ("cpu_millis", opt(self.cgroup_cpu_millis)),
                     ("memory_mb", opt(self.cgroup_memory_mb)),
                 ]),
             ),
@@ -187,7 +223,7 @@ const INTERESTING_FEATURES: [&str; 14] = [
     "fma",
     "bmi2",
     "adx",
-    "sha_ni",
+    "sha",
     "aes",
     "pclmulqdq",
     "sve",
@@ -200,7 +236,6 @@ pub fn parse_cpuinfo(text: &str) -> (Option<String>, Option<u64>, Vec<String>) {
     let mut model = None;
     let mut part = None;
     let mut physical = BTreeSet::new();
-    let mut features = BTreeSet::new();
     for line in text.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
@@ -211,13 +246,6 @@ pub fn parse_cpuinfo(text: &str) -> (Option<String>, Option<u64>, Vec<String>) {
             "CPU part" if part.is_none() && !value.is_empty() => part = Some(value.to_string()),
             "physical id" => {
                 physical.insert(value.to_string());
-            }
-            "flags" | "Features" => {
-                for flag in value.split_whitespace() {
-                    if INTERESTING_FEATURES.contains(&flag) {
-                        features.insert(flag.to_string());
-                    }
-                }
             }
             _ => {}
         }
@@ -230,7 +258,11 @@ pub fn parse_cpuinfo(text: &str) -> (Option<String>, Option<u64>, Vec<String>) {
     (
         model.or(part.map(|p| format!("arm part {p}"))),
         sockets,
-        features.into_iter().collect(),
+        crate::hardware::CpuProfile::from_cpuinfo(text, std::env::consts::ARCH)
+            .reported_features
+            .into_iter()
+            .filter(|flag| INTERESTING_FEATURES.contains(&flag.as_str()))
+            .collect(),
     )
 }
 
@@ -264,13 +296,26 @@ pub fn cgroup_limits(root: &Path) -> (Option<u64>, Option<u64>) {
         Some(path) => root.join(path.trim_start_matches('/')),
         None => return (None, None),
     };
-    let cpus = fs::read_to_string(dir.join("cpu.max"))
-        .ok()
-        .and_then(|text| parse_cpu_max(&text));
-    let memory = fs::read_to_string(dir.join("memory.max"))
-        .ok()
-        .and_then(|text| text.trim().parse::<u64>().ok())
-        .map(|bytes| bytes / (1024 * 1024));
+    cgroup_limits_at(root, &dir)
+}
+
+fn cgroup_limits_at(root: &Path, dir: &Path) -> (Option<u64>, Option<u64>) {
+    let (mut cpus, mut memory) = (None, None);
+    for ancestor in dir.ancestors().take_while(|path| path.starts_with(root)) {
+        if let Some(limit) = fs::read_to_string(ancestor.join("cpu.max"))
+            .ok()
+            .and_then(|text| parse_cpu_max(&text))
+        {
+            cpus = Some(cpus.map_or(limit, |old: u64| old.min(limit)));
+        }
+        if let Some(limit) = fs::read_to_string(ancestor.join("memory.max"))
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+        {
+            let mb = limit / (1024 * 1024);
+            memory = Some(memory.map_or(mb, |old: u64| old.min(mb)));
+        }
+    }
     (cpus, memory)
 }
 
@@ -278,6 +323,37 @@ pub fn cgroup_limits(root: &Path) -> (Option<u64>, Option<u64>) {
 pub fn parse_cgroup_path(text: &str) -> Option<String> {
     text.lines()
         .find_map(|line| line.strip_prefix("0::").map(|path| path.trim().to_string()))
+}
+
+/// Include ancestor quotas: an unlimited child inside a half-core service is
+/// still a half-core offer. Floor fractions instead of selling a full core.
+pub fn cgroup_cpu_millis(root: &Path) -> Option<u64> {
+    let path = parse_cgroup_path(&fs::read_to_string("/proc/self/cgroup").ok()?)?;
+    let dir = root.join(path.trim_start_matches('/'));
+    cgroup_cpu_millis_at(root, &dir)
+}
+
+fn cgroup_cpu_millis_at(root: &Path, dir: &Path) -> Option<u64> {
+    let mut limit = None;
+    for ancestor in dir.ancestors().take_while(|path| path.starts_with(root)) {
+        if let Some(millis) = fs::read_to_string(ancestor.join("cpu.max"))
+            .ok()
+            .and_then(|text| parse_cpu_millis(&text))
+        {
+            limit = Some(limit.map_or(millis, |old: u64| old.min(millis)));
+        }
+    }
+    limit
+}
+
+pub fn parse_cpu_millis(text: &str) -> Option<u64> {
+    let mut parts = text.split_whitespace();
+    let quota: u64 = parts.next()?.parse().ok()?;
+    let period: u64 = parts.next()?.parse().ok()?;
+    let millis = u128::from(quota)
+        .checked_mul(1000)?
+        .checked_div(u128::from(period))?;
+    u64::try_from(millis).ok()
 }
 
 /// `cpu.max` is `$MAX $PERIOD` or `max $PERIOD`; whole CPUs, rounded down,
@@ -300,7 +376,7 @@ pub fn parse_cpu_max(text: &str) -> Option<u64> {
 
 /// Every display or 3D controller on the PCI bus, with what the driver
 /// files and `nvidia-smi` add.
-fn gpus() -> Vec<Gpu> {
+fn gpus(with_management_tool: bool) -> Vec<Gpu> {
     let mut found = pci_gpus(Path::new("/sys/bus/pci/devices"));
     // NVIDIA's own files name the model per bus location.
     if let Ok(entries) = fs::read_dir("/proc/driver/nvidia/gpus") {
@@ -318,8 +394,9 @@ fn gpus() -> Vec<Gpu> {
         }
     }
     // Memory comes from the management tool where there is one. One spawn,
-    // at startup, never per request.
-    if found.iter().any(|gpu| gpu.vendor == "nvidia") {
+    // at initial inventory, never on an HTTP handler, periodic CPU refresh
+    // or the experiment's launch path.
+    if with_management_tool && found.iter().any(|gpu| gpu.vendor == "nvidia") {
         if let Ok(output) = Command::new("nvidia-smi")
             .args([
                 "--query-gpu=pci.bus_id,name,memory.total,driver_version",
@@ -455,15 +532,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unlimited_children_still_observe_parent_cpu_and_memory_limits() {
+        let root =
+            std::env::temp_dir().join(format!("cairn-cgroup-fixture-{}", std::process::id()));
+        let child = root.join("parent/child");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(root.join("cpu.max"), "max 100000").unwrap();
+        fs::write(root.join("memory.max"), "2147483648").unwrap();
+        fs::write(root.join("parent/cpu.max"), "50000 100000").unwrap();
+        fs::write(root.join("parent/memory.max"), "1073741824").unwrap();
+        fs::write(child.join("cpu.max"), "max 100000").unwrap();
+        fs::write(child.join("memory.max"), "max").unwrap();
+        assert_eq!(cgroup_cpu_millis_at(&root, &child), Some(500));
+        assert_eq!(cgroup_limits_at(&root, &child), (Some(1), Some(1024)));
+        fs::write(child.join("cpu.max"), "25000 100000").unwrap();
+        fs::write(child.join("memory.max"), "536870912").unwrap();
+        assert_eq!(cgroup_cpu_millis_at(&root, &child), Some(250));
+        assert_eq!(cgroup_limits_at(&root, &child), (Some(1), Some(512)));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cpuinfo_yields_model_sockets_and_the_flags_a_solver_cares_about() {
         let text = "processor\t: 0\nmodel name\t: AMD EPYC 7763 64-Core Processor\nphysical id\t: 0\nflags\t\t: fpu vme avx avx2 fma bmi2 adx sha_ni\n\nprocessor\t: 1\nmodel name\t: AMD EPYC 7763 64-Core Processor\nphysical id\t: 1\nflags\t\t: fpu avx avx2 avx512f\n";
         let (model, sockets, features) = parse_cpuinfo(text);
         assert_eq!(model.as_deref(), Some("AMD EPYC 7763 64-Core Processor"));
         assert_eq!(sockets, Some(2));
-        assert_eq!(
-            features,
-            ["adx", "avx", "avx2", "avx512f", "bmi2", "fma", "sha_ni"]
-        );
+        assert_eq!(features, ["avx", "avx2"]);
         let arm = "processor\t: 0\nFeatures\t: fp asimd sve sve2\nCPU part\t: 0xd0c\n";
         let (model, sockets, features) = parse_cpuinfo(arm);
         assert_eq!(model.as_deref(), Some("arm part 0xd0c"));
@@ -486,6 +581,11 @@ mod tests {
         assert_eq!(parse_cpu_max("400000 100000\n"), Some(4));
         assert_eq!(parse_cpu_max("50000 100000\n"), Some(1));
         assert_eq!(parse_cpu_max("garbage"), None);
+        assert_eq!(parse_cpu_millis("50000 100000"), Some(500));
+        assert_eq!(parse_cpu_millis("150000 100000"), Some(1500));
+        assert_eq!(parse_cpu_millis("1 3000"), Some(0));
+        assert_eq!(parse_cpu_millis("max 100000"), None);
+        assert_eq!(parse_cpu_millis("100000 0"), None);
     }
 
     #[test]
