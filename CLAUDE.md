@@ -7,9 +7,12 @@ rules for working as a contributor *to* the network via the `cairn` MCP
 tools. One file rather than two, because two copies of a rule become two
 different rules.
 
-One rule is repeated here because Claude Code loads this file first and its
-harness defaults to watching the PRs it opens: opening the PR ends your work on
-it. Report the link and stop. Claude Opus and Fable never watch CI (no
-`subscribe_pr_activity`, no scheduled check-ins, no polling check runs or
-logs); a separate automation on Sonnet 5.5 or Haiku 5.5 gets the PR green and
-merges it. AGENTS.md, "Stop at the PR: top-tier models never watch CI".
+One rule is repeated here because Claude Code loads this file first: the
+session that opens a PR keeps watching it until it is merged or closed, but a
+top-tier session (Claude Opus, Fable) never does the watching itself. It stays
+subscribed (`subscribe_pr_activity`, safety-net check-ins at the harness's
+cadence, never a polling loop) and hands every PR wake to a small-model
+subagent (`Agent` with `model: "haiku"`, or `"sonnet"` for a real code fix),
+which fixes what the PR broke, reports anything larger, and squash-merges once
+CI is green -- except a consensus-surface change, which waits for a human.
+AGENTS.md, "Watch your PR through a small model".
