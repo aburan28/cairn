@@ -82,6 +82,9 @@ struct TasksSheet: View {
                         isPresented = false
                     }
                     .font(.callout)
+                    Button("Show coordination…") {
+                        if let url = URL(string: "coordination/", relativeTo: reader) { browser.show(url); isPresented = false }
+                    }.font(.callout)
                 }
                 Spacer()
                 if busy { ProgressView().controlSize(.small) }

@@ -73,6 +73,7 @@ pub mod tier;
 pub mod time;
 pub mod vdf;
 pub mod verifiers;
+pub mod workspace;
 
 pub use attribution::{flow, FlowParams};
 pub use blobs::{BlobError, BlobStore};

@@ -1,4 +1,5 @@
 import Foundation
+import CairnNodeKit
 import Combine
 import AppKit
 import UserNotifications
@@ -247,7 +248,17 @@ struct SetupCheck: Identifiable {
 final class ResearcherModel: ObservableObject {
     // Settings, persisted.
     @Published var root: String { didSet { defaults.set(root, forKey: "root"); rescanCatalog() } }
-    @Published var httpAddress: String { didSet { defaults.set(httpAddress, forKey: "http") } }
+    @Published var httpAddress: String {
+        didSet {
+            defaults.set(httpAddress, forKey: "http")
+            if oldValue != httpAddress {
+                reportTask?.cancel(); reportTask = nil
+                sessions = nil; network = nil; reportsStale = false
+                nodeReachable = false; nodeObjectives = []; chain = nil; peerCount = nil
+                peers = []; ledger = []; logRecords = []; logKinds = [:]; frontiers = [:]
+            }
+        }
+    }
     @Published var p2pAddress: String { didSet { defaults.set(p2pAddress, forKey: "p2p") } }
     @Published var epochSeconds: Int { didSet { defaults.set(epochSeconds, forKey: "epoch") } }
     @Published var budgetMinutes: Int { didSet { defaults.set(budgetMinutes, forKey: "budget"); replan() } }
@@ -296,6 +307,10 @@ final class ResearcherModel: ObservableObject {
     /// not yet loaded. Computed from `/chain`, never guessed.
     @Published private(set) var brokenLinkEpoch: Int?
     @Published private(set) var peerCount: Int?
+    @Published private(set) var sessions: SessionReport?
+    @Published private(set) var network: NetworkReport?
+    @Published private(set) var reportsStale = false
+    private var reportTask: Task<Void, Never>?
     @Published private(set) var logKinds: [String: Int] = [:]
     @Published private(set) var frontiers: [String: FrontierInfo] = [:]
     @Published private(set) var balances: [BalanceRow] = []
@@ -409,6 +424,10 @@ final class ResearcherModel: ObservableObject {
     /// each worker, beside what the workers report they are walking now.
     func progressURL(for objectiveId: String) -> URL {
         URL(string: "http://\(httpAddress)/ui/task/?id=\(objectiveId)")!
+    }
+
+    func coordinationURL(for objectiveId: String) -> URL {
+        NodeEndpoint.reader(nodeURL, page: "coordination", objective: objectiveId)!
     }
 
     static func guessRoot() -> String {
@@ -1254,17 +1273,20 @@ final class ResearcherModel: ObservableObject {
     }
 
     private func probeNode() {
+        let target = nodeURL
         var request = URLRequest(url: nodeURL.appendingPathComponent("health"))
         request.timeoutInterval = 1
-        URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
-            let ok = (response as? HTTPURLResponse)?.statusCode == 200
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
+            let ok = (response as? HTTPURLResponse)?.statusCode == 200 && data.flatMap { String(data: $0, encoding: .utf8) }?.trimmingCharacters(in: .whitespacesAndNewlines) == "ok"
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.nodeURL == target else { return }
                 if self.nodeReachable != ok {
                     self.nodeReachable = ok
                     if ok { self.pollNode() } else {
                         self.nodeObjectives = []; self.chain = nil; self.brokenLinkEpoch = nil
                         self.peerCount = nil; self.logKinds = [:]; self.peers = []
+                        self.sessions = nil; self.network = nil; self.reportsStale = false
+                        self.reportTask?.cancel(); self.reportTask = nil
                         self.ledger = []; self.logRecords = []
                     }
                 }
@@ -1273,11 +1295,15 @@ final class ResearcherModel: ObservableObject {
     }
 
     private func fetch<T: Decodable>(_ path: String, as type: T.Type, _ done: @escaping (T) -> Void) {
+        let target = httpAddress
         var request = URLRequest(url: URL(string: "http://\(httpAddress)\(path)")!)
         request.timeoutInterval = 3
-        URLSession.shared.dataTask(with: request) { data, _, _ in
-            guard let data, let value = try? JSONDecoder().decode(T.self, from: data) else { return }
-            Task { @MainActor in done(value) }
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
+            guard (response as? HTTPURLResponse)?.statusCode == 200, let data, let value = try? JSONDecoder().decode(T.self, from: data) else { return }
+            Task { @MainActor in
+                guard let self, self.httpAddress == target, self.nodeReachable else { return }
+                done(value)
+            }
         }.resume()
     }
 
@@ -1289,6 +1315,7 @@ final class ResearcherModel: ObservableObject {
     /// grew -- those were forty-odd requests every three seconds on a node
     /// that mostly sits idle.
     private func pollNode() {
+        pollReports()
         fetch("/chain", as: ChainInfo.self) { [weak self] c in
             guard let self else { return }
             let grew = c.height != self.chain?.height || c.links != self.chain?.links
@@ -1303,6 +1330,22 @@ final class ResearcherModel: ObservableObject {
             let rows = p.peers.map { PeerRow(identity: $0.identity ?? "?", addr: $0.addr ?? "", transport: $0.transport ?? "", createdAt: $0.created_at ?? "") }
             self?.peerCount = rows.count
             if rows != self?.peers { self?.peers = rows }
+        }
+    }
+
+    private func pollReports() {
+        guard reportTask == nil else { return }
+        let target = nodeURL
+        reportTask = Task { [weak self] in
+            let client = NodeReportClient(base: target)
+            async let sessions = try? client.sessions()
+            async let network = try? client.network()
+            let (nextSessions, nextNetwork) = await (sessions, network)
+            guard !Task.isCancelled, let self, self.nodeURL == target, self.nodeReachable else { return }
+            self.reportsStale = nextSessions == nil || nextNetwork == nil
+            if let report = nextSessions { self.sessions = report }
+            if let report = nextNetwork { self.network = report }
+            self.reportTask = nil
         }
     }
 

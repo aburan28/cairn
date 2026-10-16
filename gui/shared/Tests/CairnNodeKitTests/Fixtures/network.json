@@ -1,0 +1,133 @@
+{
+  "compute": {
+    "classes": [],
+    "devices": [],
+    "gone": 0,
+    "hosts": {
+      "cpus": 0,
+      "gone": 0,
+      "gpus": 0,
+      "hosts": [],
+      "jobs": {
+        "capacity": 0,
+        "running": 0
+      },
+      "live": 0,
+      "live_within_seconds": 180,
+      "memory_mb": 0,
+      "note": "Machines that registered with this node over POST /hosts, as they described themselves: CPUs, memory, GPUs and the sandboxes each can run jobs under. Summed over live hosts. Held in this process's memory, forgotten after a day, verified by nobody, and never a record -- a worker on one of these hosts is paid for what the log shows it submitted, not for being listed here.",
+      "registered": 0,
+      "sandboxes": [],
+      "stale": 0,
+      "stale_within_seconds": 1800
+    },
+    "lanes": 0,
+    "live": 0,
+    "live_within_seconds": 180,
+    "note": "Every worker that has heartbeated to this node on any objective, from its own reports: the device is what the worker called itself, the class a heuristic over that name, and the rate the node's own measurement where it has one. Summed over live workers. Not a record, not verified, and not what anyone is paid for -- that is under `derived` on GET /progress/{id}.",
+    "objectives": [],
+    "stale": 0,
+    "stale_within_seconds": 1800,
+    "steps_per_second": 0,
+    "workers": []
+  },
+  "generated_at": "2026-10-15T15:43:34+00:00",
+  "node": {
+    "accepts_submissions": false,
+    "fleet": null,
+    "hardware": {
+      "arch": "x86_64",
+      "cpus": 4,
+      "memory_mb": 18007,
+      "note": "This process's own machine, probed at startup. The node runs verifiers on it and nothing else; a worker's hardware is what the worker reports in its heartbeats, under `compute`.",
+      "os": "linux",
+      "verifier_limits": {
+        "cpus": null,
+        "memory_mb": null
+      }
+    },
+    "mcp": {
+      "serving": false
+    },
+    "peers_policy": null,
+    "reach": {
+      "bound": "127.0.0.1:3105",
+      "lan": false,
+      "urls": []
+    },
+    "roles": {
+      "declared": [],
+      "known": [
+        {
+          "duty": "posts and funds objectives, accepts submissions, hands out work assignments and keeps the lease roster workers coordinate through",
+          "evidence": "objectives funded, under `funder`",
+          "role": "coordinator"
+        },
+        {
+          "duty": "runs workers that take assignments, heartbeat, lease tasks and submit claims to this node",
+          "evidence": "claims accepted, under `submitter`",
+          "role": "executor"
+        },
+        {
+          "duty": "runs pinned verifiers and stands behind verdicts under bond, so a wrong verdict has somebody answerable",
+          "evidence": "attestations posted, under `attestor`",
+          "role": "verifier"
+        },
+        {
+          "duty": "holds and serves the log and reconciles it with peers",
+          "evidence": "nothing in the log; sessions on GET /sessions",
+          "role": "relay"
+        }
+      ],
+      "source": "CAIRN_ROLES"
+    },
+    "runs_p2p": false,
+    "verifiers": {
+      "sandbox": {
+        "jail": false,
+        "mechanism": "none",
+        "required": false,
+        "why": "bwrap is installed but cannot create a namespace on this host"
+      },
+      "servable": [
+        "certificate",
+        "evaluator",
+        "replay",
+        "statistical",
+        "workspace"
+      ],
+      "unservable": {
+        "lean": "'lean' not on PATH; install a Lean toolchain to verify"
+      }
+    },
+    "warnings": []
+  },
+  "note": "Three kinds of fact, kept apart: `node` is what this process declares and can see of its own machine; `peers.reached` and `compute` are what peers and workers did and said recently, held in this process's memory and verified by nobody; `roles.evidenced` is recomputed from the log. Only the last is something a reader can check.",
+  "peers": {
+    "announced": 0,
+    "available": false,
+    "lost": 0,
+    "reached": 0,
+    "recent": 0,
+    "unreached": 0
+  },
+  "roles": {
+    "coordinators": {
+      "identities": [],
+      "shown": 0,
+      "total": 0
+    },
+    "executors": {
+      "identities": [],
+      "shown": 0,
+      "total": 0
+    },
+    "note": "Recomputed from this node's log: funders of objectives, submitters of accepted claims, attestors of verdicts. Roles here are what identities did, not titles they hold; a node's declared roles are under `node.roles` and are a hint.",
+    "verifiers": {
+      "identities": [],
+      "shown": 0,
+      "total": 0
+    }
+  },
+  "version": "8.0.0"
+}

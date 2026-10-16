@@ -1,0 +1,73 @@
+{
+  "available": true,
+  "lost": 1,
+  "note": "This process runs no p2p service: it is a plain `cairn serve`, publishing a log another process writes. Sessions live in the process that reconciles -- `cairn run`, or `cairn p2p --serve` -- and its /sessions answers them.",
+  "peers": [
+    {
+      "peer_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "status": "reached",
+      "addr": "127.0.0.1:4080",
+      "last_direction": "outbound",
+      "inbound_ok": 0,
+      "outbound_ok": 1,
+      "failures": 1,
+      "age_seconds": 20,
+      "last_ok_at": null,
+      "last_error": null,
+      "entries_after": 3
+    },
+    {
+      "peer_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "status": "recent",
+      "addr": "127.0.0.1:4080",
+      "last_direction": "outbound",
+      "inbound_ok": 0,
+      "outbound_ok": 1,
+      "failures": 1,
+      "age_seconds": 600,
+      "last_ok_at": null,
+      "last_error": null,
+      "entries_after": 3
+    },
+    {
+      "peer_id": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "status": "lost",
+      "addr": "127.0.0.1:4080",
+      "last_direction": "outbound",
+      "inbound_ok": 0,
+      "outbound_ok": 1,
+      "failures": 1,
+      "age_seconds": 2000,
+      "last_ok_at": null,
+      "last_error": "connection refused",
+      "entries_after": 3
+    },
+    {
+      "peer_id": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "status": "unreached",
+      "addr": "127.0.0.1:4080",
+      "last_direction": "outbound",
+      "inbound_ok": 0,
+      "outbound_ok": 0,
+      "failures": 1,
+      "age_seconds": null,
+      "last_ok_at": null,
+      "last_error": "connection refused",
+      "entries_after": 3
+    }
+  ],
+  "reached": 1,
+  "recent": 1,
+  "unreached": 1,
+  "reached_within_seconds": 120,
+  "recent_within_seconds": 1800,
+  "this_node": {
+    "peer_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "listen": "0.0.0.0:4080",
+    "uptime_seconds": 300
+  },
+  "address_book": {
+    "endpoints": 4,
+    "hints": 2
+  }
+}

@@ -475,7 +475,10 @@ impl State {
                 continue;
             }
             if let Some(first) = values.first() {
-                if values.iter().any(|value| value.blob != first.blob) {
+                if values
+                    .iter()
+                    .any(|value| value.blob != first.blob || value.exec != first.exec)
+                {
                     return Err(LabError::Refused(format!(
                         "input {path:?} has unresolved concurrent versions; resolve it with \
                          `cairn lab resolve` or publish the chosen variant under a separate \
@@ -491,7 +494,8 @@ impl State {
     pub fn conflicts(&self) -> Vec<Conflict> {
         let mut out = Vec::new();
         for (path, values) in &self.files {
-            let distinct: BTreeSet<&Option<String>> = values.iter().map(|v| &v.blob).collect();
+            let distinct: BTreeSet<(&Option<String>, bool)> =
+                values.iter().map(|v| (&v.blob, v.exec)).collect();
             if distinct.len() > 1 {
                 out.push(Conflict::File {
                     path: path.clone(),
@@ -513,7 +517,8 @@ impl State {
             }
         }
         for (name, values) in &self.envs {
-            let distinct: BTreeSet<&String> = values.iter().map(|v| &v.tree).collect();
+            let distinct: BTreeSet<(&String, &String)> =
+                values.iter().map(|v| (&v.tree, &v.manifest)).collect();
             if distinct.len() > 1 {
                 out.push(Conflict::Env {
                     name: name.clone(),

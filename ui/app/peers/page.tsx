@@ -1,14 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useNodeRead } from "@/components/hooks";
 import {
   type Peer,
-  NODE_URL,
   age,
   fetchPeers,
 } from "@/lib/peers";
-import { resolveNode } from "@/lib/site";
 import { type Chain, fetchChain } from "@/lib/chain";
 import { type CheckpointAnswer, readCheckpoint } from "@/lib/checkpoint";
 import { Box, EmptyState, Hash, Note, PageHeader, Stat } from "@/components/ui";
@@ -16,58 +14,25 @@ import { Box, EmptyState, Hash, Note, PageHeader, Stat } from "@/components/ui";
 /**
  * The address book this node has been handed.
  *
- * Named "peers" and not "connected peers", because the second thing is not
- * available: live sessions live in the p2p service, which publishes nothing
- * over HTTP, and the HTTP server (`cairn serve`, or the `--serve` thread of
- * `cairn p2p` / `cairn run`) only reads a log file. The page says so rather
- * than letting a reader assume a list of addresses is a list of connections.
+ * Announcements belong to the log; recent session observations belong to
+ * Network. Neither list is a promise that a socket remains connected.
  */
 export default function Page() {
-  const [peers, setPeers] = useState<Peer[] | null>(null);
-  const [note, setNote] = useState("");
-  const [chain, setChain] = useState<Chain | null>(null);
-  const [checkpoint, setCheckpoint] = useState<CheckpointAnswer | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const load = useCallback(async (url: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const body = await fetchPeers(url);
-      setPeers(body.peers);
-      setNote(body.note);
-      // Neither blocks the page on failure: a node older than the epoch chain
-      // has no `/chain`, and an unchecked node has no `/checkpoint` --
-      // `readCheckpoint` never throws and names which of its states this is,
-      // and `fetchChain` is wrapped here rather than imported for its throwing
-      // behaviour, which the chain page wants and this one does not.
-      const [nextChain, answer] = await Promise.all([
-        fetchChain(url).catch(() => null),
-        readCheckpoint(url),
-      ]);
-      setChain(nextChain);
-      setCheckpoint(answer);
-    } catch (cause) {
-      setPeers(null);
-      setChain(null);
-      setCheckpoint(null);
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void resolveNode().then((url) => {
-      void load(url);
-    });
-  }, [load]);
+  const { value, error, loading, refresh } = useNodeRead(async (url) => {
+    const body = await fetchPeers(url);
+    const [chain, checkpoint] = await Promise.all([fetchChain(url).catch(() => null), readCheckpoint(url)]);
+    return { ...body, chain, checkpoint };
+  }, { seconds: 30 });
+  const peers = value?.peers ?? null;
+  const note = value?.note ?? "";
+  const chain = value?.chain ?? null;
+  const checkpoint = value?.checkpoint ?? null;
 
   return (
     <>
       <PageHeader
         title="Peers"
+        actions={<button className="btn btn-sm" disabled={loading} onClick={() => void refresh()}>Refresh</button>}
         subtitle="Addresses announced in this node's log. For active connections and node types, open Network."
       />
 

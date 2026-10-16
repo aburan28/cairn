@@ -6,7 +6,7 @@ import { type ObjectiveIndex, indexObjectives, toEvent } from "@/lib/events";
 import { KIND_LABEL, type NodeEvent, absorb, fetchEvents, timeline } from "@/lib/journal";
 import { objectiveTitle } from "@/lib/title";
 import { loadObjectives } from "@/lib/site";
-import { useEvery, useNode } from "@/components/hooks";
+import { useEvery, useNodeRead } from "@/components/hooks";
 import { EventRow, NodeEventRow } from "@/components/events";
 import { Card, EmptyState, LiveStamp, Note, PageHeader, Skeleton } from "@/components/ui";
 
@@ -32,42 +32,24 @@ type View = "all" | "records" | "events";
  * node serves, and it reads that node.
  */
 export default function Page() {
-  const base = useNode();
-  const [records, setRecords] = useState<LogRecord[] | null>(null);
-  const [problems, setProblems] = useState<string[]>([]);
+  const { base, value, error, readAt } = useNodeRead(async (base) => {
+    const [log, feed] = await Promise.all([fetchLog(base), loadObjectives(base).catch(() => null)]);
+    return { log, live: feed?.live ? feed.objectives : [] };
+  }, { seconds: 60 });
+  const records = value?.log.records ?? null;
+  const problems = value?.log.problems ?? [];
+  const index = useMemo(() => value ? indexObjectives(value.live) : null, [value]);
+  const titles = useMemo(() => new Map(value?.live.map((objective) => [objective.id, objectiveTitle(objective)] as const) ?? []), [value]);
   const [events, setEvents] = useState<{ events: NodeEvent[]; started_at: string | null }>({
     events: [],
     started_at: null,
   });
   const [eventsMissing, setEventsMissing] = useState(false);
-  const [index, setIndex] = useState<ObjectiveIndex | null>(null);
-  const [titles, setTitles] = useState<Map<string, string>>(new Map());
-  const [error, setError] = useState<string | null>(null);
-  const [readAt, setReadAt] = useState<Date | null>(null);
   const [view, setView] = useState<View>("all");
   const [kind, setKind] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [shown, setShown] = useState(PAGE);
   const lastSeq = useRef(0);
-
-  const loadRecords = useCallback(async () => {
-    if (base === null) return;
-    try {
-      const [log, feed] = await Promise.all([fetchLog(base), loadObjectives(base).catch(() => null)]);
-      setRecords(log.records);
-      setProblems(log.problems);
-      // Titles only from a live answer: the snapshot's objectives are a
-      // different log's, and naming this node's records after them would be
-      // wrong in exactly the cases where the ids happened to collide.
-      const live = feed?.live ? feed.objectives : [];
-      setIndex(indexObjectives(live));
-      setTitles(new Map(live.map((o) => [o.id, objectiveTitle(o)] as const)));
-      setReadAt(new Date());
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }, [base]);
 
   const loadEvents = useCallback(async () => {
     if (base === null) return;
@@ -92,7 +74,6 @@ export default function Page() {
 
   // The log is the big read, and only grows: once a minute. The events are
   // a cursor over a small ring, so they can be asked for often.
-  useEvery(loadRecords, 60, base !== null);
   useEvery(loadEvents, 10, base !== null);
 
   const items = useMemo(() => {

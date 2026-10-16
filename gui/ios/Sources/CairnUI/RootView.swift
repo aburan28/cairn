@@ -32,6 +32,7 @@ public struct RootView: View {
                     NavigationLink("Chain") { ChainView() }
                     NavigationLink("Log") { LogView() }
                     NavigationLink("Peers") { PeersView() }
+                    NavigationLink("Network") { NetworkView() }
                     NavigationLink("How it works") { HowItWorksView() }
                     NavigationLink("Settings") { SettingsView() }
                 }
@@ -50,6 +51,7 @@ public struct MoreView: View {
     public var body: some View {
         List {
             NavigationLink("Peers") { PeersView() }
+            NavigationLink("Network") { NetworkView() }
             NavigationLink("How it works") { HowItWorksView() }
             NavigationLink("Settings") { SettingsView() }
             Section {

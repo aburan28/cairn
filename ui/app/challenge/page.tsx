@@ -167,6 +167,7 @@ function Challenge({ id }: { id: string }) {
           <div className="flex flex-wrap items-center gap-2">
             {live && <LiveStamp at={readAt} error={error} />}
             <button type="button" className="btn btn-sm" onClick={() => void load()}>Refresh</button>
+            <Link href={`/workspace?objective=${objective.id}`} className="btn btn-sm">Workspaces</Link>
             <Link href={`/payouts?id=${encodeURIComponent(objective.id)}`} className="btn btn-sm btn-ghost">
               External bounty split
             </Link>

@@ -1,12 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   type ProgressResponse,
   type WorkerRow,
-  NODE_URL,
   ObjectiveNotFound,
   amount,
   assignedBins,
@@ -27,7 +26,7 @@ import {
 } from "@/lib/progress";
 import { type SearchJob, expectedSteps, expectedUnits, jobFor, stepsPerUnit } from "@/lib/jobs";
 import { fetchObjective } from "@/lib/frontier";
-import { resolveNode } from "@/lib/site";
+import { useNodeRead } from "@/components/hooks";
 import { goalSlug } from "@/lib/title";
 import { WorkPanel } from "@/components/WorkPanel";
 import {
@@ -92,91 +91,18 @@ function SelectedTask() {
 
 function Task({ id }: { id: string }) {
 
-  const [base, setBase] = useState(NODE_URL);
-  const [progress, setProgress] = useState<ProgressResponse | null>(null);
-  const [verifier, setVerifier] = useState<Record<string, unknown> | null>(null);
-  const [funder, setFunder] = useState<string>("");
-  const [reward, setReward] = useState<number>(0);
-  const [error, setError] = useState<string | null>(null);
-  const [notFound, setNotFound] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [readAt, setReadAt] = useState<Date | null>(null);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
-
+  const { base, value, error, failure, readAt, loading } = useNodeRead(async (url) => {
+    const record = await fetchObjective(id, url).catch(() => null);
+    const known = jobFor(record?.record.verifier);
+    const progress = await fetchProgress(id, url, { trailBits: known?.trailBits });
+    return { progress, record };
+  }, { key: id, seconds: REFRESH_SECONDS, enabled: Boolean(id) });
+  const progress = value?.progress ?? null;
+  const verifier = (value?.record?.record.verifier as Record<string, unknown>) ?? null;
+  const funder = value?.record?.record.funder ?? "";
+  const reward = value?.record?.record.reward ?? 0;
+  const notFound = !progress && failure instanceof ObjectiveNotFound;
   const job: SearchJob | null = useMemo(() => jobFor(verifier), [verifier]);
-
-  const load = useCallback(
-    async (url: string, quiet = false) => {
-      if (!id) return;
-      if (!quiet) setLoading(true);
-      setError(null);
-      setNotFound(false);
-      try {
-        // The objective record carries the verifier, which names the job;
-        // the trail_bits from the known job let the node bin paid seeds even
-        // before any worker has declared them in a heartbeat.
-        const record = await fetchObjective(id, url).catch(() => null);
-        const known = jobFor(record?.record.verifier);
-        const next = await fetchProgress(id, url, {
-          trailBits: known?.trailBits,
-        });
-        setProgress(next);
-        if (record) {
-          setVerifier((record.record.verifier as Record<string, unknown>) ?? null);
-          setFunder(record.record.funder);
-          setReward(record.record.reward);
-        }
-        setReadAt(new Date());
-      } catch (cause) {
-        if (cause instanceof ObjectiveNotFound) {
-          setNotFound(true);
-        } else {
-          setError(cause instanceof Error ? cause.message : String(cause));
-        }
-        if (!quiet) setProgress(null);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [id],
-  );
-
-  useEffect(() => {
-    void resolveNode().then((url) => {
-      setBase(url || window.location.origin);
-      void load(url);
-    });
-  }, [load]);
-
-  // Re-read on an interval while the tab is visible. Hidden tabs stop, and a
-  // tab that comes back reads at once rather than waiting out the interval,
-  // which is the moment a reader is actually looking.
-  useEffect(() => {
-    if (!progress) return;
-    const target = base === window.location.origin ? "" : base;
-    const start = () => {
-      if (timer.current) clearInterval(timer.current);
-      timer.current = setInterval(() => void load(target, true), REFRESH_SECONDS * 1000);
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") {
-        void load(target, true);
-        start();
-      } else if (timer.current) {
-        clearInterval(timer.current);
-        timer.current = null;
-      }
-    };
-    start();
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      if (timer.current) clearInterval(timer.current);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-    // `progress` is only a gate for "has loaded once"; re-arming on every
-    // read would restart the interval each time it fires.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base, load, progress !== null]);
 
   if (!id) {
     return (
@@ -256,7 +182,7 @@ function Task({ id }: { id: string }) {
   return (
     <Dashboard
       id={id}
-      base={base}
+      base={base ?? ""}
       progress={progress}
       job={job}
       funder={funder}

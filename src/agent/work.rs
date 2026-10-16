@@ -370,6 +370,18 @@ fn live_pid(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
+    // kill -0 also succeeds for a zombie. Minimal container init processes
+    // may never reap an orphaned managed worker, leaving Stop stuck and a
+    // subsequent Start refused even after it safely revealed everything.
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        if stat
+            .rsplit_once(')')
+            .is_some_and(|(_, fields)| fields.split_whitespace().next() == Some("Z"))
+        {
+            return false;
+        }
+    }
     Command::new("/bin/kill")
         .arg("-0")
         .arg(pid.to_string())
@@ -1510,6 +1522,36 @@ fn say(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_unreaped_worker_is_not_reported_as_running() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let mut zombie = false;
+        for _ in 0..200 {
+            zombie = fs::read_to_string(format!("/proc/{}/stat", child.id())).is_ok_and(|stat| {
+                stat.rsplit_once(')')
+                    .is_some_and(|(_, fields)| fields.split_whitespace().next() == Some("Z"))
+            });
+            if zombie {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let reported_alive = live_pid(child.id());
+        child.wait().unwrap();
+        assert!(
+            zombie,
+            "the child must be unreaped for this regression to be exercised"
+        );
+        assert!(
+            !reported_alive,
+            "a completed managed worker must permit Stop and restart"
+        );
+    }
 
     fn args(text: &str) -> Vec<String> {
         text.split_whitespace().map(str::to_string).collect()

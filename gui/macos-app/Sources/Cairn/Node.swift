@@ -1,4 +1,5 @@
 import Foundation
+import CairnNodeKit
 import Darwin
 
 /// The one `cairn run` this app owns: found, started, watched, stopped.
@@ -15,7 +16,9 @@ final class Node: ObservableObject {
         case failed(String)
     }
 
-    @Published private(set) var state: State = .stopped
+    @Published private(set) var state: State = .stopped {
+        didSet { if oldValue != state { pollReports() } }
+    }
     /// The node's stderr, newest last, capped so a long-lived node cannot grow
     /// the app without bound. The whole of it is also in `logFile`.
     @Published private(set) var lines: [String] = []
@@ -33,6 +36,10 @@ final class Node: ObservableObject {
     /// Recent discovery / session lines, newest last, for the status strip.
     @Published private(set) var networkLines: [String] = []
     @Published private(set) var sessionsOK = 0
+    @Published private(set) var sessionReport: SessionReport?
+    @Published private(set) var networkReport: NetworkReport?
+    @Published private(set) var reportsStale = false
+    private var reportTask: Task<Void, Never>?
     /// The running binary's own version, from the first line of
     /// `cairn --version` ("cairn 1.8.1"). Nil in attach mode, where this app
     /// runs no binary and the reader's page says the node's.
@@ -740,6 +747,32 @@ final class Node: ObservableObject {
         absorbLog()
     }
 
+    private func pollReports() {
+        reportTask?.cancel()
+        sessionReport = nil
+        networkReport = nil
+        reportsStale = false
+        guard case .running(let reader) = state else { return }
+        reportTask = Task { [weak self] in
+            let client = NodeReportClient(base: reader)
+            while !Task.isCancelled {
+                async let sessions = try? client.sessions()
+                async let network = try? client.network()
+                let (nextSessions, nextNetwork) = await (sessions, network)
+                guard !Task.isCancelled, let self, self.state == .running(reader) else { return }
+                self.reportsStale = nextSessions == nil || nextNetwork == nil
+                if let report = nextSessions {
+                    self.sessionReport = report
+                    self.sessionsOK = report.available ? report.reached : 0
+                    self.peerId = report.this_node?.peer_id
+                    self.listenAddress = report.this_node?.listen
+                }
+                if let report = nextNetwork { self.networkReport = report }
+                do { try await Task.sleep(nanoseconds: 15_000_000_000) } catch { return }
+            }
+        }
+    }
+
     /// Pull peer id, listen confirmation and session counts out of what the
     /// node already wrote. The app never invents a peer id: it is `sha256` of
     /// the transport key the node just loaded, and only the node knows it.
@@ -775,9 +808,13 @@ final class Node: ObservableObject {
                 net.append(line)
             }
         }
-        if id != peerId { peerId = id }
-        if listen != listenAddress { listenAddress = listen }
-        if ok != sessionsOK { sessionsOK = ok }
+        // Once HTTP answers, its windowed count may fall to zero. A lifetime
+        // log tally must never overwrite it during a quiet or failed session.
+        if sessionReport == nil {
+            if id != peerId { peerId = id }
+            if listen != listenAddress { listenAddress = listen }
+            if ok != sessionsOK { sessionsOK = ok }
+        }
         if net.count > 40 { net = Array(net.suffix(40)) }
         if net != networkLines { networkLines = net }
     }

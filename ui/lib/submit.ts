@@ -218,8 +218,8 @@ export function problems(draft: Draft): Problems {
 
   const reward = Number(draft.reward);
   if (!draft.reward.trim()) found.reward = "A bounty needs an amount.";
-  else if (!Number.isInteger(reward) || reward <= 0) {
-    found.reward = "A whole number of units, above zero. No fractions: money here is integers.";
+  else if (!whole(draft.reward) || reward <= 0) {
+    found.reward = "A whole number of units above zero, up to 9,007,199,254,740,991. Use the CLI for larger amounts.";
   }
 
   const kind = draft.verifierKind;
@@ -233,16 +233,16 @@ export function problems(draft: Draft): Problems {
     if (!draft.entrypoint.trim()) found.entrypoint = "The function the verifier calls.";
   }
   if (isScored(kind)) {
-    if (!draft.threshold.trim() || Number.isNaN(Number(draft.threshold))) {
-      found.threshold = "The score at which a candidate passes. A number.";
+    if (!whole(draft.threshold)) {
+      found.threshold = "A whole-number score within ±9,007,199,254,740,991. Scale fractional statistics in the checker.";
     }
   }
   if (kind === "lean") {
     if (!draft.leanStatement.trim()) {
       found.leanStatement = "The theorem to prove, as Lean source.";
     }
-    if (draft.timeoutSeconds.trim() && !(Number(draft.timeoutSeconds) > 0)) {
-      found.timeoutSeconds = "A positive number of seconds, or blank for the default.";
+    if (draft.timeoutSeconds.trim() && (!whole(draft.timeoutSeconds) || !(Number(draft.timeoutSeconds) > 0))) {
+      found.timeoutSeconds = "A positive whole number of seconds the browser can represent exactly, or blank for the default.";
     }
   }
   if (kind === "replay") {
@@ -261,8 +261,8 @@ export function problems(draft: Draft): Problems {
       found.useRatchet = "Only an evaluator can ratchet; a certificate has nothing to score.";
     }
     for (const field of ["baseline", "target", "minImprovement"] as const) {
-      if (!draft[field].trim() || !Number.isInteger(Number(draft[field]))) {
-        found[field] = "A whole number is required.";
+      if (!whole(draft[field])) {
+        found[field] = "A whole number within ±9,007,199,254,740,991 is required.";
       }
     }
     if (Number(draft.minImprovement) <= 0) {
@@ -270,7 +270,7 @@ export function problems(draft: Draft): Problems {
         "Above zero. This is the smallest move that pays, and it is the only " +
         "thing standing between the pool and epsilon-farming.";
     }
-    if (draft.baseline.trim() && draft.target.trim() && draft.baseline === draft.target) {
+    if (whole(draft.baseline) && whole(draft.target) && Number(draft.baseline) === Number(draft.target)) {
       found.target = "A span of zero can never be improved across.";
     }
   }
@@ -289,6 +289,13 @@ export function problems(draft: Draft): Problems {
     }
   }
   return found;
+}
+
+/** These become JSON numbers, so reject both fractions and precision loss
+ * before asking Rust for canonical bytes. This is input validation, never a
+ * browser implementation of canonical encoding. */
+function whole(text: string): boolean {
+  return /^-?\d+$/.test(text.trim()) && Number.isSafeInteger(Number(text));
 }
 
 /**
@@ -563,7 +570,37 @@ export async function prepare(
 }
 
 /** A queue receipt. Not an admission — see the module docs. */
-export type Queued = { queued: string; kind: string; note: string };
+export type Queued = { queued: string; kind: string; note: string; record_id?: string };
+
+export type SubmissionStatus = {
+  queued: string;
+  kind: string;
+  record_id: string;
+  status: "queued" | "admitted" | "refused" | "unknown";
+  note: string;
+  updated_at: string;
+};
+
+/** A missing receipt is unknown, including on nodes predating tracking. */
+export async function fetchSubmission(id: string, base = NODE_URL): Promise<SubmissionStatus> {
+  if (!/^sha256:[a-f0-9]{64}$/.test(id)) throw new Error("Invalid submission receipt id.");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(`${base}/submissions/${id}`, { cache: "no-store", signal: controller.signal });
+    if (response.status === 404) throw new Error("This node has no receipt for this id. It may have expired or the node may predate tracking. The outcome is unknown.");
+    if (!response.ok) throw new Error(await readError(response));
+    const value = await response.json();
+    if (!value || value.queued !== id ||
+        !["queued", "admitted", "refused", "unknown"].includes(value.status) ||
+        ["kind", "record_id", "note", "updated_at"].some((field) => typeof value[field] !== "string")) {
+      throw new Error("The node returned an unreadable submission receipt. The outcome is unknown.");
+    }
+    return value as SubmissionStatus;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export async function submit(
   record: Record<string, unknown>,

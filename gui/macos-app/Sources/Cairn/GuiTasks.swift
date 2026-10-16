@@ -1,15 +1,10 @@
 import CryptoKit
 import Foundation
+import CairnNodeKit
 
 /// A curated objective this app can post in one click. The same tasks as
 /// Cairn Autoresearcher's; `objectives` are repository-relative paths.
-struct GuiTask: Identifiable, Equatable {
-    var id: String
-    var title: String
-    var detail: String
-    var objectives: [String]
-    var docPath: String?
-}
+typealias GuiTask = CuratedTask
 
 enum GuiTasks {
     /// The digest is the posted objective's identity, not a keyword taken
@@ -29,39 +24,7 @@ enum GuiTasks {
         return (python.path, [script.path, "--job", job.path, "--count", String(count)])
     }
 
-    static let all: [GuiTask] = [
-        GuiTask(
-            id: "ecc2k130-orbit",
-            title: "ECC2K-130 — paid orbits",
-            detail: """
-            Pays for each distinguished orbit contributed to the shared search for \
-            Certicom's ECC2K-130 key. Work it with a GPU client and submit batches; \
-            uploading campaign points to S3 needs AWS keys in Node → Secrets….
-            """,
-            objectives: ["examples/certicom-ecdlp/objective-ecc2k130-orbit-batch.json"],
-            docPath: "examples/certicom-ecdlp/ECC2K130-CAMPAIGN.md"
-        ),
-        GuiTask(
-            id: "ecc2k130-frontier",
-            title: "ECC2K-130 — the key itself",
-            detail: """
-            The whole discrete log for the same challenge, open since 1997. Not \
-            expected to settle soon; the orbit task above is what pays along the way.
-            """,
-            objectives: ["examples/certicom-ecdlp/objective-ecc2k130.json"],
-            docPath: "examples/certicom-ecdlp/README.md"
-        ),
-        GuiTask(
-            id: "ecc2k23-orbit-demo",
-            title: "ECC2K-23 — small practice run",
-            detail: """
-            A 21-bit twin of the orbit task that a laptop solves in seconds: the \
-            quickest way to watch a bounty go from posted to settled.
-            """,
-            objectives: ["examples/certicom-ecdlp/objective-ecc2k-23-orbit-batch.json"],
-            docPath: "examples/certicom-ecdlp/README.md"
-        ),
-    ]
+    static let all = CuratedTasks.all
 
     /// Where the task files are read from: the copy inside this app, which
     /// `build.sh` makes from `examples/` under the same repository-relative

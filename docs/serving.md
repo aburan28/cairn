@@ -58,6 +58,10 @@ record instead.
 | `GET /knowledge/{claim_id}` | one claim: its standing and confidence under the named policy, every relation asserted about it and whether it was heard, and who stood behind its verdict under bond with each attestation's status and whether a docket caught it |
 | `GET /hosts` | machines that registered with `cairn agent`: each host's CPUs, memory, GPUs and the sandboxes it can run jobs under, as it described itself, with the live ones summed — see [Hosts](#hosts-what-machines-are-on-the-network) |
 | `GET /ui/` | the embedded reader, when the binary was built with the `ui` feature |
+| `GET /submissions/{queued}` | the durable node-local receipt for a queued record: `queued`, `admitted`, `refused` or `unknown`; admission is checked against this node's log, not elapsed time |
+| `GET /workspaces` | explicitly published lab summaries; empty by default, configured with `CAIRN_LAB_HTTP` |
+| `GET /workspace/{space}` | contributor history, causal parents, conflicts, pinned run recipes and candidate-to-ledger links for a published lab |
+| `GET /workspace/{space}/blob/{address}` | a referenced input or output blob from that published lab, re-hashed before serving and capped at the HTTP body limit; use lab sync for larger blobs |
 | `POST /submit` | queue an objective, a commitment or a claim (only with `--queue`); `?kind=` names which, else the record's own `type`. Every answer carries a `reason`, and a `202` a `wait` block — see [below](#why-a-submission-was-queued-or-refused-in-a-word) |
 | `POST /objective/prepare` | canonicalize a draft objective and return the exact bytes its funder must sign — see below |
 | `POST /progress` | a worker's heartbeat: kept in this node's memory for `GET /progress/{id}`, never written to the log, accepted on a read-only node too |
@@ -567,6 +571,28 @@ A refused record is dropped from the queue with its reason printed, rather than
 retried: nearly every refusal is permanent — a stale epoch, a citation that is
 not an accepted claim — and a queue that retries a permanent failure never
 empties.
+
+### Tracking admission
+
+The drain's reason survives under `queue/receipts/`, published at
+`GET /submissions/{queued}`. A `202` includes both the queue id and the typed
+record id. The reader polls this receipt while queued, provides a tracking
+link, and remembers the last receipt for that node in session storage; edits
+never discard a submitted proposal's tracking. No authorization is saved there.
+
+The receipt is atomic and synced before publishing the queue file. Drain
+records admission or refusal before removing it. After an interrupted append,
+the ledger's record id takes precedence over an old receipt; a duplicate drain
+does not turn an already admitted record into a refusal. Missing or expired
+receipts, a vanished proposal without an outcome, or an admitted receipt whose
+record is absent from this log mean **unknown**. A failed read remains a failed
+read. Neither is a rejection. Admission itself says nothing about a claim's
+verification or settlement.
+
+Terminal receipt history is bounded to 4,096 entries; queued proposals are
+retained until drained. A later explicit resubmission is checked again, since
+an epoch or balance may have changed. These files are node-local operational
+metadata, not replicated ledger records or settlement evidence.
 
 ## Fleet: signing for your own machines
 

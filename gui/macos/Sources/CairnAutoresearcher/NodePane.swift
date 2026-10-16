@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CairnNodeUI
 
 /// The node the researcher runs: what it serves, who holds what, the ledger
 /// itself, and the reader it embeds -- the same pages a browser would show.
@@ -14,7 +15,7 @@ struct NodeView: View {
         VSplitView {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    HStack(spacing: 12) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 160))], spacing: 12) {
                         Tile(title: "Node", value: model.nodeReachable ? "up" : "down", color: model.nodeReachable ? .green : .gray,
                              caption: "http \(model.httpAddress) · p2p \(model.p2pAddress)")
                         Tile(title: "Epoch", value: "\(model.currentEpoch)", color: .gray,
@@ -25,7 +26,9 @@ struct NodeView: View {
                              caption: model.brokenLinkEpoch.map { "breaks at epoch \($0)" }
                                 ?? model.chain?.head.flatMap { $0.isEmpty ? nil : String($0.prefix(18)) }
                                 ?? "settled epochs")
-                        Tile(title: "Peers", value: model.peerCount.map(String.init) ?? "–", color: .green, caption: "peer records in the log")
+                        Tile(title: "Peers reached", value: model.sessions.map { $0.available ? String($0.reached) : "off" } ?? "–", color: .green, caption: model.sessions?.available == false ? "plain publisher, no p2p service" : "observed recently, not open sockets")
+                        Tile(title: "Announcements", value: model.peerCount.map(String.init) ?? "–", color: .gray, caption: "peer records in the log")
+                        Tile(title: "Compute", value: model.network.map { String($0.compute.live) } ?? "–", color: .orange, caption: model.network.map { "reported · \($0.compute.steps_per_second.formatted()) steps/s" } ?? "live workers · reported")
                         Tile(title: "Objectives", value: model.nodeReachable ? "\(model.nodeObjectives.count)" : "–", color: .green,
                              caption: "\(model.frontiers.count) with a frontier")
                     }
@@ -34,7 +37,8 @@ struct NodeView: View {
                               systemImage: "exclamationmark.triangle.fill")
                             .font(.caption).foregroundStyle(.gray)
                     }
-                    ProvenanceLine("tiles from GET /chain, /peers, /objectives · balances from cairn balances")
+                    ProvenanceLine("tiles from GET /chain, /sessions, /network, /peers, /objectives · balances from cairn balances")
+                    if model.reportsStale { Text("Latest session or network read failed. Displayed observations may be stale; retrying automatically.").font(.caption).foregroundStyle(.orange) }
                     HStack(alignment: .top, spacing: 14) {
                         VStack(spacing: 14) {
                             discoveryCard
@@ -55,10 +59,12 @@ struct NodeView: View {
                 HStack {
                     Picker("", selection: $tab) {
                         Text("Ledger").tag("ledger")
-                        Text("Peers").tag("peers")
+                        Text("Connected").tag("connected")
+                        Text("Announced").tag("peers")
+                        Text("Network").tag("network")
                         Text("Reader").tag("reader")
                     }
-                    .pickerStyle(.segmented).frame(width: 260)
+                    .pickerStyle(.segmented).frame(width: 440)
                     if tab == "reader" {
                         Picker("", selection: $page) {
                             Text("Site").tag(0)
@@ -81,6 +87,8 @@ struct NodeView: View {
                 .padding(8)
                 Divider()
                 switch tab {
+                case "connected": ScrollView { if let report = model.sessions { SessionsPanel(report).padding() } else { Text("No live session report is available. Update older nodes to read /sessions.").padding() } }
+                case "network": ScrollView { if let report = model.network { NetworkPanel(report).padding() } else { Text("No live network report is available.").padding() } }
                 case "peers": peersTable
                 case "reader": reader
                 default: ledgerTable

@@ -397,6 +397,10 @@ struct SettingsView: View {
             set: { p2pHost = $0 ? NodeSettings.anyHost : NodeSettings.loopbackHost }
         )
         return VStack(alignment: .leading, spacing: 10) {
+            if node.reportsStale { Caption("The latest network read failed; warnings below may be stale.") }
+            ForEach(node.networkReport?.node.warnings ?? [], id: \.self) { warning in
+                Text(warning).font(.caption).foregroundStyle(.orange)
+            }
             Toggle("Validator — re-check other people's answers", isOn: $validator)
             Caption("""
                 Re-runs each claim's checker on this Mac and signs what it found. Every \

@@ -1,5 +1,7 @@
 import AppKit
 import SwiftUI
+import CairnNodeKit
+import CairnNodeUI
 
 /// Paste named operator secrets via `bin/cairn secret set --stdin`.
 struct SecretsView: View {
@@ -18,11 +20,7 @@ struct SecretsView: View {
         "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "DATABASE_URL", "RHO_DB_HOST",
     ]
 
-    private var nameOK: Bool {
-        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let first = n.first, first.isLetter || first == "_" else { return false }
-        return n.count <= 128 && n.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
-    }
+    private var nameOK: Bool { SecretName.isValid(name.trimmingCharacters(in: .whitespacesAndNewlines)) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -39,14 +37,7 @@ struct SecretsView: View {
                             }
                         }
                     }
-                    if revealValue {
-                        TextEditor(text: $value)
-                            .font(.body.monospaced())
-                            .frame(minHeight: 64)
-                    } else {
-                        SecureField("Value (paste here)", text: $value)
-                            .font(.body.monospaced())
-                    }
+                    SecretValueEditor(value: $value, revealed: revealValue)
                     Toggle("Show value while editing", isOn: $revealValue)
                     HStack {
                         Button("Paste value from clipboard") {

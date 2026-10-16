@@ -247,12 +247,76 @@ that lesson once already).
 
 When the command finishes, its stdout, stderr and every output file become blobs
 and one `run` op records the receipt — environment name and digest, backend,
-argv, mounts with their tree digests, limits, exit status or signal, timeout,
+argv, pinned mount files and versions, limits, exit status or signal, timeout,
 wall time — **together with** the output files as write-once `files` entries
 under the publish prefix. One op, so a peer never sees outputs without the run
 that produced them or a run without its outputs. A sandbox that failed to start
 is recorded as `error`, never as an exit status: an infrastructure failure is
 not a result, the same rule as `Unavailable` in the verifiers.
+
+### Replay and the workspace reader
+
+New runs carry `replay_version: 1`: input-selection heads, every mounted
+file's immutable blob, size, executable flag and version references, the
+environment tree and manifest blob, actual command, working directory,
+variables and limits (including tmpfs). Both executable-flag conflicts and
+environment-manifest conflicts are visible choices. Inputs must be
+unambiguous. The root filesystem is re-hashed before use. The signed run
+publishes its input manifest together with the outputs after execution;
+a crash before publication leaves no completed run.
+
+Host mounts stay private and hash-only by default. Such a run cannot be
+replayed from lab data. With explicit `exec --snapshot-hosts`, host directories
+are copied into blobs and mounted from those copies, so a later host edit
+cannot change an already selected input. This option replicates the input
+bytes to the lab; use it only for data meant to be shared. Snapshots normalize files to 0644 or 0755, preserve empty directories,
+refuse symlinks/special files, and cap each host mount at 4,096 entries and
+1 GiB. These snapshots sync with the run. A host input is consequently a
+published lab input, not a way to keep a mounted secret out of a replica.
+
+```sh
+cairn lab replay sha256:RUN --check
+cairn lab replay sha256:RUN --identity identity.json
+cairn lab replay sha256:RUN --reapply --baseline sha256:CLAIM --identity identity.json
+```
+
+Replace `sha256:RUN` and `sha256:CLAIM` with full ids. Exact replay selects
+the original input blobs; reapply selects current unambiguous lab files and
+keeps immutable host inputs and the old recipe. Both append a fresh run with
+lineage. The optional baseline is a research declaration: integrate it into
+the lab files yourself before running. It neither merges source nor confers
+citation authority. The MCP tool is `lab_replay`; the operator's existing
+sandbox and network policy still apply.
+
+Exact replay compares output blob identities, paths and executable flags,
+plus stdout and stderr, in `replay_comparison`. It does not promise identical
+output from a nondeterministic program. An unconfined run still reads its
+host, as its receipt warns; use a sandbox for an isolated recipe.
+Network-enabled runs cannot be replayed exactly because external responses
+were not pinned. Legacy runs without manifests, missing blobs, absent images
+or another host architecture are unavailable, never proof of a bad candidate.
+Environment root filesystems still need importing on each execution host.
+
+The node's `/ui/workspace` lists **only** labs explicitly published with
+`CAIRN_LAB_HTTP=/path/to/lab` (an OS path-list for several). This publishes
+history, recipes, variables, source paths and referenced bytes; review a
+lab's contents before choosing to publish it. A private lab need not be
+published to replay through CLI or MCP. Link a lab to an objective with:
+
+```sh
+cairn lab doc set coordination objective_id '"sha256:OBJECTIVE"' --identity identity.json
+```
+
+The reader shows causal parents separately from deterministic display order,
+all conflicting choices, run pins and replay/reapply instructions. An output
+named `artifact.json` becomes a candidate card with its canonical artifact id
+derived in Rust, download, and matching claims from this node's log. Prepare
+promotion guides the ordinary `score_candidate`, `frontier_status` and
+commit/reveal flow. It does not submit, sign, run code, mint, or settle on a
+browser click. Lab lineage cannot replace the capabilities required for
+payment citations. Another objective or verifier needs another assessment.
+
+### Environment recipes
 
 `examples/lab/environments/` has recipes: `numtheory` (PARI/GP 2.15.4 with
 the SEA data, msolve 0.6.5, valgrind, python-flint, cypari2, numpy — what the

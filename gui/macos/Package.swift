@@ -7,9 +7,11 @@ import PackageDescription
 let package = Package(
     name: "CairnAutoresearcher",
     platforms: [.macOS(.v13)],
+    dependencies: [.package(path: "../shared")],
     targets: [
         .executableTarget(
             name: "CairnAutoresearcher",
+            dependencies: [.product(name: "CairnNodeKit", package: "shared"), .product(name: "CairnNodeUI", package: "shared")],
             path: "Sources/CairnAutoresearcher",
             swiftSettings: [.unsafeFlags(["-parse-as-library"])]
         )

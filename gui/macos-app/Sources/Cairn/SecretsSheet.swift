@@ -1,5 +1,7 @@
 import AppKit
 import SwiftUI
+import CairnNodeKit
+import CairnNodeUI
 import UniformTypeIdentifiers
 
 /// Paste named operator secrets into `~/.cairn/secrets` via `cairn secret`.
@@ -28,11 +30,7 @@ struct SecretsSheet: View {
         "RHO_DB_HOST",
     ]
 
-    private var nameOK: Bool {
-        let n = name.trimmed
-        guard let first = n.first, first.isLetter || first == "_" else { return false }
-        return n.count <= 128 && n.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
-    }
+    private var nameOK: Bool { SecretName.isValid(name.trimmingCharacters(in: .whitespacesAndNewlines)) }
 
     private var canSave: Bool {
         nameOK && !value.isEmpty && !busy
@@ -83,18 +81,7 @@ struct SecretsSheet: View {
                 .frame(width: 90)
             }
             HStack(alignment: .top) {
-                Group {
-                    if revealValue {
-                        TextEditor(text: $value)
-                            .font(.body.monospaced())
-                            .frame(minHeight: 72, maxHeight: 96)
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.35)))
-                    } else {
-                        SecureField("Value (paste here)", text: $value)
-                            .font(.body.monospaced())
-                            .textFieldStyle(.roundedBorder)
-                    }
-                }
+                SecretValueEditor(value: $value, revealed: revealValue)
                 VStack(spacing: 6) {
                     Toggle("Show", isOn: $revealValue).toggleStyle(.checkbox)
                     Button("From file…") { loadFromFile() }.disabled(busy)

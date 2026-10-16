@@ -20,6 +20,7 @@ let package = Package(
     name: "Cairn",
     platforms: [.macOS(.v13)],
     dependencies: [
+        .package(path: "../shared"),
         // Exact, not `from:`: Sparkle ships inside the signed app and runs
         // the update installer with admin rights, so a new release of it is
         // a change to review, not something the next tag picks up unread.
@@ -28,7 +29,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Cairn",
-            dependencies: [.product(name: "Sparkle", package: "Sparkle")],
+            dependencies: [.product(name: "Sparkle", package: "Sparkle"), .product(name: "CairnNodeKit", package: "shared"), .product(name: "CairnNodeUI", package: "shared")],
             path: "Sources/Cairn",
             swiftSettings: [.unsafeFlags(["-parse-as-library"])],
             linkerSettings: [

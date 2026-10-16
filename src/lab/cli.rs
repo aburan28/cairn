@@ -82,10 +82,11 @@ ENVIRONMENTS AND RUNS
     exec --env NAME --identity FILE [--input LABPATH[:TARGET]]... [--mount HOSTDIR:TARGET]...
          [--publish PREFIX] [--cwd DIR] [--setenv KEY=VALUE]... [--timeout SECONDS]
          [--memory MB] [--cpus N] [--pids N] [--network] [--sandbox auto|runsc|bwrap|none]
-         [--task TASK] [--note TEXT] [--keep] [--json] -- COMMAND [ARGS]...
+         [--task TASK] [--note TEXT] [--keep] [--snapshot-hosts] [--json] -- COMMAND [ARGS]...
                                     inputs are read-only: a prefix becomes a directory at
                                     TARGET (default /in/LABPATH), a single file that file;
                                     whatever the command writes to /out is published
+    replay RUN --identity FILE [--reapply] [--publish PREFIX] [--sandbox auto|gvisor|bubblewrap|none] [--check] [--json]
     runs [--limit N] [--json]       run receipts, newest first
     sandbox                         which sandbox this host can use
 
@@ -322,6 +323,7 @@ fn run(args: Vec<String>, out: &mut dyn io::Write) -> Result<i32, CliError> {
         "ack" => cmd_ack(&dir, &mut args, out),
         "env" => cmd_env(&dir, &mut args, out),
         "exec" => cmd_exec(&dir, &mut args, out),
+        "replay" => cmd_replay(&dir, &mut args, out),
         "runs" => cmd_runs(&dir, &mut args, out),
         "sandbox" => cmd_sandbox(out),
         "sync" => cmd_sync(&dir, &mut args, out),
@@ -1451,7 +1453,7 @@ fn cmd_exec(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32,
         "env", "identity", "input", "mount", "publish", "cwd", "setenv", "timeout", "memory",
         "cpus", "pids", "sandbox", "task", "note", "tmp",
     ])?;
-    parsed.reject_unknown(&["network", "keep", "json"])?;
+    parsed.reject_unknown(&["network", "keep", "json", "snapshot-hosts"])?;
     let identity = load_identity(parsed.one("identity"))?;
     if parsed.trailing.is_empty() {
         return usage("exec needs a command after --");
@@ -1489,6 +1491,7 @@ fn cmd_exec(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32,
     request.pids = u32::try_from(parsed.u64_flag("pids", 0)?).unwrap_or(u32::MAX);
     request.tmp_mb = parsed.u64_flag("tmp", 1024)?;
     request.network = parsed.has("network");
+    request.snapshot_hosts = parsed.has("snapshot-hosts");
     request.keep_work = parsed.has("keep");
     request.task = parsed.one("task").map(str::to_string);
     request.note = parsed.one("note").map(str::to_string);
@@ -1501,8 +1504,12 @@ fn cmd_exec(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32,
 
     let mut lab = Lab::open(dir)?;
     let result = api::exec(&mut lab, &identity, &request)?;
+    show_run(result, parsed.has("json"), out)
+}
+
+fn show_run(result: api::ExecResult, json: bool, out: &mut dyn io::Write) -> Result<i32, CliError> {
     let outcome = &result.outcome;
-    if parsed.has("json") {
+    if json {
         let mut pairs = vec![
             ("run", Value::string(&result.op.id)),
             ("publish", Value::string(&result.publish)),
@@ -1571,6 +1578,70 @@ fn cmd_exec(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32,
     } else {
         1
     })
+}
+
+fn cmd_replay(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32, CliError> {
+    let parsed = args.rest(&["identity", "publish", "sandbox", "baseline"])?;
+    parsed.reject_unknown(&["reapply", "check", "json"])?;
+    let run = parsed
+        .positional
+        .first()
+        .ok_or_else(|| CliError::Usage("replay needs a run id".into()))?;
+    let mode = if parsed.has("reapply") {
+        super::replay::Mode::Reapply
+    } else {
+        super::replay::Mode::Exact
+    };
+    let baseline = parsed
+        .one("baseline")
+        .map(op::op_id)
+        .transpose()
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+    if baseline.is_some() && mode != super::replay::Mode::Reapply {
+        return usage("--baseline requires --reapply");
+    }
+    let mut lab = Lab::open(dir)?;
+    if parsed.has("check") {
+        let plan = super::replay::plan(&mut lab, run, mode)?;
+        say(
+            out,
+            Value::object([
+                ("source", Value::string(&plan.source)),
+                ("mode", Value::string(mode.name())),
+                (
+                    "baseline",
+                    baseline.as_ref().map(Value::string).unwrap_or(Value::Null),
+                ),
+                ("environment", Value::string(&plan.environment.tree)),
+                (
+                    "input_heads",
+                    Value::array(plan.heads.iter().map(Value::string)),
+                ),
+                (
+                    "mounts",
+                    Value::array(plan.mounts.iter().map(super::replay::Mount::to_value)),
+                ),
+            ])
+            .canonical_string(),
+        );
+        return Ok(0);
+    }
+    let identity = load_identity(parsed.one("identity"))?;
+    let sandbox = parsed
+        .one("sandbox")
+        .map(str::to_string)
+        .or_else(|| std::env::var(exec::SANDBOX_ENV).ok())
+        .unwrap_or_else(|| "auto".into());
+    let result = api::replay(
+        &mut lab,
+        &identity,
+        run,
+        mode,
+        parsed.one("publish").map(str::to_string),
+        Preference::parse(&sandbox)?,
+        baseline,
+    )?;
+    show_run(result, parsed.has("json"), out)
 }
 
 fn cmd_runs(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32, CliError> {

@@ -44,25 +44,47 @@ keyboard behavior and phone dismissal, failed-read recovery, an actual payout
 lookup, field navigation, a file digest delayed across canonicalization,
 waiting for a wallet, signature invalidation after an edit, and a real node
 reached through a seed alias. With a piecework objective it also checks slice
-details and the coverage disclosure. See `ui/README.md` for setup. The only
-POST it sends is canonicalization; it never queues a record.
+details and the coverage disclosure. See `ui/README.md` for setup. Direct smoke runs send only canonicalization. The isolated wrapper described
+below also exercises real queued submissions against its temporary ledger.
 
-## Further product work
+## Follow-through, 15 October 2026
 
-1. Give a coordinated task a workspace showing each contributor's causal
-   inputs, conflicts, candidate runs and explicit promotion to the frontier.
-   Today's dashboards show settlement and self-reported work; neither is an
-   immutable replay manifest or proof that one algorithm change commutes with
-   another. Build this over the lab's causal state and verified outputs, with
-   exact replay and applying work to a newer frontier as distinct actions.
-2. Track a queued challenge to admission or refusal in the posting flow.
-   Today's queue receipt says what it means, but leaves the funder to find the
-   corresponding record in Objectives or Log. This needs a node-side receipt
-   status, not a browser guess that elapsed time means acceptance.
-3. Wire the separate native readers to the published session/fleet routes.
-   Their outstanding source-level work is listed in
-   [gui-assessment.md](gui-assessment.md); Linux browser checks do not validate
-   their Swift views or native worker process controls.
-4. Make browser checks a maintained release gate with an isolated node
-   fixture. The new smoke script is reproducible locally; it is not silently
-   added to existing CI jobs that have no browser installed.
+The four follow-up items now have working paths:
+
+| item | implementation |
+|---|---|
+| Contributor workspace and replay | `/workspace` reads operator-published labs, with authors, causal parents, all conflicts, pinned runs and candidate-to-ledger links. `lab replay` / `lab_replay` materialize original inputs, compare outputs, or explicitly rerun the recipe against current unambiguous files with new lineage and an optional research baseline. Prepare promotion guides the existing verified commit/reveal path; a lab cannot move the frontier. |
+| Queue outcome | `/submissions/{queued}` stores admission/refusal metadata durably, recovers an interrupted append from the log and reports unknown when evidence is missing. `/submit` and `/submission` poll it and retain tracking through edits and reloads. |
+| Native readers | Shared Swift report types/client, session/network panels, task catalogue, secret fields/validation and navigation policy live in `gui/shared`. All three native readers consume the published observations, retain provenance and distinguish a plain publisher. Cairn.app uses windowed counts and exposes role warnings; the iPhone reader has Network navigation and honors an empty live objective list. See the resolution matrix in the native review. |
+| Maintained browser gate | `python3 scripts/reader-ux.py` creates a temporary node, ledger, queue and conflicted lab, and guards test writes with a matching fixture id. CI and release run it against the embedded static export before packaging. It checks 19 routes at three widths, real admission/refusal and receipt recovery, candidate downloads, replay/reapply/promotion panels, outage recovery, focus and authorization races. |
+
+The shared read hook also replaces the remaining duplicated task polling and
+centralizes stale-data/cleanup behavior for peers, Network, coordination's
+chooser, Log records and workspaces. The chooser's rule has a pure-function
+regression test. The earlier strip accessibility and inclusive-range fixes
+remain covered by the browser gate.
+
+Input replay is deliberately narrower than inferring how arbitrary algorithm
+patches compose. Reapply executes a recipe on a prepared current workspace;
+semantic integration and automatic frontier-triggered scheduling remain the
+explicit design work in `docs/design/causal-replay.md`.
+
+Portable Swift tests and source syntax checks run on Linux. SwiftUI/AppKit
+compilation and native window/worker behavior require macOS and iOS; their
+build gates include the shared library. Browser results do not certify native
+window behavior.
+
+
+The worker smoke check also exposed a Linux lifecycle bug: an orphaned,
+completed managed worker could remain a zombie under a minimal container
+init, so `kill -0` kept Stop at “stopping” and prevented another Start.
+`live_pid` now distinguishes that kernel state, with an actual unreaped-child
+regression test. The worker demo still requires commitment draining and a
+safe reveal before completion.
+
+
+Challenge composition also rejects fractional thresholds and integer inputs
+outside JavaScript's exact range before canonicalization, including reward,
+ratchet fields and timeout. Statistical checkers must scale fractional scores
+to integers, as the node requires. Zero ratchet spans compare numeric values,
+so `01` and `1` cannot slip through as different endpoints.

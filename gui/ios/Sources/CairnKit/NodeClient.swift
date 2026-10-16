@@ -1,4 +1,8 @@
 import Foundation
+import CairnNodeKit
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Talks to one cairn node's HTTP surface.
 ///
@@ -65,6 +69,16 @@ public struct NodeClient: Sendable {
     public func fetchObjectives(at base: String) async throws -> [Objective] {
         let body: ObjectivesResponse = try await get(base, path: "/objectives")
         return body.objectives
+    }
+
+    public func fetchSessions(at base: String) async throws -> SessionReport {
+        guard let url = URL(string: base) else { throw NodeReadError.invalidURL }
+        return try await NodeReportClient(base: url, session: session).sessions()
+    }
+
+    public func fetchNetwork(at base: String) async throws -> NetworkReport {
+        guard let url = URL(string: base) else { throw NodeReadError.invalidURL }
+        return try await NodeReportClient(base: url, session: session).network()
     }
 
     public func fetchObjective(at base: String, id: String) async throws -> ObjectiveRecord? {

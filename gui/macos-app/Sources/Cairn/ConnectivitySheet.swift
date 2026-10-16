@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CairnNodeKit
 
 /// One line of the connectivity report.
 struct ConnectivityRow: Identifiable, Equatable {
@@ -93,6 +94,15 @@ final class ConnectivityCheck: ObservableObject {
             add("reader", "Reader", "", nil, status: .failed,
                 detail: node.state == .starting ? "the node is still starting" : "the node is not running")
         }
+        if case .running(let reader) = node.state {
+            add("sessions", "Sessions", "", {
+                do {
+                    let report = try await NodeReportClient(base: reader).sessions()
+                    guard report.available else { return (.info, "plain publisher: no peer-to-peer service") }
+                    return (report.reached > 0 ? .ok : .warning, "\(report.reached) reached · \(report.recent) recent · \(report.lost) lost · \(report.unreached) unreached, from GET /sessions")
+                } catch { return (.warning, "could not read /sessions: \(error.localizedDescription)") }
+            })
+        }
         if node.isAttached {
             add("attached", "P2P", "", nil, status: .info,
                 detail: "attached to another node; its listener is that node's, not this Mac's")
@@ -180,11 +190,6 @@ final class ConnectivityCheck: ObservableObject {
                 """)
         }
 
-        let sessions = node.sessionsOK
-        add("sessions", "Sessions", "", nil, status: sessions > 0 ? .ok : .warning,
-            detail: sessions > 0
-                ? "\(sessions) peer session\(sessions == 1 ? "" : "s") established, by the node's log"
-                : "no peer session yet, by the node's log")
         return jobs
     }
 

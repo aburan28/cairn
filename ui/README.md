@@ -20,6 +20,10 @@ Routes, in the sidebar's order:
   through the node's `coordinate_task` prompt and the operator's agent, and
   watch the running ones; `?id=…` is one divided search's slices, machines
   and task leases, and `/task?id=…` its settled-versus-reported progress;
+* `/workspace` — opt-in published labs; `?space=…` opens causal history,
+  conflicts and pinned candidate runs with distinct replay/reapply actions;
+* `/submission?id=…` — a node-local admission receipt. The posting page
+  keeps its tracking through edits and reload, without saving authorization;
 * `/network` — the node's role (Leader, Peer or Mirror, read off what it does
   and never blank), the agent attached over MCP and how to attach one, the
   machines working with it and the other nodes it syncs with, and the
@@ -79,6 +83,34 @@ in TypeScript is the drift AGENTS.md forbids. `lib/submit.ts` explains the rest,
 including why a 202 is a queue receipt and not an admission, and why the form
 only works from the node's own origin (writes are same-origin by design; the
 page says so instead of showing a network error).
+
+The queue panel reads `/submissions/{queued}` until the node reports admission
+or refusal. Missing, expired or inconsistent receipts mean unknown. Only the node’s
+recorded outcome establishes admission. An admitted claim still needs verification and settlement.
+
+`components/hooks.ts::useNodeRead` shares discovery, visible-tab refresh,
+last-good data, manual retry and stale-response protection. Task, peers,
+Network, coordination's chooser, Log records and workspaces use it; cursor
+feeds and partition-dependent reads retain their specialized state over the
+same `useNode`/`useEvery` primitives.
+
+## Isolated browser gate
+
+After `npm run build` and `cargo build --locked --features ui` at the repository
+root, run `python3 scripts/reader-ux.py`. Install the browser once with
+`cd ui && npx playwright install --with-deps chromium`. The wrapper creates a
+temporary root, ledger, queue, identities and lab, posts copied fixtures,
+starts a loopback publisher and removes it afterward. It requires a matching
+fixture id before enabling test writes. It never accepts an operator log or
+external node. `RUST_BIN` selects an already built binary;
+`CAIRN_BROWSER_PATH` selects an installed Chromium. The CI UI job and the
+release's reader job run this gate before packaging the static export.
+
+The checks cover real queued/admitted/refused outcomes and tracking recovery,
+causal workspace conflicts and candidate downloads, replay/reapply/promotion
+panels, modal keyboard behavior, stale reads, authorization races, and 19
+routes at 320, 360 and 1280 pixels. Direct use of `npm run test:browser`
+against another local reader stays read-only without the wrapper's fixture.
 
 ## Styling
 
@@ -213,9 +245,9 @@ image to a directory. The test checks 320, 360 and 1280px layouts, keyboard and
 phone dialog controls, recovery from failed reads and filters, the real digest
 route for attribution, form validation and delayed authorization responses,
 and same-origin posting guidance after finding a seed. Seed the node with a
-piecework objective to include the coordination detail checks. No record is
-submitted; canonicalization is its only POST. The review and remaining product
-work are in [`docs/review/reader-ux.md`](../docs/review/reader-ux.md).
+piecework objective to include the coordination detail checks. In this direct mode, no record is submitted; canonicalization is its only
+POST. The isolated gate above also submits disposable fixtures. The review
+and implementation status are in [`docs/review/reader-ux.md`](../docs/review/reader-ux.md).
 
 ## How the public site gets there
 

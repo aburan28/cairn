@@ -25,6 +25,11 @@ struct CairnApp: App {
                 Divider()
             }
             CommandMenu("Node") {
+                Button("Network…") {
+                    if case .running(let reader) = delegate.node.state,
+                       let url = URL(string: "network/", relativeTo: reader) { delegate.browser.show(url) }
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
                 Button("Open in Browser") { delegate.openInBrowser() }
                     .keyboardShortcut("o", modifiers: [.command, .shift])
                 Button("Restart / Reconnect") { delegate.node.restart() }
@@ -227,8 +232,8 @@ private struct NodeDetails: View {
                     row("Peer id", id)
                 }
                 GridRow {
-                    Text("Sessions").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                    Text(verbatim: "\(node.sessionsOK)").monospacedDigit()
+                    Text(node.sessionReport == nil ? "Sessions (log fallback)" : "Peers reached recently").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                    Text(verbatim: node.sessionReport?.available == false ? "plain publisher · no P2P" : "\(node.sessionsOK)\(node.reportsStale ? " · stale" : "")").monospacedDigit()
                 }
                 GridRow {
                     Text("App").foregroundStyle(.secondary).gridColumnAlignment(.trailing)

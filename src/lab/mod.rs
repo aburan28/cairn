@@ -35,6 +35,7 @@ pub mod exec;
 pub mod glob;
 pub mod mcp;
 pub mod op;
+pub mod replay;
 pub mod state;
 pub mod store;
 pub mod sync;

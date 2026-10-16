@@ -10,6 +10,7 @@ import {
   ObjectiveNotFound,
   RouteMissing,
   coverageSummary,
+  coordinatedObjectives,
   epochProgress,
   fetchAssignment,
   fetchLeases,
@@ -35,7 +36,7 @@ import { type McpPresence, PromptRefused, renderPrompt, slashCommand } from "@/l
 import { type Bridge, appBridge } from "@/lib/draft";
 import { objectiveTitle } from "@/lib/title";
 import { AgentConnect } from "@/components/agents";
-import { useEvery, useNode } from "@/components/hooks";
+import { useEvery, useNode, useNodeRead } from "@/components/hooks";
 import {
   Badge,
   Box,
@@ -110,32 +111,16 @@ function Coordination() {
 // -- the overview: launch, and what is running ------------------------------------
 
 function Overview() {
-  const base = useNode();
-  const [objectives, setObjectives] = useState<Objective[] | null>(null);
-  const [network, setNetwork] = useState<NetworkResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [readAt, setReadAt] = useState<Date | null>(null);
-
-  const load = useCallback(async () => {
-    if (base === null) return;
-    try {
-      const [listing, net] = await Promise.all([fetchObjectives(base), fetchNetwork(base).catch(() => null)]);
-      setObjectives(listing);
-      setNetwork(net);
-      setReadAt(new Date());
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }, [base]);
-
-  useEvery(load, REFRESH_SECONDS, base !== null);
+  const { base, value, error, readAt, refresh: load } = useNodeRead(async (base) => {
+    const [objectives, network] = await Promise.all([fetchObjectives(base), fetchNetwork(base).catch(() => null)]);
+    return { objectives, network };
+  }, { seconds: REFRESH_SECONDS });
+  const objectives = value?.objectives ?? null;
+  const network = value?.network ?? null;
 
   const running = useMemo(
     () =>
-      (objectives ?? [])
-        .filter((o) => o.piecework)
-        .sort((a, b) => Number(b.open) - Number(a.open) || b.reward - a.reward),
+      coordinatedObjectives(objectives ?? []),
     [objectives],
   );
   const live = useMemo(() => {
@@ -146,7 +131,7 @@ function Overview() {
 
   return (
     <>
-      <PageHeader title="Coordination" subtitle={SUBTITLE} actions={<LiveStamp at={readAt} error={objectives ? error : null} />} />
+      <PageHeader title="Coordination" subtitle={SUBTITLE} actions={<><LiveStamp at={readAt} error={objectives ? error : null} /><Link className="btn btn-sm" href="/workspace">Workspaces</Link></>} />
 
       <Launch base={base} objectives={objectives} mcp={network?.node.mcp} onPosted={() => void load()} />
 
@@ -572,6 +557,7 @@ function Dashboard({
         actions={
           <>
             <LiveStamp at={readAt} error={stale} />
+            <Link href={`/workspace?objective=${id}`} className="btn btn-sm">Workspaces</Link>
             <Link href={`/task?id=${encodeURIComponent(id)}`} className="btn btn-sm">
               Progress
             </Link>

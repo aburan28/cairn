@@ -103,6 +103,8 @@ private struct TaskRow: View {
                     Link("Progress", destination: model.progressURL(for: row.id))
                         .help("Workers, paid orbits and the share of the expected cost")
                         .disabled(!model.nodeReachable)
+                    Link("Coordination", destination: model.coordinationURL(for: row.id))
+                        .disabled(!model.nodeReachable)
                 }
             }
             .font(.caption)

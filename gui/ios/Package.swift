@@ -21,14 +21,16 @@ let package = Package(
         .library(name: "CairnUI", targets: ["CairnUI"]),
         .executable(name: "Cairn", targets: ["Cairn"]),
     ],
+    dependencies: [.package(path: "../shared")],
     targets: [
         .target(
             name: "CairnKit",
+            dependencies: [.product(name: "CairnNodeKit", package: "shared")],
             resources: [.copy("Resources/snapshot.json")]
         ),
         .target(
             name: "CairnUI",
-            dependencies: ["CairnKit"]
+            dependencies: ["CairnKit", .product(name: "CairnNodeKit", package: "shared"), .product(name: "CairnNodeUI", package: "shared")]
         ),
         .executableTarget(
             name: "Cairn",

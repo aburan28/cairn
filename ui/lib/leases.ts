@@ -19,6 +19,13 @@
 
 import { expectFields } from "./shape";
 import type { ReportedWorker } from "./progress";
+import type { Objective } from "./objectives";
+
+/** The coordination chooser uses the same rule during display and after posting. */
+export function coordinatedObjectives(objectives: readonly Objective[]): Objective[] {
+  return objectives.filter((objective) => objective.piecework)
+    .sort((a, b) => Number(b.open) - Number(a.open) || b.reward - a.reward || a.id.localeCompare(b.id));
+}
 
 export type LeaseStatus = "held" | "contended" | "expired" | "released";
 export type Outcome = "completed" | "failed" | "abandoned";

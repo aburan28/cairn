@@ -103,6 +103,10 @@ while IFS= read -r path; do
   fi
 
   case "$path" in
+    gui/shared/*)
+      run[macos]=true
+      run[ios]=true
+      ;;
     gui/macos/*|gui/macos-app/*|packaging/macos/*)
       run[macos]=true
       ;;

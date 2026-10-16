@@ -4,6 +4,7 @@ import {
   type TaskLeases,
   claimCommand,
   coverageSummary,
+  coordinatedObjectives,
   epochProgress,
   leaseRows,
   leaseTone,
@@ -11,6 +12,15 @@ import {
   partitionUnits,
   taskTone,
 } from "./leases";
+import type { Objective } from "./objectives";
+
+it("the coordination chooser keeps divided searches, puts open work first and preserves its input", () => {
+  const row = (id: string, open: boolean, reward: number, piecework: boolean) => ({ id, open, reward, piecework: piecework ? { units: 10 } : undefined }) as Objective;
+  const input = [row("closed", false, 100, true), row("certificate", true, 1000, false), row("small", true, 10, true), row("big", true, 20, true)];
+  expect(coordinatedObjectives(input).map((item) => item.id)).toEqual(["big", "small", "closed"]);
+  expect(input[0].id).toBe("closed");
+  expect(coordinatedObjectives([])).toEqual([]);
+});
 
 const reported = (
   worker: string,
