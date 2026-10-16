@@ -151,6 +151,7 @@ describe("describeHost", () => {
   it("leaves out what the host did not say rather than printing zero", () => {
     expect(describeHost({ hardware: { cpus: 4 } })).toBe("4 cpus");
     expect(describeHost({ hardware: {} })).toBe("unreported");
+    expect(describeHost({ hardware: { cpus: 1, cgroup: { cpu_millis: 500 } } })).toBe("1 cpus · 0.5 CPU quota");
   });
 });
 

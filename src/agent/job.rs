@@ -72,9 +72,11 @@ pub struct Job {
     pub sandbox: Preference,
     pub tmp_mb: u64,
     pub note: Option<String>,
+    pub cpu_requirements: crate::hardware::CpuRequirements,
+    pub workload: Option<String>,
 }
 
-const FIELDS: [&str; 17] = [
+const FIELDS: [&str; 19] = [
     "id",
     "objective_id",
     "task",
@@ -92,6 +94,8 @@ const FIELDS: [&str; 17] = [
     "network",
     "sandbox",
     "note",
+    "cpu_requirements",
+    "workload",
 ];
 
 /// An OCI image reference as `docker run` takes one: registry, path, tag and
@@ -323,6 +327,13 @@ impl Job {
             sandbox,
             tmp_mb: DEFAULT_TMP_MB,
             note: text("note")?,
+            workload: crate::hardware::text(value, "workload").map_err(AgentError::Invalid)?,
+            cpu_requirements: object
+                .get("cpu_requirements")
+                .map(crate::hardware::CpuRequirements::from_value)
+                .transpose()
+                .map_err(AgentError::Invalid)?
+                .unwrap_or_default(),
         })
     }
 
@@ -332,6 +343,8 @@ impl Job {
             None => Value::Null,
         };
         Value::object([
+            ("cpu_requirements", self.cpu_requirements.to_value()),
+            ("workload", opt(&self.workload)),
             ("id", Value::string(self.id.clone())),
             ("objective_id", opt(&self.objective_id)),
             ("task", opt(&self.task)),
@@ -404,6 +417,9 @@ pub struct Receipt {
     pub gpus_requested: u64,
     pub unenforced: Vec<String>,
     pub notes: Vec<String>,
+    pub cpu: crate::hardware::CpuProfile,
+    pub hardware: Value,
+    pub compute_estimate: Value,
 }
 
 impl Receipt {
@@ -432,6 +448,13 @@ impl Receipt {
             None => Value::Null,
         };
         Value::object([
+            ("cpu", self.cpu.to_value()),
+            ("hardware", self.hardware.clone()),
+            ("compute_estimate", self.compute_estimate.clone()),
+            (
+                "cpu_profile_id",
+                Value::string(self.cpu.to_value().digest()),
+            ),
             ("job_id", Value::string(self.job_id.clone())),
             ("host", Value::string(self.host.clone())),
             ("agent", Value::string(super::CLIENT)),
@@ -481,6 +504,19 @@ impl Receipt {
 /// Run `job` in `dir` (created by the caller; `out/`, `stdout`, `stderr`
 /// and `receipt.json` land in it) under the jail `sandboxes` chooses.
 pub fn run(job: &Job, sandboxes: &Sandboxes, dir: &Path, host: &str) -> Receipt {
+    run_with_pricing(job, sandboxes, dir, host, None)
+}
+
+/// Run with the same operator-set card published in the host's registration.
+/// The resulting estimate is provenance, not a charge or a result verdict.
+pub fn run_with_pricing(
+    job: &Job,
+    sandboxes: &Sandboxes,
+    dir: &Path,
+    host: &str,
+    pricing: Option<&crate::pricing::RateCard>,
+) -> Receipt {
+    let inventory = super::probe::Inventory::probe_for_job();
     let out_dir = dir.join("out");
     let stdout = dir.join("stdout");
     let stderr = dir.join("stderr");
@@ -503,16 +539,25 @@ pub fn run(job: &Job, sandboxes: &Sandboxes, dir: &Path, host: &str) -> Receipt 
         gpus_requested: job.gpus,
         unenforced: Vec::new(),
         notes: Vec::new(),
+        cpu: inventory.cpu.clone(),
+        hardware: inventory.to_value(),
+        compute_estimate: Value::Null,
     };
     let started = Instant::now();
     let result = fs::create_dir_all(&out_dir)
         .map_err(|e| format!("{}: {e}", out_dir.display()))
         .and_then(|()| {
+            if !job.cpu_requirements.matches(Some(&receipt.cpu)) {
+                return Err("required CPU model, base clock or usable instruction set is unavailable on this host".into());
+            }
             sandboxes
                 .choose(job.sandbox, job.image.is_some(), job.gpus)
                 .map_err(|e| e.to_string())
         })
         .and_then(|choice| {
+            if job.cpu_requirements != crate::hardware::CpuRequirements::default() {
+                receipt.notes.push("CPU requirements passed on the host. A VM or container runtime may mask features further; the experiment must check its own execution environment before using specialized instructions.".into());
+            }
             receipt.sandbox = choice.kind;
             receipt.via = match &choice.via {
                 Via::Native => "native".to_string(),
@@ -534,8 +579,59 @@ pub fn run(job: &Job, sandboxes: &Sandboxes, dir: &Path, host: &str) -> Receipt 
     if let Err(why) = result {
         receipt.error = Some(why);
     }
-    receipt.wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // A sub-millisecond job consumed time too. Use the same rounded-up
+    // observation for the visible duration and the allocation estimate.
+    receipt.wall_ms =
+        u64::try_from(started.elapsed().as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX);
     receipt.finished = crate::time::timestamp();
+    let estimate = || -> Result<Value, String> {
+        if receipt.error.is_some() {
+            return Err("execution unavailable; no usage estimate".into());
+        }
+        if job.cpus == 0 || job.memory_mb == 0 {
+            return Err(
+                "unbounded CPU or memory allocation; declare cpus and memory_mb to estimate cost"
+                    .into(),
+            );
+        }
+        if job.gpus > 0 {
+            return Err("GPU pricing is not configured by CPU/memory rate cards".into());
+        }
+        let workload = job
+            .workload
+            .as_ref()
+            .ok_or("job has no workload pricing key")?;
+        let card = pricing.ok_or("no operator compute rate card configured")?;
+        let mut offer =
+            crate::scheduling::ResourceOffer::from_host_facts(&receipt.hardware, &Value::Null);
+        offer.pricing = Some(card.clone());
+        crate::pricing::quote(
+            &offer,
+            &crate::pricing::QuoteRequest {
+                workload: workload.clone(),
+                cpu_millis: u64::from(job.cpus) * 1000,
+                memory_mb: job.memory_mb,
+                duration_ms: receipt.wall_ms,
+                cpu: job.cpu_requirements.clone(),
+            },
+        )
+    };
+    receipt.compute_estimate = match estimate() {
+        Ok(quote) => Value::object([
+            ("status", Value::string("estimated")),
+            (
+                "basis",
+                Value::string(
+                    "requested allocations times elapsed wall time, including sandbox setup",
+                ),
+            ),
+            ("quote", quote),
+        ]),
+        Err(why) => Value::object([
+            ("status", Value::string("unpriced")),
+            ("reason", Value::string(why)),
+        ]),
+    };
     for path in [&stdout, &stderr] {
         if !path.exists() {
             let _ = File::create(path);
@@ -845,6 +941,9 @@ mod tests {
             gpus_requested: 0,
             unenforced: vec![],
             notes: vec![],
+            cpu: crate::hardware::CpuProfile::default(),
+            hardware: Value::Null,
+            compute_estimate: Value::Null,
         };
         assert!(receipt.succeeded());
         assert_eq!(receipt.lease_outcome(), "completed");
@@ -913,6 +1012,29 @@ mod tests {
             .contains("done"));
         let written = fs::read_to_string(dir.join("receipt.json")).unwrap();
         assert!(written.contains("\"sandbox\":\"none\""));
+        let value = Value::from_json(&written).unwrap();
+        assert_eq!(
+            value.get("cpu_profile_id").and_then(Value::as_str),
+            Some(receipt.cpu.to_value().digest().as_str())
+        );
+        // This uses an impossible architecture rather than assuming the test
+        // host lacks AVX-512. No command may run after a failed preflight.
+        let mut incompatible = j.clone();
+        incompatible.cpu_requirements.arch = Some("unavailable-test-architecture".into());
+        let failed = run(
+            &incompatible,
+            &sandboxes,
+            &dir.join("incompatible"),
+            "test-host",
+        );
+        assert!(failed
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("instruction set is unavailable"));
+        assert_eq!(failed.exit_status, None);
+        assert_eq!(failed.lease_outcome(), "abandoned");
+        assert!(!dir.join("incompatible/out/hi").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }
