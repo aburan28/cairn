@@ -57,7 +57,8 @@ A call is `{objective_id, want, until, note}`.
 
 - Only the node's **operator** raises or withdraws one: `POST /swarm/call` and
   `POST /swarm/withdraw` are refused (`403 operator_only`) unless the request
-  came from loopback and was not forwarded. A fleet member key is not enough.
+  came from loopback, was not forwarded, and supplied the configured operator
+  Bearer token. They are disabled until a token is set. A fleet member key is not enough.
   Calls steer other people's machines, so they belong to whoever runs the
   node.
 - The objective must be in this log, open and funded. A call on a settled or
@@ -67,6 +68,39 @@ A call is `{objective_id, want, until, note}`.
   raising it again renews it. A node keeps at most 64 calls.
 - A call that has `want` live workers is **full**. A full call attracts
   nobody new, but it keeps the workers it has.
+
+### Operator credential
+
+A reverse proxy can connect from loopback without any forwarding headers.
+The socket address therefore cannot establish who controls the node. Generate
+a credential, keep it in the named secret store and pass it only to the server:
+
+```sh
+python3 -c 'import secrets; print(secrets.token_hex(32))' |
+  cairn secret set CAIRN_SWARM_OPERATOR_TOKEN --stdin
+cairn secret run --env CAIRN_SWARM_OPERATOR_TOKEN -- \
+  cairn --log cairn.jsonl --root . serve --listen 127.0.0.1:8080
+```
+
+The value must be 64 lowercase hexadecimal characters. A configured invalid
+value refuses server startup. To send a JSON call stored in `call.json`, pass
+the credential as a header on stdin so it never enters curl's argument list:
+
+```sh
+cairn secret run --env CAIRN_SWARM_OPERATOR_TOKEN -- sh -c '
+  printf "Authorization: Bearer %s\n" "$CAIRN_SWARM_OPERATOR_TOKEN" |
+    curl --fail-with-body --header @- --header "Content-Type: application/json" \
+      --data-binary @call.json http://127.0.0.1:8080/swarm/call
+'
+```
+
+Use the same header for withdrawal. A missing or incorrect credential is
+`403 operator_only`, including on loopback; the credential does not admit a
+forwarded or remote request. Rotate it by replacing the secret and restarting
+the server. Never expose this header through a public proxy or store it in a
+recipe, log or repository. Like the other named secrets, it is readable by
+processes running as the same OS user. Public advice and reports keep their
+existing permissions and never change balances.
 
 ## The bid
 

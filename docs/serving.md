@@ -69,7 +69,7 @@ record instead.
 | `POST /lease/release` | end a lease you hold, as `completed`, `failed` or `abandoned` |
 | `GET /swarm` | open swarm calls ranked by bid, with what volunteers reported giving each: memory, never the log — see [design/swarm-calls.md](design/swarm-calls.md) |
 | `GET /swarm/advice?host=NAME` | what a volunteer machine should do now: `idle`, `stay`, `start` or `yield` (with a checkpoint deadline); advice, never a rule |
-| `POST /swarm/call` / `POST /swarm/withdraw` | raise or withdraw a call on a funded objective; the operator's only, from loopback and not forwarded |
+| `POST /swarm/call` / `POST /swarm/withdraw` | raise or withdraw a call on a funded objective; requires the operator's Bearer token, loopback and no forwarding headers; disabled until configured — see [operator credential](design/swarm-calls.md#operator-credential) |
 | `POST /swarm/report` | a volunteer's report of core-seconds given (and, on a yield, unsaved): unverified, capped, never a balance |
 | `POST /hosts` | a host agent's registration: its hardware and sandboxes, kept in this node's memory for `GET /hosts` and `GET /network`, never written to the log, accepted on a read-only node too |
 | `POST /fleet/join` | enroll a machine with an invite token, on a leader whose `CAIRN_FLEET` lists `enrolled`: signed by the invite key and by the new member key, answered with the member's name and expiry — see [Fleet](#fleet-signing-for-your-own-machines) |
@@ -77,6 +77,20 @@ record instead.
 | `PUT /deposit/upload/{grant_id}` | proxy redemption of a grant (file backend, or curl-to-S3 fallback) |
 
 Everything except `/log` is a convenience. `/log` is the product.
+
+The HTTP listener accepts HTTP/1.0 and HTTP/1.1 with explicit, unambiguous
+framing: CRLF line endings, a terminated header block, a Host for HTTP/1.1,
+at most 32 KiB of headers, and a decimal Content-Length for a body. Transfer
+encoding, duplicate framing/authentication headers and folded headers are
+refused before routing. A proxy must dechunk requests before forwarding them.
+Connections close after each response.
+
+Responses prevent framing (`frame-ancestors 'none'`, `X-Frame-Options: DENY`),
+disable MIME sniffing and send `Referrer-Policy: no-referrer`. The CSP also
+restricts base URLs and objects; it does not restrict scripts, since the
+embedded reader's bootstrap uses inline scripts. Public reads retain their
+documented CORS policy; browser writes still pass the Host/content-type gates
+and cross-origin JSON preflights remain refused.
 
 ## Optional Google sign-in
 

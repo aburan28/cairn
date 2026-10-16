@@ -25,8 +25,8 @@ There is no security email address — the advisory form is the only private
 channel, and it is preferred over an issue because a sandbox escape published
 as a public issue is an exploit with a walkthrough.
 
-If the report is real, expect an honest acknowledgement and a fix on `main`;
-pre-1.0 there is no embargo machinery beyond the advisory itself.
+If the report is real, expect an honest acknowledgement and a fix on `main`.
+During Stage 0 there is no formal embargo machinery beyond the advisory itself.
 
 ## Scope
 
@@ -47,6 +47,11 @@ In scope — the properties this project actually claims:
   in the threat model.
 - **Commit–reveal breaks.** Learning an artifact before its reveal, replaying
   a commitment under another name, or grinding settlement order.
+- **Control and credential boundaries.** Unauthorised HTTP/MCP actions,
+  browser-origin bypasses, or app/provider redirects leaking operator keys or
+  private challenge text. A local process running as the operator can already
+  read the operator's named secrets; those files are permission-restricted,
+  not encrypted against that OS user.
 
 Out of scope:
 

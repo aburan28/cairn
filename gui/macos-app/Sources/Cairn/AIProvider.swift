@@ -141,6 +141,9 @@ struct AIConfig: Equatable {
                 ? "Enter the provider's API address in Settings → AI."
                 : "\(baseURL) is not an https address."
         }
+        guard url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else {
+            return "Use an API base address without a username, password, query or fragment. Keep the key in its separate field."
+        }
         return nil
     }
 
@@ -160,6 +163,31 @@ struct AIError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+/// Provider requests contain keys and private challenge text. Foundation's
+/// redirect handling does not protect every custom header (notably x-api-key),
+/// so changing origin or downgrading HTTPS requires a new explicit setting.
+final class AIProviderRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    static func allows(from: URL, to: URL) -> Bool {
+        func port(_ url: URL) -> Int? { url.port ?? (url.scheme?.lowercased() == "https" ? 443 : 80) }
+        return to.user == nil && to.password == nil
+            && from.scheme?.lowercased() == to.scheme?.lowercased()
+            && from.host?.lowercased() == to.host?.lowercased()
+            && port(from) == port(to)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        guard let original = task.originalRequest?.url, let destination = request.url,
+              Self.allows(from: original, to: destination) else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+}
+
 /// One request in, one JSON object out -- streamed in, so a person watching
 /// can see it arrive, and so the connection never sits idle long enough for
 /// something between here and the provider to drop it.
@@ -174,7 +202,7 @@ struct AIClient {
         let c = URLSessionConfiguration.ephemeral
         c.timeoutIntervalForRequest = 900
         c.timeoutIntervalForResource = 1200
-        return URLSession(configuration: c)
+        return URLSession(configuration: c, delegate: AIProviderRedirectPolicy(), delegateQueue: nil)
     }()
 
     /// Models that take `output_config.effort`. Others refuse the field.
@@ -474,6 +502,8 @@ struct AIClient {
         let kind = error?["type"] as? String
         let detail = message.map { " (\($0))" } ?? ""
         switch (status, kind) {
+        case (300..<400, _):
+            return AIError("The provider redirected to another API address. The request was stopped to protect the API key and challenge text. Verify the provider's canonical API address in Settings → AI.")
         case (_, "CreditsError"), (402, _):
             return AIError("\(provider.title) says this account is out of credits\(detail).")
         case (_, "MonthlyLimitError"):

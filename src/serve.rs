@@ -121,6 +121,11 @@ const MAX_LINE_BYTES: u64 = 8 * 1024;
 
 /// Most header lines read before a request is refused.
 const MAX_HEADERS: usize = 100;
+/// A total bound as well as a per-line bound: a hundred large cookies must
+/// not multiply the allocation allowed to each connection.
+const MAX_HEADER_BYTES: usize = 32 * 1024;
+
+mod operator;
 
 /// The longest any one connection lives, request and response together.
 ///
@@ -655,6 +660,7 @@ pub struct Serving {
     /// volunteers reported against them. Node-local and advisory, like
     /// leases: see [`crate::swarm_calls`].
     swarm: Mutex<(swarm_calls::Calls, swarm_calls::Ledger)>,
+    operator_token: Result<Option<operator::Token>, String>,
     /// The daemon's session roster, when this server runs inside a daemon.
     ///
     /// `None` on a plain `cairn serve`, which runs no p2p service and says so
@@ -763,6 +769,7 @@ impl Serving {
             leases: Mutex::new(Leases::default()),
             hosts: Mutex::new(hosts::Roster::default()),
             swarm: Mutex::new(Default::default()),
+            operator_token: operator::Token::from_env(),
             sessions: None,
             roles: Roles::from_env(),
             hardware,
@@ -1205,6 +1212,9 @@ impl Serving {
     /// wants an unattended key should hold an unwrapped one with file
     /// permissions, which is what `cairn store keygen` writes by default.
     pub fn check_startup(&self) -> io::Result<()> {
+        if let Err(why) = &self.operator_token {
+            return Err(io::Error::other(why.clone()));
+        }
         // A role nobody has heard of is a typo, and a node that quietly dropped
         // it would look exactly like one never meant to play it.
         if let Err(error) = &self.roles {
@@ -1268,8 +1278,8 @@ struct Request {
     /// The `Host` header, when the client sent one. Read only to refuse a
     /// write addressed to a public DNS name; see [`host_may_write`].
     host: Option<String>,
-    /// The `Authorization` header. Read only for the `CairnMember` scheme
-    /// (design §6); any other is ignored, as every header was before.
+    /// Fleet `CairnMember` credentials or a local operator's Bearer token;
+    /// each route interprets only the credential that authorizes its action.
     authorization: Option<String>,
     /// Whether a proxy says it forwarded this request (`Forwarded`,
     /// `X-Forwarded-For`, `X-Real-IP`). Read only to stop a reverse proxy's
@@ -1752,16 +1762,22 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ),
         ("POST", "/swarm/call") | ("POST", "/swarm/withdraw") => {
             // Raising a call steers other people's machines, so only this
-            // node's operator may: a connection from this host that no proxy
-            // says it forwarded. Anyone may read the calls and ask for advice.
-            let operator = remote.is_some_and(|ip| ip.is_loopback()) && !request.forwarded;
+            // node's operator may: a local, unforwarded connection carrying
+            // its credential. A proxy can omit forwarding headers, so the
+            // address alone cannot authorize. Anyone may read the advice.
+            let operator = remote.is_some_and(|ip| ip.is_loopback())
+                && !request.forwarded
+                && self::operator::authorized(
+                    &serving.operator_token,
+                    request.authorization.as_deref(),
+                );
             if !operator {
                 return json_refusal(
                     stream,
                     &Refusal::new(
                         403,
                         "operator_only",
-                        "swarm calls are raised by this node's operator, from this host",
+                        "swarm calls require a local, unforwarded request and the Bearer token configured by CAIRN_SWARM_OPERATOR_TOKEN; controls are disabled without that token",
                     ),
                 );
             }
@@ -1835,15 +1851,30 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
     let mut line = String::new();
     read_bounded_line(reader, &mut line)
         .map_err(|why| why.unwrap_or_else(|| "could not read the request line".to_string()))?;
-    let mut parts = line.split_whitespace();
+    let line = line
+        .strip_suffix("\r\n")
+        .ok_or("request line must end with CRLF")?;
+    let mut parts = line.split(' ');
     let method = parts
         .next()
         .ok_or_else(|| "empty request".to_string())?
         .to_string();
+
     let target = parts
         .next()
         .ok_or_else(|| "no request target".to_string())?
         .to_string();
+
+    let version = parts.next().ok_or("missing HTTP version")?;
+    if parts.next().is_some()
+        || !http_token(&method)
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+        || !target.starts_with('/')
+        || target.contains('#')
+        || target.bytes().any(|b| b <= b' ' || b == 0x7f)
+    {
+        return Err("expected METHOD /target HTTP/1.0 or HTTP/1.1".into());
+    }
 
     let (path, query_text) = match target.split_once('?') {
         Some((path, query)) => (path.to_string(), query.to_string()),
@@ -1862,11 +1893,23 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
     let mut forwarded = false;
     let mut cookie = None;
     let mut headers = 0usize;
+    let mut header_bytes = 0usize;
+    let mut length_seen = false;
     loop {
         let mut header = String::new();
         let read = read_bounded_line(reader, &mut header)
             .map_err(|why| why.unwrap_or_else(|| "could not read headers".to_string()))?;
-        if read == 0 || header.trim().is_empty() {
+        if read == 0 {
+            return Err("headers ended before their terminating blank line".into());
+        }
+        header_bytes += read;
+        if header_bytes > MAX_HEADER_BYTES {
+            return Err(format!("headers exceed {MAX_HEADER_BYTES} bytes"));
+        }
+        let header = header
+            .strip_suffix("\r\n")
+            .ok_or("headers must end with CRLF")?;
+        if header.is_empty() {
             break;
         }
         headers += 1;
@@ -1874,12 +1917,25 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
             return Err(format!("more than {MAX_HEADERS} header lines"));
         }
         if let Some((name, value)) = header.split_once(':') {
-            let name = name.trim().to_ascii_lowercase();
-            let value = value.trim();
+            if !http_token(name)
+                || value
+                    .bytes()
+                    .any(|byte| (byte < b' ' && byte != b'\t') || byte == 0x7f)
+            {
+                return Err("invalid header name or control character".into());
+            }
+            let name = name.to_ascii_lowercase();
+            let value = value.trim_matches([' ', '\t']);
             if name == "host" {
+                if host.is_some() || value.is_empty() {
+                    return Err("expected exactly one non-empty Host header".into());
+                }
                 host = Some(value.to_string());
             }
             if name == "authorization" {
+                if authorization.is_some() {
+                    return Err("multiple Authorization headers are not supported".into());
+                }
                 authorization = Some(value.to_string());
             }
             if name == "cookie" {
@@ -1892,6 +1948,13 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
                 forwarded = true;
             }
             if name == "content-length" {
+                if length_seen
+                    || value.is_empty()
+                    || !value.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return Err("expected one Content-Length containing decimal digits".into());
+                }
+                length_seen = true;
                 length = value
                     .parse::<u64>()
                     .map_err(|_| "content-length is not a number".to_string())?;
@@ -1909,6 +1972,9 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
                 }
             }
             if name == "content-type" {
+                if content_type.is_some() {
+                    return Err("multiple Content-Type headers are not supported".into());
+                }
                 let media_type = value
                     .split(';')
                     .next()
@@ -1917,10 +1983,16 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
                     .to_ascii_lowercase();
                 content_type = Some(media_type);
             }
-            if name == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked") {
-                return Err("chunked bodies are not supported; send content-length".to_string());
+            if name == "transfer-encoding" {
+                return Err("transfer encodings are not supported; send content-length".to_string());
             }
+        } else {
+            return Err("header line has no colon".into());
         }
+    }
+
+    if version == "HTTP/1.1" && host.is_none() {
+        return Err("HTTP/1.1 requires Host".into());
     }
 
     Ok(Request {
@@ -1935,6 +2007,13 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
         forwarded,
         cookie,
     })
+}
+
+pub(crate) fn http_token(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
 }
 
 fn percent_decode(text: &str) -> String {
@@ -5944,12 +6023,19 @@ fn respond_with(
 ) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
+        201 => "Created",
         202 => "Accepted",
         302 => "Found",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
+        410 => "Gone",
+        413 => "Content Too Large",
         415 => "Unsupported Media Type",
+        421 => "Misdirected Request",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
@@ -5989,6 +6075,9 @@ fn respond_with(
          connection: close\r\n\
          cache-control: no-store\r\n\
          x-content-type-options: nosniff\r\n\
+         x-frame-options: DENY\r\n\
+         content-security-policy: frame-ancestors 'none'; base-uri 'self'; object-src 'none'\r\n\
+         referrer-policy: no-referrer\r\n\
          access-control-allow-origin: *\r\n\
          {extra_lines}\
          \r\n",
@@ -6316,6 +6405,9 @@ mod tests {
     fn http(addr: std::net::SocketAddr, request: &str) -> RawHttp {
         let mut socket = std::net::TcpStream::connect(addr).expect("connect");
         socket.write_all(request.as_bytes()).expect("write");
+        socket
+            .shutdown(std::net::Shutdown::Write)
+            .expect("end request");
         let mut response = Vec::new();
         let _ = std::io::Read::read_to_end(&mut socket, &mut response);
         let text = String::from_utf8_lossy(&response).into_owned();
@@ -7866,11 +7958,43 @@ mod tests {
     #[test]
     fn swarm_calls_rank_advise_and_record_without_touching_the_log() {
         let dir = TempDir::new("swarm-route");
-        let (addr, id) = serve_orbit_search(&dir);
+        let (log, id) = orbit_search_log(&dir);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let secret = "3a".repeat(32);
+        let bearer = format!("Bearer {secret}");
+        let mut serving = Serving::new(&log, env!("CARGO_MANIFEST_DIR"));
+        serving.operator_token = Ok(Some(operator::Token::parse(&secret).unwrap()));
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let operator_post = |route: &str, body: &str| {
+            ask_raw(
+                addr,
+                "POST",
+                route,
+                &[("Authorization", bearer.as_str())],
+                body.as_bytes(),
+            )
+        };
+        // Loopback is also where a proxy sends public traffic. Without the
+        // operator credential it must not confer operator authority.
+        let body = format!(r#"{{"objective_id":"{id}","want":1}}"#);
+        assert!(ask_json(addr, "/swarm/call", &body)
+            .0
+            .starts_with("HTTP/1.1 403"));
+        assert!(ask_raw(
+            addr,
+            "POST",
+            "/swarm/call",
+            &[("Authorization", "Bearer invalid")],
+            body.as_bytes()
+        )
+        .0
+        .starts_with("HTTP/1.1 403"));
         let before = get_json(addr, "/chain").1;
 
-        let (status, body) = ask_json(
-            addr,
+        let (status, body) = operator_post(
             "/swarm/call",
             &format!(r#"{{"objective_id":"{id}","want":2,"note":"push the last orbits"}}"#),
         );
@@ -7915,22 +8039,19 @@ mod tests {
             addr,
             "POST",
             "/swarm/call",
-            &[("Forwarded", "for=1.2.3.4")],
+            &[
+                ("Forwarded", "for=1.2.3.4"),
+                ("Authorization", bearer.as_str()),
+            ],
             format!(r#"{{"objective_id":"{id}","want":1}}"#).as_bytes(),
         );
         assert!(status.starts_with("HTTP/1.1 403"), "{status}");
-        let (status, _) = ask_json(
-            addr,
-            "/swarm/call",
-            r#"{"objective_id":"sha256:nope","want":1}"#,
-        );
+        let (status, _) =
+            operator_post("/swarm/call", r#"{"objective_id":"sha256:nope","want":1}"#);
         assert!(status.starts_with("HTTP/1.1 404"), "{status}");
 
-        let (status, _) = ask_json(
-            addr,
-            "/swarm/withdraw",
-            &format!(r#"{{"objective_id":"{id}"}}"#),
-        );
+        let (status, _) =
+            operator_post("/swarm/withdraw", &format!(r#"{{"objective_id":"{id}"}}"#));
         assert!(status.starts_with("HTTP/1.1 200"), "{status}");
         let (_, advice) = get_json(addr, "/swarm/advice?host=v1&cpus=4&memory_mb=4096");
         assert_eq!(at(&advice, "action").as_str(), Some("idle"));
@@ -8367,11 +8488,50 @@ mod tests {
         serving.check_startup().expect("a known role starts");
     }
 
-    /// A fleet leader signs what its workers hand it, and only that: an
-    /// unsigned record naming the leader from inside the fleet is queued
-    /// signed; the same record from outside is refused with 403 rather than
-    /// queued to fail at drain; a worker's own nickname and anybody's
-    /// already-signed record pass through untouched.
+    /// Request boundaries must mean the same thing to this node and a proxy;
+    /// malformed framing never reaches a route, and refusal leaves it healthy.
+    #[test]
+    fn ambiguous_http_framing_is_refused_before_routing_and_browser_headers_are_enforced() {
+        let dir = TempDir::new("http-framing");
+        let (addr, _) = serve_orbit_search(&dir);
+        for request in [
+            "GET /health HTTP/2.0\r\nHost: x\r\n\r\n",
+            "GET /health HTTP/1.1 extra\r\nHost: x\r\n\r\n",
+            "GET /health HTTP/1.1\r\n\r\n",
+            "GET /health HTTP/1.1\r\nHost: x\r\nHost: localhost\r\n\r\n",
+            "GET /health HTTP/1.1\r\nHost : x\r\n\r\n",
+            "GET /health HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nContent-Length: 1\r\n\r\nx",
+            "GET /health HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n",
+            "GET /health HTTP/1.1\r\nHost: x\r\nContent-Length: +0\r\n\r\n",
+            "GET /health HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: identity\r\nContent-Length: 0\r\n\r\n",
+            "GET /health HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+            "GET /health HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\nContent-Type: application/json\r\n\r\n",
+            "GET /health HTTP/1.1\r\nHost: x\r\nAuthorization: one\r\nAuthorization: two\r\n\r\n",
+            "GET /health HTTP/1.1\r\nHost: x\r\n folded: value\r\n\r\n",
+            "GET /health HTTP/1.1\r\nHost: x\r\nNo-Colon\r\n\r\n",
+            "GET /health HTTP/1.1\r\nHost: x\r\nX-Test: a\0b\r\n\r\n",
+            "GET /health HTTP/1.1\r\nHost: x\r\n",
+            "GET http://localhost/health HTTP/1.1\r\nHost: x\r\n\r\n",
+            "GET /health HTTP/1.1\nHost: x\n\n",
+        ] {
+            let answer = http(addr, request);
+            assert!(answer.status.starts_with("HTTP/1.1 400"), "{request:?}: {}", answer.status);
+        }
+        let healthy = http(addr, "GET /health HTTP/1.1\r\nHost: x\r\n\r\n");
+        assert_eq!(healthy.body, "ok\n");
+        assert_eq!(header_value(&healthy.head, "x-frame-options"), "DENY");
+        assert!(header_value(&healthy.head, "content-security-policy")
+            .contains("frame-ancestors 'none'"));
+        assert_eq!(
+            header_value(&healthy.head, "referrer-policy"),
+            "no-referrer"
+        );
+        assert_eq!(header_value(&healthy.head, "cache-control"), "no-store");
+        assert!(http(addr, "GET /health HTTP/1.0\r\n\r\n")
+            .status
+            .starts_with("HTTP/1.1 200"));
+    }
+
     #[test]
     fn an_endless_line_or_a_header_flood_is_refused_and_the_server_survives() {
         let dir = TempDir::new("bounded-lines");
@@ -8408,6 +8568,15 @@ mod tests {
         flood.push_str("\r\n");
         let answer = ask(flood.as_bytes());
         assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+
+        let mut large = String::from("GET /health HTTP/1.1\r\nHost: x\r\n");
+        for i in 0..6 {
+            large.push_str(&format!("X-{i}: {}\r\n", "a".repeat(7000)));
+        }
+        large.push_str("\r\n");
+        let answer = ask(large.as_bytes());
+        assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+        assert!(answer.contains("headers exceed"), "{answer}");
 
         let healthy = ask(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
         assert!(healthy.starts_with("HTTP/1.1 200"), "{healthy}");

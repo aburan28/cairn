@@ -37,7 +37,20 @@ final class BackgroundServiceTests: XCTestCase {
         XCTAssertEqual((back?["ProgramArguments"] as? [String])?.count, args.count)
     }
 
+    func testVerifierRepairBelongsToTheForegroundNodeOrItsOwnLoginService() {
+        var value = settings()
+        XCTAssertTrue(value.verifiersRunLocally(backgroundServiceURL: nil))
+        value.attachURL = BackgroundService.readerURL
+        XCTAssertFalse(value.verifiersRunLocally(backgroundServiceURL: nil), "a local URL alone is not app ownership")
+        XCTAssertTrue(value.verifiersRunLocally(backgroundServiceURL: BackgroundService.readerURL))
+        value.attachURL = URL(string: "http://remote.example:8080/ui/")!
+        XCTAssertFalse(value.verifiersRunLocally(backgroundServiceURL: BackgroundService.readerURL),
+                       "running a login service must not grant repair actions for a different attachment")
+    }
+
     func testTheEnvironmentIsThePathTheHomeAndEveryCairnVariable() {
+        XCTAssertEqual(settings().environment["CAIRN_REQUIRE_SANDBOX"], "1",
+                       "a missing sandbox must never let synced objective code run unconfined")
         let env = BackgroundService.serviceEnvironment(settings(lead: true))
         XCTAssertNotNil(env["PATH"])
         XCTAssertNotNil(env["HOME"])
