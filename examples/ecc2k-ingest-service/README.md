@@ -14,6 +14,57 @@ period keys across those objectives. The buyer sets the price, period length,
 funded number of periods, and auditor key before posting. No amount is hard
 coded as a fair rate.
 
+## Run the service continuously
+
+On the host with the approved S3 and RDS access, `operator.py` supervises the
+existing ingester. It keeps one local process under a host lock, restarts a
+failed process after a delay, and archives exact public status bytes and a
+timestamped operating journal. It neither funds an objective nor signs its
+own period receipts. The auditor still checks operation and source evidence.
+The existing AWS ingest host already has a `rho-ingest.service` systemd unit;
+do not start this supervisor beside that unit. Use it only for a reviewed
+replacement deployment after the old unit is stopped, or keep the current
+systemd process and collect its logs/status snapshots for the same Cairn
+period contract.
+
+```sh
+python3 examples/ecc2k-ingest-service/operator.py \
+  --evidence-dir /srv/cairn/dp-operator-evidence \
+  --status-url "$PUBLIC_STATUS_URL" \
+  --period-seconds 3600 -- \
+  /opt/rho-ingest/venv/bin/python3 /opt/rho-ingest/dp_ingest.py \
+    --bucket "$DP_BUCKET" --status-bucket "$STATUS_BUCKET"
+```
+
+Run this foreground command under the host's service manager. The command
+after `--` must be the ingester itself, not a cloud allocation command.
+`period-N.json` records starts, exits, snapshot observations, and whether the
+ingester was alive at the boundary. It is operator evidence, not a payout
+certificate. A restart, status failure, missing input inventory, or uncovered
+portion of a period needs an auditor decision before signing. `--max-periods`
+exists for a local rehearsal; production leaves it at zero and runs until
+stopped. Keep the evidence directory private until the auditor selects fields
+for release.
+
+Distributed agents reach the common Cairn MCP endpoint described in
+`docs/agents.md`. The private ingester does not accept network tool calls;
+agents can observe the public status and signed receipts, and a credentialed
+operator can score and submit a period receipt through the endpoint.
+The gateway currently uses one Cairn signing identity for all its sessions,
+so every account at that address must be trusted to act for the operator.
+Run the local two-session payment and independent replay with
+`python3 scripts/mcp-http-ingest-smoke.py` after building the Cairn and
+reference binaries.
+
+The signed Cairn artifact publishes input object digests and progress rows as
+input and output receipts, with exact status bytes on both sides of the period.
+An independent verifier can check the signature, status hashes, timing, and
+payment from the log alone. Checking that private data matches a digest still
+requires retained object versions or an independent auditor with source
+access. Publicly readable immutable copies of the exact S3 object versions
+and a point-level output export would be needed for fully independent
+input/output replay. A hash-only manifest does not establish that proof.
+
 ## What a settled period establishes
 
 The claim includes a receipt with:

@@ -307,6 +307,63 @@ trusted proxy to the loopback address. The endpoint acts as the operator's
 identity and may hold secrets, so it rejects browser `Origin` headers and
 non-loopback `Host` authorities; browser clients cannot call it directly.
 
+### One global address for trusted ingester agents
+
+Use `cairn run --mcp-http 127.0.0.1:8001 --mcp-identity
+/srv/cairn/ingester.identity.json --no-mcp` on the node that owns the service
+ledger. This shares one rules engine and writer between remote MCP sessions,
+P2P synchronization, the HTTP reader, and the embedded UI. The node keeps the
+signing key; agents never receive it. Each remote session has separate citation
+capabilities. The commit/reveal nonce store survives a reconnect.
+
+Put `examples/ecc2k-ingest-service/Caddyfile.example` on the **same host** as
+the loopback listener. Set `CAIRN_MCP_DOMAIN` to a DNS name pointing to that
+host, and set distinct Caddy password hashes for the listed agent accounts.
+Open 80/443 for Caddy's HTTPS certificate and client traffic. The proxy
+accepts only `/mcp`, authenticates each agent, resets `Host` to the loopback
+authority Cairn checks, and removes the Basic credential before forwarding.
+Each client's remote MCP URL is `https://<domain>/mcp`; it must send its Basic
+authorization header on every request. Check the exact header configuration
+supported by that MCP client before deployment. The Caddyfile uses the
+[documented `basic_auth` hash format](https://caddyserver.com/docs/caddyfile/directives/basic_auth)
+and [automatic HTTPS](https://caddyserver.com/docs/quick-starts/https).
+
+For a client that only launches stdio servers, use
+`scripts/cairn-remote-stdio.py https://<domain>/mcp` as its MCP command.
+Set `CAIRN_MCP_USER` and `CAIRN_MCP_PASSWORD` in that agent's private process
+environment; do not put the password in a shared MCP configuration file or
+command arguments. The adapter sends one HTTPS POST per JSON-RPC message,
+keeps the session ID, validates TLS, and never follows a redirect carrying
+the credential. It refuses plaintext URLs except an explicit loopback test
+mode. An example stanza is:
+
+```json
+{
+  "mcpServers": {
+    "cairn": {
+      "command": "python3",
+      "args": ["/absolute/path/to/cairn/scripts/cairn-remote-stdio.py", "https://cairn.example.org/mcp"]
+    }
+  }
+}
+```
+
+**Access boundary:** all accounts at this address act through the same
+`--mcp-identity`. They are separate sessions, but they can all submit claims
+under the service operator's name and call the same tools. Issue credentials
+only to agents trusted to act as that operator. For independently paid
+contributors, run separate Cairn nodes with their own signing identities and
+P2P sync; a reverse proxy alone does not create separate Cairn identities.
+`post_objective` remains subject to the node's shared `--mcp-max-spend` budget
+(zero by default). The public proxy does not expose the private S3 bucket,
+database, or the ingester process.
+
+`python3 scripts/mcp-http-ingest-smoke.py` runs two HTTP MCP sessions through
+one local listener, scores and settles an auditor-signed ingester operating
+period, and checks the log with the independent reference implementation.
+The proxy and public DNS name still need deployment on the chosen host. The
+smoke does not use production S3, RDS, funds, or credentials.
+
 ### Check the wiring before blaming the agent
 
 The server is a subprocess speaking JSON-RPC on stdio, so a misconfigured client
