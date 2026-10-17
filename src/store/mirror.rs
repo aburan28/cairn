@@ -119,8 +119,9 @@ impl Report {
         }
         if !self.skipped_pending.is_empty() {
             lines.push(format!(
-                "{} pending commitment sidecar(s) NOT copied -- they can contain \
-                 unrevealed nonces or legacy plaintext artifacts",
+                "{} pending commitment sidecar(s) or sealed-submission dealing(s) NOT \
+                 copied -- they can contain unrevealed nonces, legacy plaintext \
+                 artifacts, or the key to a sealed artifact before its reveal",
                 self.skipped_pending.len()
             ));
         }
@@ -192,7 +193,7 @@ pub fn mirror(store: &Store, destination: &Path, options: Options) -> Result<Rep
                 report.skipped_plaintext.push(file.path.clone());
                 continue;
             }
-            Some(Withhold::PendingSecret) => {
+            Some(Withhold::PendingSecret | Withhold::DealerSecret) => {
                 report.skipped_pending.push(file.path.clone());
                 continue;
             }
@@ -296,6 +297,11 @@ enum Withhold {
     /// MCP's mutable commit-reveal state. Legacy versions stored both the full
     /// artifact and nonce here in plaintext.
     PendingSecret,
+    /// A sealed submission's VSS dealing (`<log>.dealings/`), written at seal
+    /// time and kept in plaintext. Its seed fixes the secret the shares
+    /// reconstruct, which is the content key: a copy opens the artifact
+    /// before its reveal.
+    DealerSecret,
 }
 
 /// Should this file be withheld from the mirror?
@@ -318,6 +324,16 @@ fn withhold(path: &Path) -> Option<Withhold> {
         .is_some_and(|name| name.ends_with(".pending.json"))
     {
         return Some(Withhold::PendingSecret);
+    }
+    // By where it lives, and by its bytes for a copy kept anywhere else: a
+    // dealing is canonical JSON, so its first key is `commitment`.
+    let in_dealings = path.ancestors().skip(1).any(|dir| {
+        dir.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".dealings"))
+    });
+    if in_dealings || (trimmed.starts_with("{\"commitment\":") && text.contains("\"seed\":")) {
+        return Some(Withhold::DealerSecret);
     }
     if trimmed.starts_with("pwkey1:") || trimmed.starts_with("pwkey1a:") {
         return Some(Withhold::Key);
@@ -539,6 +555,40 @@ mod tests {
         let report = mirror(&store, &destination, Options::default()).expect("mirrors");
         assert_eq!(report.skipped_pending, vec![pending]);
         assert!(!destination.join("log/cairn.pending.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sealed_submissions_dealing_is_never_mirrored() {
+        let (dir, store) = sealed_store("dealings");
+        let dealings = crate::sealed::dealings::dir_for(&store.log_path());
+        fs::create_dir_all(&dealings).unwrap();
+        let dealing = dealings.join("ab".repeat(32));
+        let secret = r#"{"commitment":"sha256:00","seed":"secret","threshold":2}"#;
+        fs::write(&dealing, secret).unwrap();
+        // The same bytes, copied somewhere else by hand.
+        let copied = dir.join("data/notes.json");
+        fs::write(&copied, secret).unwrap();
+        let destination = dir.join("mirror");
+        let report = mirror(&store, &destination, Options::default()).expect("mirrors");
+        assert!(report.skipped_pending.contains(&dealing), "{report:?}");
+        assert!(report.skipped_pending.contains(&copied), "{report:?}");
+        fn leaks(dir: &Path) -> bool {
+            fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|entry| {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        leaks(&path)
+                    } else {
+                        fs::read_to_string(&path).is_ok_and(|text| text.contains("\"seed\""))
+                    }
+                })
+        }
+        let leaked = leaks(&destination);
+        assert!(!leaked, "a dealer seed reached the mirror");
         let _ = fs::remove_dir_all(&dir);
     }
 
