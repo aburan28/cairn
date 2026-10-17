@@ -1,0 +1,63 @@
+{
+  "kind": "cairn/task-plan",
+  "version": 1,
+  "name": "Bounded research, checking, and delivery",
+  "goal": "GOAL-certicom-ecc2k130/index-calculus",
+  "tasks": [
+    {
+      "id": "explore",
+      "kind": "inference",
+      "description": "Generate one candidate construction and a reproducible input manifest.",
+      "priority": 70,
+      "depends_on": [],
+      "inputs": [],
+      "budget": {
+        "max_cost_units": 2000,
+        "max_wall_seconds": 1800,
+        "max_input_tokens": 50000,
+        "max_output_tokens": 12000,
+        "max_attempts": 3
+      },
+      "acceptance": { "mode": "local_only" },
+      "reasoning": {
+        "provider": "anthropic",
+        "model": "sponsor-pinned-exact-model-id",
+        "gateway_policy_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "effort_hint": "high"
+      }
+    },
+    {
+      "id": "check",
+      "kind": "verify",
+      "description": "Replay the candidate with independently pinned inputs and record the checker verdict.",
+      "priority": 90,
+      "depends_on": ["explore"],
+      "inputs": [{ "from_task": "explore" }],
+      "budget": { "max_cost_units": 0, "max_wall_seconds": 3600, "max_attempts": 1 },
+      "acceptance": { "mode": "local_only" }
+    },
+    {
+      "id": "deliver",
+      "kind": "transfer",
+      "description": "Deliver the checked artifact to a selected sink with bounded batching delay.",
+      "priority": 50,
+      "depends_on": ["check"],
+      "inputs": [{ "from_task": "check" }],
+      "budget": {
+        "max_cost_units": 0,
+        "max_wall_seconds": 600,
+        "max_delivered_bytes": 10485760,
+        "max_attempts": 3
+      },
+      "acceptance": { "mode": "local_only" },
+      "transport": {
+        "sink_key": "2222222222222222222222222222222222222222222222222222222222222222",
+        "witness_policy_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "min_goodput_bps": 10000000,
+        "max_p95_rtt_ms": 150,
+        "max_batch_bytes": 1048576,
+        "max_batch_delay_ms": 50
+      }
+    }
+  ]
+}

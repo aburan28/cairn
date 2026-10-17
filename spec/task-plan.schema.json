@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aburan28/cairn/spec/task-plan.schema.json",
+  "title": "Cairn task plan v1",
+  "description": "A non-consensus, immutable planning snapshot for agents and schedulers. Validation of this shape does not authorize spending, admit work, prove delivery, or settle an objective. See docs/design/dynamic-task-market.md for graph and authorization checks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "name", "goal", "tasks"],
+  "properties": {
+    "kind": { "const": "cairn/task-plan" },
+    "version": { "const": 1 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "goal": { "type": "string", "pattern": "^GOAL-[A-Za-z0-9][A-Za-z0-9_-]*(/[A-Za-z0-9][A-Za-z0-9_-]*)*$" },
+    "observed_log_head": { "$ref": "#/$defs/digest" },
+    "supersedes": { "$ref": "#/$defs/digest", "description": "Digest of a previous task plan. A revision is a new plan; it never edits earlier receipts or objective records." },
+    "tasks": { "type": "array", "minItems": 1, "maxItems": 1024, "items": { "$ref": "#/$defs/task" } }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$" },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_cost_units", "max_wall_seconds"],
+      "properties": {
+        "max_cost_units": { "type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "Planning ceiling in integer Cairn units; this field neither escrows nor authorizes spending. Values stay within the exact JSON integer range shared with browser clients." },
+        "max_wall_seconds": { "type": "integer", "minimum": 1, "maximum": 604800 },
+        "max_input_tokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "max_output_tokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "max_delivered_bytes": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    },
+    "input": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["sha256"], "properties": { "sha256": { "$ref": "#/$defs/digest" } } },
+        { "type": "object", "additionalProperties": false, "required": ["from_task"], "properties": { "from_task": { "$ref": "#/$defs/id" } } }
+      ]
+    },
+    "acceptance": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["mode", "objective_id"], "properties": { "mode": { "const": "pinned_objective" }, "objective_id": { "$ref": "#/$defs/digest" } } },
+        { "type": "object", "additionalProperties": false, "required": ["mode"], "properties": { "mode": { "const": "local_only" } } }
+      ],
+      "description": "Only a real pinned objective and its ordinary claim settlement can pay for a result. A local check is advisory."
+    },
+    "reasoning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model", "gateway_policy_sha256"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "gateway_policy_sha256": { "$ref": "#/$defs/digest" },
+        "model_manifest_sha256": { "$ref": "#/$defs/digest" },
+        "effort_hint": { "type": "string", "maxLength": 80, "description": "Provider-specific request setting, not a measured or rewarded reasoning level." },
+        "thinking_budget_tokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991, "description": "Requested ceiling where supported; observed usage comes only from a trusted gateway receipt." }
+      }
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sink_key", "witness_policy_sha256", "max_batch_bytes", "max_batch_delay_ms"],
+      "properties": {
+        "sink_key": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "witness_policy_sha256": { "$ref": "#/$defs/digest" },
+        "min_goodput_bps": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "max_p95_rtt_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "max_batch_bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "max_batch_delay_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "description": { "type": "string", "maxLength": 160 }
+      },
+      "description": "Routing target and measurement policy. The fields are promises to test, not evidence that a path met them."
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "description", "priority", "depends_on", "inputs", "budget", "acceptance"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["inference", "compute", "transfer", "aggregate", "verify"] },
+        "description": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 100, "description": "Advisory order within this plan; it cannot jump another sponsor's fair queue or buy settlement priority." },
+        "depends_on": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "inputs": { "type": "array", "items": { "$ref": "#/$defs/input" } },
+        "budget": { "$ref": "#/$defs/budget" },
+        "acceptance": { "$ref": "#/$defs/acceptance" },
+        "reasoning": { "$ref": "#/$defs/reasoning" },
+        "transport": { "$ref": "#/$defs/transport" }
+      },
+      "allOf": [
+        { "if": { "properties": { "kind": { "const": "inference" } }, "required": ["kind"] }, "then": { "required": ["reasoning"], "not": { "required": ["transport"] } } },
+        { "if": { "properties": { "kind": { "const": "transfer" } }, "required": ["kind"] }, "then": { "required": ["transport"], "not": { "required": ["reasoning"] } } },
+        { "if": { "properties": { "kind": { "enum": ["compute", "aggregate", "verify"] } }, "required": ["kind"] }, "then": { "not": { "anyOf": [{ "required": ["reasoning"] }, { "required": ["transport"] }] } } }
+      ]
+    }
+  }
+}
