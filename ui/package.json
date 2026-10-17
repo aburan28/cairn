@@ -12,7 +12,8 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:browser": "node scripts/ux-smoke.mjs"
+    "test:browser": "node scripts/ux-smoke.mjs",
+    "test:private-browser": "node scripts/private-network-smoke.mjs"
   },
   "dependencies": {
     "next": "^15.5.27",
@@ -23,6 +24,8 @@
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.3.0",
+    "jsdom": "^26.1.0",
     "playwright": "^1.64.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.7.0",

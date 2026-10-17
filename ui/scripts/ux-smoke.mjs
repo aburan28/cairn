@@ -153,7 +153,12 @@ try {
   assert(await page.locator("#goal").evaluate((element) => element === document.activeElement));
   const record = { ...detail.record, funder: "ux-check", reward: 1 };
   await page.locator("input[type=file]").first().setInputFiles({ name: "objective.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(record)) });
+  // Selecting a file precedes its async read. Establish the loaded fixture
+  // before holding a different file's digest across canonicalization.
+  await page.getByText(/^Loaded objective\.json\./).waitFor();
+  await page.waitForFunction((expected) => document.getElementById("sha")?.value === expected, record.verifier.checker_sha256);
   const pin = await page.locator("#sha").inputValue();
+  assert.equal(pin, record.verifier.checker_sha256, "The loaded fixture's original checker pin is required");
   // Hold a real file digest across canonicalization, reproducing a late file
   // response without replacing the node's canonical bytes with a mock.
   await page.evaluate(() => {

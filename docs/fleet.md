@@ -387,6 +387,9 @@ second leader enrolls it with an invite of its own.
 
 ## Checking it
 
+The [private deployment test matrix](testing-private-network.md) explains the
+normal policy/recovery suites and the separate packaged-reader browser check.
+
 | question | where the answer is |
 |---|---|
 | is the leader leading? | `GET /network` → `node.fleet.sources`, `node.fleet.signs_as`, `node.fleet.members`; the leader's log says `fleet: unsigned records from … are signed here with …` at start |
