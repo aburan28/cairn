@@ -10,6 +10,20 @@ import XCTest
 /// needs a `cairn` binary this job does not build; the verdict parser is
 /// held here to the exact lines that command prints.
 final class DraftingTests: XCTestCase {
+    func testProviderRedirectsKeepCredentialsAndPrivateTextOnTheConfiguredOrigin() {
+        let origin = URL(string: "https://api.example/v1/messages")!
+        XCTAssertTrue(AIProviderRedirectPolicy.allows(from: origin, to: URL(string: "https://API.example:443/v2/messages")!))
+        for url in ["http://api.example/v1/messages", "https://evil.example/messages",
+                    "https://api.example.evil.test/messages", "https://api.example:444/messages",
+                    "https://user:password@api.example/messages"] {
+            XCTAssertFalse(AIProviderRedirectPolicy.allows(from: origin, to: URL(string: url)!), url)
+        }
+        for base in ["https://user:key@api.example/v1", "https://api.example/v1?key=secret", "https://api.example/v1#models"] {
+            XCTAssertNotNil(AIConfig(provider: .custom, model: "test", baseURL: base).endpointProblem)
+        }
+        XCTAssertTrue(AIClient.failure(status: 307, body: Data(), provider: .custom).message.contains("stopped"))
+    }
+
     private func body(_ config: AIConfig) throws -> (URLRequest, [String: Any]) {
         let request = try AIClient(config: config, apiKey: "k")
             .makeRequest(system: "s", user: "u", schema: ChallengeWriter.schema, schemaName: "cairn_challenge")

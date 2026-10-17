@@ -2,16 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { Command } from "@/components/ui";
+import { networkSetup } from "@/lib/deployment";
 
 /**
  * "Get this node online", as a dismissible pop-up on the reader's landing page.
  *
- * The recipe is Tailscale (see docs/publishing.md): serve the HTTP half on the
- * tailnet, funnel it for strangers, and let tailnet peers dial the p2p port
- * directly. A node is only useful once other machines can reach it, and the
- * commands are the entire setup — there is nothing to configure past running
- * them, which is why they are here as copyable rows rather than behind a link
- * alone.
+ * The serving node's deployment marker selects internal/WireGuard recovery
+ * for private installations. An unmarked public site keeps its existing recipe.
  *
  * Dismissal is per-browser, in `localStorage` and nowhere else: the node never
  * learns who dismissed it, for the same reason the follow list does not leave
@@ -21,29 +18,15 @@ import { Command } from "@/components/ui";
  */
 const DISMISSED_KEY = "cairn-get-online-dismissed";
 
-const COMMANDS: Array<{ label: string; text: string }> = [
-  {
-    label: "1 · run the node (p2p on the wildcard, HTTP on loopback)",
-    text: "cairn run --listen 0.0.0.0:9000 --serve 127.0.0.1:8080",
-  },
-  {
-    label: "2 · sign in once",
-    text: "tailscale up",
-  },
-  {
-    label: "3 · HTTPS for the tailnet",
-    text: "tailscale serve --bg --https=8443 http://127.0.0.1:8080",
-  },
-  {
-    label: "4 · and for the open internet",
-    text: "tailscale funnel --https=8443 --bg http://127.0.0.1:8080",
-  },
-];
-
-export function GetOnline() {
+export function GetOnline({
+  forceOpen = false,
+  onClose,
+}: { forceOpen?: boolean; onClose?: () => void } = {}) {
   const [open, setOpen] = useState(false);
+  const [guide, setGuide] = useState(() => networkSetup(null));
 
   useEffect(() => {
+    setGuide(networkSetup(document.querySelector('meta[name="cairn-network"]')?.getAttribute("content")));
     // Throws on access in some private modes, exactly like the theme read in
     // Shell.tsx; a browser that cannot remember still gets the panel once.
     let stored: string | null = null;
@@ -52,8 +35,10 @@ export function GetOnline() {
     } catch {
       stored = null;
     }
-    setOpen(stored !== "1");
-  }, []);
+    // A remembered dismissal hides the automatic prompt, never an explicit
+    // recovery request from the persistent trigger.
+    setOpen(forceOpen || stored !== "1");
+  }, [forceOpen]);
 
   if (!open) return null;
 
@@ -64,6 +49,7 @@ export function GetOnline() {
     } catch {
       // Forgettable: the panel simply comes back next visit.
     }
+    onClose?.();
   };
 
   return (
@@ -85,14 +71,10 @@ export function GetOnline() {
         </div>
         <div className="box-body">
           <p className="text-[13px] leading-relaxed text-ink-2">
-            Four commands over Tailscale: HTTPS on your tailnet, the open
-            internet behind a funnel, and peers that dial the p2p port directly.
-            Result — <span className="mono text-[12px]">https://&lt;your-magicdns-name&gt;:8443</span>{" "}
-            for this reader and the API, your Tailscale IP and port{" "}
-            <span className="mono text-[12px]">9000</span> for other nodes.
+            {guide.description}
           </p>
           <div className="mt-3 flex flex-col gap-3">
-            {COMMANDS.map((command) => (
+            {guide.commands.map((command) => (
               <div key={command.text}>
                 <div className="mb-1 text-[11.5px] text-ink-3">{command.label}</div>
                 <Command text={command.text} />
@@ -100,13 +82,7 @@ export function GetOnline() {
             ))}
           </div>
           <p className="mt-3 text-[11.5px] leading-relaxed text-ink-3">
-            Verify the public half with{" "}
-            <span className="mono">tailscale funnel status</span>. Always use the{" "}
-            <span className="mono">--https=</span> flag plus the full backend
-            URL — a bare port number is read as the target and can clobber
-            other routes. The full recipe, including what peers need, is{" "}
-            <span className="mono">docs/publishing.md</span> in the
-            repository.
+            {guide.footer}
           </p>
         </div>
       </section>
@@ -129,7 +105,7 @@ export function GetOnlineLink({ className = "" }: { className?: string }) {
       >
         Get this node online →
       </button>
-      {open && <GetOnline />}
+      {open && <GetOnline forceOpen onClose={() => setOpen(false)} />}
     </>
   );
 }

@@ -11,10 +11,20 @@ struct VerifiersSection: View {
     @State private var fromNode: NodeVerifiers?
     @State private var checking = false
     @State private var installing = false
+    @State private var checkID = UUID()
+
+    /// The login service still belongs to this app, even though its window
+    /// attaches over HTTP. Installing tools here can repair that node.
+    private var usesLocalTools: Bool {
+        node.settings.verifiersRunLocally(backgroundServiceURL: node.runsInBackground ? BackgroundService.readerURL : nil)
+    }
 
     var body: some View {
         Section {
-            if let report {
+            if !usesLocalTools {
+                Text("Capabilities below belong to the attached node. This Mac is not running its verifiers.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else if let report {
                 leanRow(report)
                 pythonRow(report)
                 sandboxRow(report)
@@ -28,11 +38,11 @@ struct VerifiersSection: View {
             HStack {
                 Button("Check Again") { Task { await check() } }
                     .disabled(checking)
-                if report != nil, report?.lean == nil {
+                if usesLocalTools, report != nil, report?.lean == nil {
                     Button("Install Lean…") { installing = true }
                 }
                 Spacer()
-                if let lean = report?.lean, lean.isElan || lean.underHome {
+                if usesLocalTools, let lean = report?.lean, lean.isElan || lean.underHome {
                     Text("Handed to the node as CAIRN_LEAN and CAIRN_LEAN_ROOT.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -40,7 +50,7 @@ struct VerifiersSection: View {
         } header: {
             Text("Verifiers")
         } footer: {
-            Caption("""
+            Caption(!usesLocalTools ? "The attached node chooses its verifier tools and isolation policy. Install or repair those on the machine running that node." : """
                 A challenge drafted here is a Lean theorem, and the node checks proofs with \
                 the Lean on this Mac, inside its sandbox. The node answers unavailable, never \
                 wrong, for anything it cannot run; a Mac without Lean cannot post a drafted \
@@ -83,24 +93,37 @@ struct VerifiersSection: View {
             tool(ok: report.sandbox != nil,
                  text: report.sandbox != nil
                      ? "seatbelt (sandbox-exec): no network, declared reads only, a scratch directory to write"
-                     : "sandbox-exec is missing; objective code would run unjailed")
+                     : "sandbox-exec is missing; verification is unavailable until a sandbox works")
         }
     }
 
     @ViewBuilder private var nodeRow: some View {
         if case .running = node.state {
-            LabeledContent("Running node") {
+            LabeledContent(usesLocalTools ? "Running node" : "Attached node") {
                 if let fromNode {
                     if fromNode.servesLean {
                         tool(ok: true, text: "Serves lean" + (fromNode.lean?.version.map { " (\($0))" } ?? "")
                              + ", sandbox \(fromNode.sandbox.mechanism)")
                     } else {
                         tool(ok: false, text: (fromNode.unservable["lean"] ?? "Cannot serve lean")
-                             + ". Restart Node after installing.")
+                             + (!usesLocalTools ? ". Repair the verifier on the attached node, then restart it." : ". Restart Node after installing."))
                     }
                 } else {
-                    Text("Did not report (a node before 1.16 has no /verifiers route).")
+                    Text(checking ? "Reading capabilities…" : "Capabilities could not be read. Check the connection and try again; an older node may not support this report.")
                         .font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            if let fromNode {
+                LabeledContent("Verifier isolation") {
+                    tool(ok: fromNode.sandbox.required && fromNode.sandbox.jail,
+                         text: fromNode.sandbox.required
+                            ? (fromNode.sandbox.jail ? "Sandbox required: \(fromNode.sandbox.mechanism)" : "Sandbox required; code execution is unavailable")
+                            : "Sandbox optional; this node permits unconfined verification")
+                }
+                if usesLocalTools, !fromNode.sandbox.required {
+                    Button("Restart Node to Require Sandbox") { node.restart() }
+                    Text("An existing background service keeps its previous environment until restarted. This applies the app's required isolation policy.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
@@ -121,17 +144,29 @@ struct VerifiersSection: View {
     }
 
     private func check() async {
+        let id = UUID()
+        checkID = id
         checking = true
-        defer { checking = false }
+        report = nil
+        fromNode = nil
+        defer { if checkID == id { checking = false } }
         let settings = node.settings
-        report = await Task.detached(priority: .utility) {
-            Toolchains.report(environment: Node.childEnvironment(settings))
-        }.value
-        if case .running(let url) = node.state {
-            fromNode = await NodeVerifiers.fetch(readerURL: url)
-        } else {
-            fromNode = nil
+        let state = node.state
+        let localTools = usesLocalTools
+        let local: ToolchainReport?
+        if !localTools { local = nil }
+        else {
+            local = await Task.detached(priority: .utility) {
+                Toolchains.report(environment: Node.childEnvironment(settings))
+            }.value
         }
+        guard !Task.isCancelled, checkID == id, node.state == state, usesLocalTools == localTools else { return }
+        let remote: NodeVerifiers?
+        if case .running(let url) = state { remote = await NodeVerifiers.fetch(readerURL: url) }
+        else { remote = nil }
+        guard !Task.isCancelled, checkID == id, node.state == state, usesLocalTools == localTools else { return }
+        report = local
+        fromNode = remote
     }
 }
 

@@ -344,10 +344,19 @@ struct NodeSettings: Equatable {
         return roles
     }
 
-    /// Both always set, so the value chosen here is the one that applies and
-    /// not one inherited from whatever launched the app.
+    /// A background preference alone cannot make a remote attachment local:
+    /// only the service URL this app owns can use this Mac's repair actions.
+    func verifiersRunLocally(backgroundServiceURL: URL?) -> Bool {
+        attachURL == nil || attachURL == backgroundServiceURL
+    }
+
+    /// The app's chosen limits and required isolation must win over whatever
+    /// environment launched it, for foreground and background nodes alike.
     var environment: [String: String] {
-        var env = ["CAIRN_SANDBOX_CPUS": String(cpus), "CAIRN_SANDBOX_MEMORY_MB": String(memoryMB)]
+        // A desktop node syncs code written by strangers. Losing its jail
+        // must make verification unavailable, never silently unconfined.
+        var env = ["CAIRN_SANDBOX_CPUS": String(cpus), "CAIRN_SANDBOX_MEMORY_MB": String(memoryMB),
+                   "CAIRN_REQUIRE_SANDBOX": "1"]
         if shareResources {
             env["CAIRN_SHARE_RESOURCES"] = "1"
             env["CAIRN_RESOURCE_CPUS"] = String(resourceCPUs)

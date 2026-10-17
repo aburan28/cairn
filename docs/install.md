@@ -74,23 +74,31 @@ Browser** opens the same page in your browser; **Node → Show Data Folder**,
 **Show Node Log** and **Copy Peer Id** are where to look when it will not
 start or when someone else is adding this node.
 
-**macOS will refuse to open it the first time.** The installer is not signed
-with an Apple Developer ID, because this project does not have one, so macOS
-cannot say who made it and says that instead of opening it.
+**Check the release's signing status before installing.** The release pipeline
+supports Apple Developer ID signing and notarization when the release
+environment has the required credentials. A build without them is unsigned;
+an available download alone is not evidence that Apple checked it. Public
+Mac releases should identify their signing/notarization status in the release
+notes and pass Gatekeeper on a freshly downloaded copy.
 
-- **macOS 15 and later:** System Settings → Privacy & Security, scroll to
-  *Security*, and click **Open Anyway** beside the message about the package.
-- **macOS 14 and earlier:** Control-click the package, choose **Open**, then
-  **Open** again.
-- **Or from a terminal**, with no dialog at all:
+If macOS reports an unidentified developer or a damaged package, stop and check
+the release notes and publisher. Do not switch to a shell installer to bypass
+that warning. An unsigned development preview requires a separate, explicit
+trust decision. Maintainers can inspect an installer with
+`pkgutil --check-signature`, assess it with `spctl --assess --type install -vv`,
+and validate stapled notarization with `xcrun stapler validate` on the app and
+disk image. These checks complement the release's SHA-256 checksum; a checksum
+served beside an artifact does not independently establish its publisher.
 
-  ```sh
-  sudo installer -pkg "/Volumes/Cairn <version>/Install Cairn.pkg" -target /
-  ```
-
-The [install script](#anything-else-the-install-script) never meets that
-dialog, because `curl` does not mark a download the way a browser does. If the
-dialog bothers you more than piping a script to a shell does, use that.
+Cairn.app requires its verifier sandbox in both foreground and background
+mode. Settings → Verifiers shows whether this node can actually verify. A
+missing sandbox or interpreter makes verification unavailable until repaired;
+it does not mean the submitted result is wrong. When attached to another node,
+the same screen reports that node's capabilities and isolation policy.
+After upgrading an existing background login service, use **Restart Node to
+Require Sandbox** in that screen (or the app's Restart Node action) once. This
+rewrites the service's stored environment; closing and reopening its window
+does not restart the service.
 
 To remove it:
 

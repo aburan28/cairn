@@ -79,6 +79,8 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - run: npm ci
         working-directory: ui
+      - run: npm audit --audit-level=high
+        working-directory: ui
       - run: npx tsc --noEmit
         working-directory: ui
       - run: npm test

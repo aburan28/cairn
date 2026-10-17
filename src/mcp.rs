@@ -485,6 +485,7 @@ const MCP_MAX_LINE_BYTES: u64 = 8 * 1024;
 
 /// Most header lines read before a request is refused.
 const MCP_MAX_HEADERS: usize = 100;
+const MCP_MAX_HEADER_BYTES: usize = 32 * 1024;
 
 /// How long a request may take to arrive. A slow-loris holding sockets is the
 /// cheapest attack on a thread-per-connection server; this is the cheapest
@@ -920,12 +921,16 @@ fn handle_http_conn(stream: &mut TcpStream, hub: &Arc<Mutex<HttpHub>>) -> io::Re
 /// The request line and the headers that decide anything, over HTTP/1.1.
 ///
 /// The same deliberately minimal subset as `serve.rs`: what a client library
-/// emits for a small POST, with chunked bodies refused rather than decoded.
+/// emits for a small POST. Ambiguous framing and all transfer encodings are
+/// refused before the origin check or any tool call.
 fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, String> {
     let mut line = String::new();
     read_http_line(reader, &mut line)
         .map_err(|why| why.unwrap_or_else(|| "could not read the request line".to_string()))?;
-    let mut parts = line.split_whitespace();
+    let line = line
+        .strip_suffix("\r\n")
+        .ok_or("request line must end with CRLF")?;
+    let mut parts = line.split(' ');
     let method = parts
         .next()
         .ok_or_else(|| "empty request".to_string())?
@@ -933,13 +938,17 @@ fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, S
     let target = parts
         .next()
         .ok_or_else(|| "no request target".to_string())?;
-    // Absolute-form targets (`POST http://host/mcp`) arrive from proxies; the
-    // path is what routes.
-    let path = target
-        .split_once("://")
-        .and_then(|(_, rest)| rest.split_once('/').map(|(_, path)| format!("/{path}")))
-        .unwrap_or_else(|| target.to_string());
-    let path = path.split_once('?').map_or(path.as_str(), |(head, _)| head);
+    let version = parts.next().ok_or("missing HTTP version")?;
+    if parts.next().is_some()
+        || !crate::serve::http_token(&method)
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+        || !target.starts_with('/')
+        || target.contains('#')
+        || target.bytes().any(|b| b <= b' ' || b == 0x7f)
+    {
+        return Err("expected METHOD /target HTTP/1.0 or HTTP/1.1".into());
+    }
+    let path = target.split_once('?').map_or(target, |(head, _)| head);
 
     let mut content_length = 0u64;
     let mut content_type = None;
@@ -947,11 +956,23 @@ fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, S
     let mut host = None;
     let mut origin = None;
     let mut headers = 0usize;
+    let mut header_bytes = 0usize;
+    let mut length_seen = false;
     loop {
         let mut header = String::new();
         let read = read_http_line(reader, &mut header)
             .map_err(|why| why.unwrap_or_else(|| "could not read headers".to_string()))?;
-        if read == 0 || header.trim().is_empty() {
+        if read == 0 {
+            return Err("headers ended before their terminating blank line".into());
+        }
+        header_bytes += read;
+        if header_bytes > MCP_MAX_HEADER_BYTES {
+            return Err(format!("headers exceed {MCP_MAX_HEADER_BYTES} bytes"));
+        }
+        let header = header
+            .strip_suffix("\r\n")
+            .ok_or("headers must end with CRLF")?;
+        if header.is_empty() {
             break;
         }
         headers += 1;
@@ -959,10 +980,24 @@ fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, S
             return Err(format!("more than {MCP_MAX_HEADERS} header lines"));
         }
         if let Some((name, value)) = header.split_once(':') {
-            match name.trim().to_ascii_lowercase().as_str() {
+            if !crate::serve::http_token(name)
+                || value
+                    .bytes()
+                    .any(|byte| (byte < b' ' && byte != b'\t') || byte == 0x7f)
+            {
+                return Err("invalid header name or control character".into());
+            }
+            let value = value.trim_matches([' ', '\t']);
+            match name.to_ascii_lowercase().as_str() {
                 "content-length" => {
+                    if length_seen
+                        || value.is_empty()
+                        || !value.bytes().all(|byte| byte.is_ascii_digit())
+                    {
+                        return Err("expected one Content-Length containing decimal digits".into());
+                    }
+                    length_seen = true;
                     content_length = value
-                        .trim()
                         .parse::<u64>()
                         .map_err(|_| "content-length is not a number".to_string())?;
                     if content_length > MCP_MAX_BODY_BYTES {
@@ -970,6 +1005,9 @@ fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, S
                     }
                 }
                 "content-type" => {
+                    if content_type.is_some() {
+                        return Err("multiple Content-Type headers are not supported".into());
+                    }
                     content_type = Some(
                         value
                             .split(';')
@@ -980,20 +1018,33 @@ fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, S
                     );
                 }
                 "mcp-session-id" => {
-                    session = Some(value.trim().to_string());
+                    if session.replace(value.to_string()).is_some() {
+                        return Err("multiple MCP-Session-Id headers are not supported".into());
+                    }
                 }
                 "host" => {
-                    if host.replace(value.trim().to_string()).is_some() {
+                    if value.is_empty() || host.replace(value.to_string()).is_some() {
                         return Err("more than one Host header".to_string());
                     }
                 }
-                "origin" => origin = Some(value.trim().to_string()),
-                "transfer-encoding" if value.to_ascii_lowercase().contains("chunked") => {
-                    return Err("chunked bodies are not supported; send content-length".to_string());
+                "origin" => {
+                    if origin.replace(value.to_string()).is_some() {
+                        return Err("multiple Origin headers are not supported".into());
+                    }
+                }
+                "transfer-encoding" => {
+                    return Err(
+                        "transfer encodings are not supported; send content-length".to_string()
+                    );
                 }
                 _ => {}
             }
+        } else {
+            return Err("header line has no colon".into());
         }
+    }
+    if version == "HTTP/1.1" && host.is_none() {
+        return Err("HTTP/1.1 requires Host".into());
     }
     // GET, DELETE and OPTIONS carry no body; a length on one is a client bug,
     // refused rather than read and ignored.
@@ -1032,35 +1083,17 @@ fn read_http_line(
     reader: &mut BufReader<TcpStream>,
     line: &mut String,
 ) -> Result<usize, Option<String>> {
-    let mut bytes = 0u64;
-    loop {
-        let mut byte = [0u8; 1];
-        match reader.read(&mut byte) {
-            Ok(0) => return Ok(line.len()),
-            Ok(_) => {}
-            Err(error) => {
-                if line.is_empty() && bytes == 0 {
-                    return Err(None);
-                }
-                let _ = error;
-                return Err(None);
-            }
-        }
-        bytes += 1;
-        if bytes > MCP_MAX_LINE_BYTES {
-            return Err(Some(format!(
-                "a line longer than {MCP_MAX_LINE_BYTES} bytes"
-            )));
-        }
-        if byte[0] == b'\n' {
-            break;
-        }
-        line.push(byte[0] as char);
+    let read = reader
+        .by_ref()
+        .take(MCP_MAX_LINE_BYTES)
+        .read_line(line)
+        .map_err(|_| None)?;
+    if read as u64 >= MCP_MAX_LINE_BYTES && !line.ends_with('\n') {
+        return Err(Some(format!(
+            "a line longer than {MCP_MAX_LINE_BYTES} bytes"
+        )));
     }
-    if line.ends_with('\r') {
-        line.pop();
-    }
-    Ok(line.len())
+    Ok(read)
 }
 
 fn http_respond(
@@ -4561,6 +4594,50 @@ mod tests {
         ));
         assert!(!http_authority_allowed(None, None, 8001));
         assert!(bind_http("0.0.0.0:0").is_err());
+    }
+
+    #[test]
+    fn http_refuses_ambiguous_and_incomplete_framing_before_any_tool_can_run() {
+        let parse = |request: &str| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            client.write_all(request.as_bytes()).unwrap();
+            client.shutdown(std::net::Shutdown::Write).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            read_http_request(&mut BufReader::new(stream))
+        };
+        for request in [
+            "POST /mcp HTTP/2.0\r\nHost: localhost\r\n\r\n",
+            "POST /mcp HTTP/1.1 extra\r\nHost: localhost\r\n\r\n",
+            "POST http://localhost/mcp HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nHost: localhost\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost : localhost\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nContent-Length: 1\r\n\r\nx",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: +0\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: identity\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Type: text/plain\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nMCP-Session-Id: a\r\nMCP-Session-Id: b\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nOrigin: a\r\nOrigin: b\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\n folded: value\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nNo-Colon\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nX-Test: a\0b\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\n",
+            "POST /mcp HTTP/1.1\nHost: localhost\n\n",
+        ] {
+            assert!(parse(request).is_err(), "accepted {request:?}");
+        }
+        let mut large = String::from("POST /mcp HTTP/1.1\r\nHost: localhost\r\n");
+        for i in 0..6 {
+            large.push_str(&format!("X-{i}: {}\r\n", "a".repeat(7000)));
+        }
+        large.push_str("\r\n");
+        assert!(parse(&large).err().unwrap().contains("headers exceed"));
+        let good = parse("POST /mcp?ok=1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nContent-Type: application/json\r\nMCP-Session-Id: a\r\n\r\n{}").unwrap();
+        assert_eq!(good.path, "/mcp");
+        assert_eq!(good.content_length, 2);
+        assert_eq!(good.session.as_deref(), Some("a"));
     }
 
     #[test]

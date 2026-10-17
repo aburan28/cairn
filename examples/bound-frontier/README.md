@@ -226,6 +226,46 @@ hence another objective -- and never an argument on this one. Give it the same
 goal key with its own angle (`GOAL-ecdlp-bound-frontier/<domain>`) so the
 frontiers group under one problem.
 
+## The same frontier in bit operations
+
+`objective-ecdlp-prime-toy-bitop.json` is the sibling domain in `bitop/v1`,
+the unit aburan28/crypto now prices every ECDLP cost in (its
+`docs/units/BITOPS.md`). A bit operation is one two-input gate, and each
+primitive has a frozen gate count:
+- a field product;
+- an affine addition;
+- a multiply-subtract modulo `r`;
+- a hash probe;
+- a word operation of a Gröbner or SAT engine.
+
+A method's cost is then an exact integer that no host or calibration
+enters. `gae` charged group additions and converted the rest with one
+host's timings, or not at all. `bitop/v1` charges everything the method
+does, and a bound whose pricing is incomplete is inadmissible.
+
+The evaluator
+(`evaluators/bound_frontier_ecdlp_prime_toy_bitop.py`) is the sibling's
+with two differences:
+- the unit constant is `bitop/v1`;
+- each size's `S` divides the mean gates by `sqrt(r)` *and* by the gates of
+  one affine addition on that size's field.
+
+The second makes `S / sqrt(pi / 2A)` still the ratio to the generic floor,
+and the score parts per million of it. The addition's gate count is
+reproduced in the evaluator's text, checked against crypto's
+`docs/units/bitop-v1.vectors.json`.
+
+Three artifacts ship with it:
+- `artifacts/prime-rho-neg-bitop.json` scores 661278 (rho with the negation
+  map at 1.512 times the floor in bit operations, against 1.466 in `gae`);
+- `artifacts/prime-bsgs-neg-bitop.json` scores 846812 (BSGS at 1.181);
+- `artifacts/tampered-mean-bitops.json` alters one size's mean and is
+  refused.
+
+All three were fitted with `ecbench bound fit --unit bitop/v1` from the same
+committed session as the `gae` records. Each objective refuses the other
+unit's records: the domain is part of what is scored.
+
 ## Where it comes from
 
 The crypto-autoresearcher program keeps the same evaluator and objective at

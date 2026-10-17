@@ -672,6 +672,7 @@ fn bind_http(
     journal: crate::journal::Shared,
     agents: Option<crate::mcp::SharedPresence>,
 ) -> Result<Option<(TcpListener, Vec<TcpListener>, serve::Serving)>, String> {
+    let profile = crate::deployment::Profile::from_env()?;
     let Some(addr) = &config.serve else {
         return Ok(None);
     };
@@ -697,8 +698,13 @@ fn bind_http(
     let bound = listener
         .local_addr()
         .map_err(|error| format!("the HTTP listener on {addr}: {error}"))?;
+    let http_portmap = std::env::var(crate::p2p::reach::HTTP_ENV).ok();
     let decision = crate::p2p::reach::decide_http(
-        std::env::var(crate::p2p::reach::HTTP_ENV).ok().as_deref(),
+        if profile.is_private() {
+            Some("off")
+        } else {
+            http_portmap.as_deref()
+        },
         bound.ip(),
     );
     let external = Arc::new(Mutex::new(crate::p2p::reach::Report::off(
@@ -777,6 +783,10 @@ fn bind_http(
 /// an accident and the node rides it out; a cap is an instruction, and a node
 /// that kept writing past it would make the cap decoration.
 pub fn run(config: Config) -> Result<(), String> {
+    let profile = crate::deployment::Profile::from_env()?;
+    if profile.is_private() {
+        log::info!("CAIRN_NETWORK=private: public discovery, LAN beacons and port mapping are disabled; only explicitly allowed peers are used");
+    }
     // The ledger first, and the ordering is deliberate.
     //
     // It is the cheapest check and the likeliest failure -- another daemon
@@ -830,7 +840,8 @@ pub fn run(config: Config) -> Result<(), String> {
     // Whom this node will peer with. Read before the bootstrap files so a
     // `bootstrap` policy can take their ids as they load; refused at startup
     // when mistyped, like the proxy, rather than silently open.
-    let peer_policy = crate::fleet::PeerPolicy::from_env()
+    let peer_policy = profile
+        .peers(std::env::var(crate::fleet::PEERS_ENV).ok().as_deref())
         .map_err(|e| format!("{}: {e}", crate::fleet::PEERS_ENV))?;
     let mut allowed_peers: BTreeSet<crate::p2p::handshake::PeerId> = match &peer_policy {
         crate::fleet::PeerPolicy::Open => BTreeSet::new(),
@@ -870,7 +881,7 @@ pub fn run(config: Config) -> Result<(), String> {
         service.add_bootstrap(endpoint);
     }
     if !peer_policy.is_open() {
-        if allowed_peers.is_empty() {
+        if allowed_peers.is_empty() && !profile.is_private() {
             return Err(format!(
                 "{}={:?} names no peer at all: `bootstrap` needs at least one --bootstrap file, or list the peer ids to allow",
                 crate::fleet::PEERS_ENV,
@@ -890,7 +901,7 @@ pub fn run(config: Config) -> Result<(), String> {
     // `--bootstrap` file, which Cairn.app never ran, so every node it started
     // was LAN-only. Read at startup so a named list that cannot be read is a
     // refusal here rather than a node that looks like a network that is down.
-    let seed_source = seeds::Source::from_env();
+    let seed_source = profile.seeds(std::env::var(seeds::SEEDS_ENV).ok().as_deref());
     let mut seed_list = seed_source
         .load()
         .map_err(|e| format!("seeds ({}): {e}", seed_source.describe()))?;
@@ -899,7 +910,7 @@ pub fn run(config: Config) -> Result<(), String> {
     // node dials the dead address forever and the only repair is a file the
     // person has to fetch by hand. The operator's own list (`CAIRN_SEEDS` a
     // path, or `off`) is left alone: they already chose it.
-    if seed_source == seeds::Source::BuiltIn {
+    if !profile.is_private() && seed_source == seeds::Source::BuiltIn {
         match seeds::fetch_published() {
             Some(published) => {
                 let before = seed_list.seeds.len();
@@ -921,10 +932,14 @@ pub fn run(config: Config) -> Result<(), String> {
     }
     let seed_list = seed_list.seeds;
     if seed_source == seeds::Source::Off {
-        log::info!(
-            "seeds: off ({}); this node dials only bootstrap files, its log's peers and the LAN",
-            seeds::SEEDS_ENV
-        );
+        if profile.is_private() {
+            log::info!("seeds: off (CAIRN_NETWORK=private); only explicitly allowed bootstrap or log peers are dialled");
+        } else {
+            log::info!(
+                "seeds: off ({}); this node dials only bootstrap files, its log's peers and the LAN",
+                seeds::SEEDS_ENV
+            );
+        }
     } else if seed_list.is_empty() {
         log::warn!(
             "seeds: {} names no seed this node can dial",
@@ -967,31 +982,35 @@ pub fn run(config: Config) -> Result<(), String> {
     // developer's live node on the same segment, synced with it, and failed
     // because its claim had been settled somewhere else. A node meant to be
     // alone must be able to say so.
-    let beacon_port = match std::env::var(BEACON_PORT_ENV) {
-        Ok(raw) if raw.trim().eq_ignore_ascii_case("off") || raw.trim() == "0" => None,
-        Ok(raw) => match raw.trim().parse::<u16>() {
-            Ok(port) => Some(port),
-            Err(_) => {
-                log::warn!(
-                    "{BEACON_PORT_ENV}={raw:?} is neither a port nor `off`; using {}",
+    let beacon_port = if profile.is_private() {
+        None
+    } else {
+        match std::env::var(BEACON_PORT_ENV) {
+            Ok(raw) if raw.trim().eq_ignore_ascii_case("off") || raw.trim() == "0" => None,
+            Ok(raw) => match raw.trim().parse::<u16>() {
+                Ok(port) => Some(port),
+                Err(_) => {
+                    log::warn!(
+                        "{BEACON_PORT_ENV}={raw:?} is neither a port nor `off`; using {}",
+                        multicast::PORT
+                    );
+                    Some(multicast::PORT)
+                }
+            },
+            // Off by default behind a proxy. A beacon announces this node's peer id
+            // and port to the local segment every interval, and a node that routes
+            // through Tor or a bridge is hiding from whoever runs that segment.
+            // Setting the variable explicitly still turns them on.
+            Err(_) if !matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct) => {
+                log::info!(
+                    "multicast: beacons off because dials go through a proxy; \
+                 {BEACON_PORT_ENV}={} turns them on",
                     multicast::PORT
                 );
-                Some(multicast::PORT)
+                None
             }
-        },
-        // Off by default behind a proxy. A beacon announces this node's peer id
-        // and port to the local segment every interval, and a node that routes
-        // through Tor or a bridge is hiding from whoever runs that segment.
-        // Setting the variable explicitly still turns them on.
-        Err(_) if !matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct) => {
-            log::info!(
-                "multicast: beacons off because dials go through a proxy; \
-                 {BEACON_PORT_ENV}={} turns them on",
-                multicast::PORT
-            );
-            None
+            Err(_) => Some(multicast::PORT),
         }
-        Err(_) => Some(multicast::PORT),
     };
     let beacon = beacon_port.and_then(|port| {
         match multicast::Responder::bind(service.identity(), config.listen.port(), port) {
@@ -1017,7 +1036,7 @@ pub fn run(config: Config) -> Result<(), String> {
         && beacon_port.is_none()
         && matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct)
     {
-        log::info!("multicast: off ({BEACON_PORT_ENV}); no LAN discovery for this node");
+        log::info!("multicast: off; no LAN discovery for this node");
     }
 
     let listener = service.listen(config.listen).map_err(|e| {
@@ -1072,8 +1091,13 @@ pub fn run(config: Config) -> Result<(), String> {
     // not to ask is published too, so a reader sees why rather than a blank.
     // Off behind a proxy for the reason beacons are, and off on a loopback
     // listen because nothing outside this host can be forwarded to it.
+    let p2p_portmap = std::env::var(crate::p2p::reach::ENV).ok();
     let decision = crate::p2p::reach::decide(
-        std::env::var(crate::p2p::reach::ENV).ok().as_deref(),
+        if profile.is_private() {
+            Some("off")
+        } else {
+            p2p_portmap.as_deref()
+        },
         config.listen.ip(),
         !matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct),
     );
