@@ -1,5 +1,17 @@
 # Changelog
 
+## [10.1.0](https://github.com/aburan28/cairn/compare/v10.0.0...v10.1.0) (2026-10-17)
+
+
+### Features
+
+* **serve:** swarm calls, volunteer advice and preemption by escrow ([#321](https://github.com/aburan28/cairn/issues/321)) ([4b8cafb](https://github.com/aburan28/cairn/commit/4b8cafbd0e94abf87ebaf72828e907e05b007b85))
+
+
+### Fixes
+
+* **security:** harden operator controls and desktop verifier defaults ([#324](https://github.com/aburan28/cairn/issues/324)) ([787f064](https://github.com/aburan28/cairn/commit/787f0648a309c502f6044c77d91aa5504729ac0a))
+
 ## [10.0.0](https://github.com/aburan28/cairn/compare/v9.2.1...v10.0.0) (2026-10-16)
 
 
