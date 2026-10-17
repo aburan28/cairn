@@ -89,7 +89,10 @@ cannot be made to choose that optimum by paying `C(e)` plus a fixed margin:
 the worker then prefers more billed effort. Instead:
 
 - Fund a pinned deliverable and pay for **settled novelty or specified checked
-  coverage**. Keep provider expense in a separately capped sponsor account.
+  coverage**. A coverage claim must identify a precommitted input region and
+  carry evidence the pinned checker can reproduce or verify; a transcript
+  saying "I tried" is not coverage. Keep provider expense in a separately
+  capped sponsor account.
 - Let the sponsor or a trusted gateway choose the exact model/configuration
   and enforce the budget before dispatch. Bind each completed provider response
   to one assignment and request ID in a signed receipt. Reconcile totals with
