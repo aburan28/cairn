@@ -61,8 +61,11 @@ elements:
    whose checker is independently reproducible. The operator must verify its
    actual rules, assignee, deadline and open reward. A planning budget is not
    escrow; provider dispatch needs a separately signed sponsor policy held by
-   the gateway. The sum of reservations for concurrent calls must fit that
-   policy's ceiling before any call goes out.
+   the gateway. That policy must cap the provider's bill in exact native
+   currency minor units as well as any Cairn-unit accounting quote; an
+   exchange-rate assumption is not a billing cap. The sum of worst-case
+   reservations for concurrent calls must fit the native bill ceiling before
+   any call goes out.
 5. Secret-bearing input bytes and model exchanges stay in sponsor-controlled
    storage. A digest in a public plan is not a promise that the content is
    public, and private content cannot be the only evidence for a public
@@ -228,11 +231,12 @@ The main profitable deviations to test are:
    lease, changed plan bytes, budget overflow, and priority spam. Keep it off
    the consensus path.
 2. **Sponsor gateway.** Own provider credentials; atomically reserve worst-case
-   cost before calls; persist request IDs, actual usage and failures; sign
-   receipts only for calls made; reconcile with provider reports. The release
-   gate is an adversarial concurrent/retry/crash test in which the real bill
-   cannot exceed the sponsor ceiling. Record detailed timing and usage but
-   keep private prompts and responses under sponsor control.
+   native-currency cost before calls; persist request IDs, actual usage and
+   failures; sign receipts only for calls made; reconcile with provider
+   reports. The release gate is an adversarial concurrent/retry/crash test
+   in which the real bill cannot exceed the sponsor ceiling. Record detailed
+   timing and usage, and keep private prompts and responses under sponsor
+   control.
 3. **Held-out challenge pilot.** Fund a stratified pool with pinned checkers;
    preregister sampling, appeals and score calibration. Compare a cheap model,
    the required model at multiple effort limits, and human/compute baselines
