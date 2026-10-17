@@ -120,7 +120,10 @@ impl Server {
                              release it when done. Run computations with lab_exec so the \
                              environment, command and outputs are recorded together. A write \
                              that supersedes what you did not read becomes a visible conflict, \
-                             not an overwrite."
+                             not an overwrite. For live source text, use collab_read then \
+                             collab_edit with its exact heads and a stable request id. Task \
+                             lanes integrate only through collab_integrate. Text convergence \
+                             does not prove the combined program correct."
                     }),
                 )
             }
@@ -151,6 +154,11 @@ impl Server {
     fn call(&mut self, name: &str, args: &Json) -> Result<String, String> {
         // Other processes write to the same lab; read what they wrote first.
         self.lab.refresh().map_err(|e| e.to_string())?;
+        if let Some(command) = name.strip_prefix("collab_") {
+            return super::collab::call(&mut self.lab, Some(&self.identity), command, args)
+                .map(|value| value.to_string())
+                .map_err(|error| error.to_string());
+        }
         let text = |key: &str| args.get(key).and_then(Json::as_str).map(str::to_string);
         let need = |key: &str| text(key).ok_or_else(|| format!("{key} is required"));
         match name {
@@ -540,7 +548,7 @@ fn tools() -> Json {
         "idempotentHint": false,
         "openWorldHint": true
     });
-    json!([
+    let mut result = json!([
         { "name": "lab_status", "title": "Lab status", "annotations": ro.clone(),
           "description": "The space: name, op count, files, open conflicts, messages waiting for you, environments.",
           "inputSchema": { "type": "object", "properties": {} } },
@@ -605,7 +613,12 @@ fn tools() -> Json {
         { "name": "lab_runs", "title": "Lab run receipts", "annotations": ro.clone(),
           "description": "Recent run receipts, newest first.",
           "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer" } } } }
-    ])
+    ]);
+    result
+        .as_array_mut()
+        .expect("tool array")
+        .extend(super::collab::tools());
+    result
 }
 
 fn text_block(text: &str) -> Json {
@@ -699,6 +712,10 @@ mod tests {
             "lab_ack",
             "lab_exec",
             "lab_replay",
+            "collab_create",
+            "collab_edit",
+            "collab_integrate",
+            "collab_checkpoint",
         ];
         for tool in tools().as_array().expect("tools") {
             let name = tool["name"].as_str().expect("name");

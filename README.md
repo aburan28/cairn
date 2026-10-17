@@ -628,6 +628,11 @@ cannot be replaced — and runs experiments in content-addressed root filesystem
 (SageMath, PARI/GP, msolve) under gVisor, recording each run's receipt and
 outputs as one op. It settles nothing; see [docs/lab.md](docs/lab.md).
 
+For live source editing, [collaboration workspaces](docs/live-collaboration.md)
+add Unicode text CRDTs, isolated task lanes, explicit causal integration and
+immutable experiment checkpoints. CLI and MCP agents use the same protocol;
+continuous encrypted sync carries edits between replicas without Git.
+
 What all of this looks like while it runs is the reader's **Network** and
 **Coordination** pages (`/ui/network`, `/ui/coordination?id=…`): whom this
 node has actually reached (`GET /sessions`, from the daemon's own memory rather

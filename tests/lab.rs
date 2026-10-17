@@ -900,6 +900,7 @@ fn a_replica_of_another_space_is_refused_by_every_carrier() {
 fn two_replicas_sync_over_the_encrypted_transport_and_strangers_are_turned_away() {
     use cairn::p2p::handshake::{peer_id_hex, PeerIdentity};
     let alice = id(80);
+    let transport_member = id(81);
     let server_peer = PeerIdentity::generate();
     let client_peer = PeerIdentity::generate();
     let stranger_peer = PeerIdentity::generate();
@@ -909,8 +910,8 @@ fn two_replicas_sync_over_the_encrypted_transport_and_strangers_are_turned_away(
         &alice,
         "net",
         vec![Member {
-            key: alice.submitter_id(),
-            roles: [Role::Admin, Role::Writer].into_iter().collect(),
+            key: transport_member.submitter_id(),
+            roles: [Role::Reader].into_iter().collect(),
             peers: [peer_id_hex(&client_peer.id())].into_iter().collect(),
         }],
         Policy::default(),
@@ -964,6 +965,21 @@ fn two_replicas_sync_over_the_encrypted_transport_and_strangers_are_turned_away(
     assert!(
         stranger.space_id().is_err(),
         "an unlisted peer gets nothing"
+    );
+
+    // Continuous sync must not turn a once-authorized handshake into a
+    // permanent capability after its member has been revoked.
+    a.append(
+        &alice,
+        Body::Members {
+            admit: Vec::new(),
+            revoke: vec![transport_member.submitter_id()],
+        },
+    )
+    .expect("revoke transport member");
+    assert!(
+        remote.space_id().is_err(),
+        "an existing session loses access after revocation"
     );
 }
 
