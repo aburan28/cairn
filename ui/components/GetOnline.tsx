@@ -18,7 +18,10 @@ import { networkSetup } from "@/lib/deployment";
  */
 const DISMISSED_KEY = "cairn-get-online-dismissed";
 
-export function GetOnline() {
+export function GetOnline({
+  forceOpen = false,
+  onClose,
+}: { forceOpen?: boolean; onClose?: () => void } = {}) {
   const [open, setOpen] = useState(false);
   const [guide, setGuide] = useState(() => networkSetup(null));
 
@@ -32,8 +35,10 @@ export function GetOnline() {
     } catch {
       stored = null;
     }
-    setOpen(stored !== "1");
-  }, []);
+    // A remembered dismissal hides the automatic prompt, never an explicit
+    // recovery request from the persistent trigger.
+    setOpen(forceOpen || stored !== "1");
+  }, [forceOpen]);
 
   if (!open) return null;
 
@@ -44,6 +49,7 @@ export function GetOnline() {
     } catch {
       // Forgettable: the panel simply comes back next visit.
     }
+    onClose?.();
   };
 
   return (
@@ -99,7 +105,7 @@ export function GetOnlineLink({ className = "" }: { className?: string }) {
       >
         Get this node online →
       </button>
-      {open && <GetOnline />}
+      {open && <GetOnline forceOpen onClose={() => setOpen(false)} />}
     </>
   );
 }
