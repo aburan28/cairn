@@ -1012,6 +1012,63 @@ mod tests {
         assert!(!profile.contains("(subpath \"/\")"));
     }
 
+    /// The profile above, run by the real `sandbox-exec`. Its text can be
+    /// checked anywhere; whether macOS reads it the way it is written cannot,
+    /// and a profile that is too tight fails every verdict on a Mac as
+    /// `Unavailable` rather than any test here. CI's `jail-macos` job runs
+    /// this with `CAIRN_EXPECT_SANDBOX=sandbox-exec`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn under_seatbelt_a_bundle_in_home_runs_and_the_rest_of_home_is_not_seen() {
+        if !matches!(mechanism(), Mechanism::Seatbelt(_)) {
+            return;
+        }
+        let home = configured_home().expect("HOME");
+        let tag = format!("cairn-seatbelt-probe-{}", std::process::id());
+        let bundle = home.join(&tag).join("bundle");
+        let secret = home.join(format!(".{tag}-secret"));
+        let work = std::env::temp_dir().join(format!("{tag}-work"));
+        for dir in [&bundle, &work] {
+            std::fs::create_dir_all(dir).expect("dir");
+        }
+        std::fs::write(bundle.join("checker.py"), "print('checked')\n").expect("checker");
+        std::fs::write(&secret, "operator data\n").expect("secret");
+
+        let plan = Confinement::new(&work, &bundle, 10).scrubbed();
+        let script = "if [ -e \"$1\" ]; then echo seen; else echo hidden; fi; \
+                      /usr/bin/python3 \"$2\"; ls \"$3\" >/dev/null && echo listed";
+        let args = argv([
+            OsStr::new("-c"),
+            OsStr::new(script),
+            OsStr::new("sh"),
+            secret.as_os_str(),
+            bundle.join("checker.py").as_os_str(),
+            bundle.as_os_str(),
+        ]);
+        let jailed = confine(Path::new("/bin/sh"), &args, &plan).expect("a seatbelt jail");
+        assert_eq!(jailed.mechanism, "sandbox-exec");
+        let mut command = jailed.command;
+        let output = command.output().expect("runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = std::fs::remove_dir_all(home.join(&tag));
+        let _ = std::fs::remove_file(&secret);
+        let _ = std::fs::remove_dir_all(&work);
+
+        assert!(
+            stdout.contains("hidden"),
+            "a home file was stat-able:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("checked"),
+            "the bundle's checker did not run:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("listed"),
+            "the bundle did not resolve:\n{stdout}\n{stderr}"
+        );
+    }
+
     /// A stat is a fact too. Under home directories only the granted paths,
     /// and the directories above them, may be looked at.
     #[test]
