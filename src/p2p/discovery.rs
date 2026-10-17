@@ -101,6 +101,52 @@ pub fn dialable_via(addr: &str, proxy: &super::proxy::Proxy) -> Option<SocketAdd
     addr.parse::<SocketAddr>().ok()
 }
 
+/// The address a *signed hint* -- a gossiped peer record, or one in the log --
+/// may put in the routing table: a literal `IP:port` this node could
+/// plausibly reach on purpose, and nothing else.
+///
+/// Stricter than [`dialable`] on two counts, and both are about who wrote the
+/// address. A hint's signer is a free identity, so "a hostile answer costs a
+/// failed handshake" is true of the *peer* it names and says nothing about
+/// where the dial lands. Two things follow:
+///
+/// - **No name is resolved.** The hint paths run while the daemon holds the
+///   node's lock, and [`dialable`]'s `to_socket_addrs` blocks for as long as
+///   the zone's owner likes -- every inbound session waits behind it. A
+///   bootstrap file or the seed list may still carry a name; they are the
+///   operator's, and are resolved off the lock.
+/// - **Loopback, link-local, unspecified, multicast and broadcast are
+///   refused.** A stranger who can name `127.0.0.1:6379` or
+///   `169.254.169.254:80` gets this node to open connections to its own
+///   host's services and its cloud's metadata endpoint, which is a request
+///   forgery whatever the handshake then decides. Private (RFC 1918) and
+///   unique-local addresses are kept: they are what a LAN fleet is.
+///
+/// An IPv4-mapped IPv6 address is judged as the IPv4 address it maps, or
+/// `::ffff:127.0.0.1` would walk straight through the loopback rule.
+pub fn routable_hint(addr: &str) -> Option<SocketAddr> {
+    let parsed = addr.parse::<SocketAddr>().ok()?;
+    if parsed.port() == 0 {
+        return None;
+    }
+    let refused = match parsed.ip().to_canonical() {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast()
+        }
+    };
+    (!refused).then_some(parsed)
+}
+
 /// Errors while decoding peer ids or registering an endpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiscoveryError {
@@ -128,9 +174,9 @@ pub fn parse_peer_id(text: &str) -> Result<PeerId, DiscoveryError> {
     // pair boundary would panic, and `from_str_radix` accepts a sign.
     let digit = |byte: u8| char::from(byte).to_digit(16);
     let mut id = [0u8; 32];
-    for (byte, &[high, low]) in id.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
-        *byte = digit(high)
-            .zip(digit(low))
+    for (byte, [high, low]) in id.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
+        *byte = digit(*high)
+            .zip(digit(*low))
             .and_then(|(high, low)| u8::try_from(high << 4 | low).ok())
             .ok_or_else(|| DiscoveryError::BadPeerId { value: text.into() })?;
     }
@@ -286,6 +332,42 @@ fn pick<R: RngCore>(bound: usize, rng: &mut R) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_hint_may_name_a_reachable_literal_and_not_this_host_or_a_name() {
+        for kept in [
+            "203.0.113.7:9000",
+            "10.1.2.3:9000",
+            "192.168.1.20:9000",
+            "[2001:db8::1]:9000",
+            "[fd00::1]:9000",
+        ] {
+            assert!(super::routable_hint(kept).is_some(), "{kept} was refused");
+        }
+        for refused in [
+            "127.0.0.1:9000",
+            "127.8.8.8:9000",
+            "0.0.0.0:9000",
+            "169.254.169.254:80",
+            "224.0.0.251:5353",
+            "255.255.255.255:9000",
+            "[::1]:9000",
+            "[::]:9000",
+            "[fe80::1]:9000",
+            "[ff02::1]:9000",
+            // The loopback rule, smuggled through the mapped form.
+            "[::ffff:127.0.0.1]:9000",
+            "203.0.113.7:0",
+            // A name is never resolved on a hint path, whatever it names.
+            "localhost:9000",
+            "peer.example.com:9000",
+        ] {
+            assert!(
+                super::routable_hint(refused).is_none(),
+                "{refused} was kept"
+            );
+        }
+    }
+
     #[test]
     fn a_peer_id_with_a_multibyte_character_is_refused_not_a_panic() {
         let text = format!("a\u{e9}{}", "a".repeat(61));

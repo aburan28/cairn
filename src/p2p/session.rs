@@ -299,6 +299,11 @@ where
     };
     let differing = peer.inventory().differing(&remote_inventory);
     let mut want = Vec::new();
+    // One budget for the whole round, not one per bucket: see
+    // `Peer::want_from_within`. Every differing bucket is still exchanged
+    // once the budget is spent, because the peer sends its ids for each in
+    // lockstep and stopping early would desynchronise the session.
+    let mut budget = peer.want_budget();
     for bucket in differing {
         send(
             connection,
@@ -314,7 +319,7 @@ where
                 None
             }
         })?;
-        want.extend(peer.want_from(&ids)?);
+        want.extend(peer.want_from_within(&ids, &mut budget)?);
     }
     send(connection, Message::Want { ids: want })?;
     let remote_want = expect(receive(connection)?, "want", |m| {

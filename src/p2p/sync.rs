@@ -151,15 +151,7 @@ impl std::error::Error for SyncError {}
 
 /// The 32 id bytes behind a `sha256:<hex>` string.
 fn id_bytes(id: &str) -> Option<[u8; 32]> {
-    let hex = id.strip_prefix("sha256:")?;
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(out)
+    unhex(id.strip_prefix("sha256:")?)
 }
 
 /// A compact summary of which records a peer holds.
@@ -280,13 +272,26 @@ fn hex(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Exactly 64 *lowercase* hex digits, byte by byte.
+///
+/// Not `u8::from_str_radix` over two-character slices, which takes a sign:
+/// `"+f"` parses as `0x0f`, so one id had several spellings that all decoded
+/// to the same bucket and the same bytes while comparing unequal as strings
+/// -- and every map here is keyed on the string. Uppercase is refused for the
+/// same reason; a digest is only ever written lowercase.
 fn unhex(text: &str) -> Option<[u8; 32]> {
-    if text.len() != 64 {
+    let digit = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    let bytes = text.as_bytes();
+    if bytes.len() != 64 {
         return None;
     }
     let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    for (byte, [high, low]) in out.iter_mut().zip(bytes.as_chunks::<2>().0) {
+        *byte = digit(*high)? << 4 | digit(*low)?;
     }
     Some(out)
 }
@@ -672,7 +677,37 @@ impl Peer {
     /// Given a peer's id list for a bucket, what to ask for.
     ///
     /// Records the request, so anything arriving unrequested is refused.
+    /// At most `max_records_per_message` ids; a round that spans several
+    /// buckets shares one budget through [`Peer::want_from_within`].
     pub fn want_from(&mut self, ids: &[String]) -> Result<Vec<String>, SyncError> {
+        let mut budget = self.want_budget();
+        self.want_from_within(ids, &mut budget)
+    }
+
+    /// How many records one round may ask for: what one `Records` message
+    /// may carry, since a round's whole `Want` is answered by one.
+    pub fn want_budget(&self) -> usize {
+        self.limits.max_records_per_message
+    }
+
+    /// [`Peer::want_from`] against a budget shared by every bucket of a round,
+    /// spending it as ids are taken.
+    ///
+    /// The cap used to be per *bucket*: 256 buckets of up to
+    /// `max_ids_per_message` ids each let one peer make this node record
+    /// millions of outstanding wants in a round. And it broke honest sync,
+    /// because the whole `Want` is served in one `Records` message and an
+    /// honest `serve` refuses one above `max_records_per_message` -- so any
+    /// node more than 512 records behind asked for everything, was refused
+    /// everything, and never caught up. Asking for at most a message's worth
+    /// and leaving the rest for the next round converges; asking for it all at
+    /// once does not. Ids past the budget are still checked for shape, so a
+    /// malformed list is refused however late in the round it arrives.
+    pub fn want_from_within(
+        &mut self,
+        ids: &[String],
+        budget: &mut usize,
+    ) -> Result<Vec<String>, SyncError> {
         if ids.len() > self.limits.max_ids_per_message {
             return Err(SyncError::TooMany {
                 limit: self.limits.max_ids_per_message,
@@ -684,8 +719,9 @@ impl Peer {
             if id_bytes(id).is_none() {
                 return Err(SyncError::MalformedId { id: id.clone() });
             }
-            if !self.held.contains_key(id) && self.outstanding.insert(id.clone()) {
+            if *budget > 0 && !self.held.contains_key(id) && self.outstanding.insert(id.clone()) {
                 want.push(id.clone());
+                *budget -= 1;
             }
         }
         Ok(want)
@@ -817,11 +853,15 @@ where
     // Each side asks for what the other has in the differing buckets.
     let mut want_a = Vec::new();
     let mut want_b = Vec::new();
+    let (mut budget_a, mut budget_b) = (a.want_budget(), b.want_budget());
     for bucket in differing {
         let theirs = b.bucket_ids(bucket);
-        want_a.extend(a.want_from(&theirs).unwrap_or_default());
+        want_a.extend(
+            a.want_from_within(&theirs, &mut budget_a)
+                .unwrap_or_default(),
+        );
         let mine = a.bucket_ids(bucket);
-        want_b.extend(b.want_from(&mine).unwrap_or_default());
+        want_b.extend(b.want_from_within(&mine, &mut budget_b).unwrap_or_default());
     }
 
     let to_a = b.serve(&want_a).unwrap_or_default();
@@ -1107,6 +1147,62 @@ mod tests {
         assert_eq!(report.accepted, vec![good.id()]);
         assert_eq!(report.refused.len(), 1);
         assert!(a.holds(&good.id()));
+    }
+
+    #[test]
+    fn a_node_far_behind_catches_up_a_message_at_a_time() {
+        // 1,200 records behind, against a 512-record message. Asking for the
+        // whole difference at once was refused by the honest side's `serve`,
+        // so the gap never closed; one budget per round closes it in three.
+        let mut ahead = peer_with(0..1_200);
+        let mut behind = Peer::new();
+        let mut rounds = 0;
+        while behind.len() < ahead.len() {
+            rounds += 1;
+            assert!(
+                rounds <= 3,
+                "still {} records behind",
+                ahead.len() - behind.len()
+            );
+            let before = behind.len();
+            let (report, _) = reconcile(&mut behind, &mut ahead, accept_all);
+            assert!(report.is_clean(), "{:?}", report.refused);
+            assert!(behind.len() - before <= behind.want_budget());
+        }
+        assert_eq!(behind.len(), 1_200);
+    }
+
+    #[test]
+    fn one_rounds_wants_share_one_budget_across_buckets() {
+        let mut a = Peer::with_limits(Limits {
+            max_records_per_message: 3,
+            ..Limits::default()
+        });
+        let mut budget = a.want_budget();
+        let first: Vec<String> = (0..2).map(|n| claim(n).id()).collect();
+        let second: Vec<String> = (2..6).map(|n| claim(n).id()).collect();
+        assert_eq!(a.want_from_within(&first, &mut budget).unwrap().len(), 2);
+        assert_eq!(a.want_from_within(&second, &mut budget).unwrap().len(), 1);
+        assert_eq!(a.outstanding(), 3, "wants past the budget were recorded");
+        // Spent, and still checked: a malformed id past the budget is refused.
+        assert!(matches!(
+            a.want_from_within(&["sha256:nope".to_string()], &mut budget),
+            Err(SyncError::MalformedId { .. })
+        ));
+    }
+
+    #[test]
+    fn an_id_has_exactly_one_spelling() {
+        let good = "0f".repeat(32);
+        assert_eq!(unhex(&good), Some([0x0f; 32]));
+        // `from_str_radix` read "+f" as 0x0f, and uppercase as the same byte:
+        // three strings for one id.
+        assert_eq!(unhex(&format!("+f{}", "0f".repeat(31))), None);
+        assert_eq!(unhex(&"0F".repeat(32)), None);
+        assert_eq!(id_bytes(&format!("sha256:{good}")), Some([0x0f; 32]));
+        assert_eq!(id_bytes(&format!("sha256:+f{}", "0f".repeat(31))), None);
+        // Multi-byte input of the right byte length is refused, not a panic.
+        assert_eq!(unhex(&format!("\u{e9}{}", "0".repeat(62))), None);
     }
 
     #[test]

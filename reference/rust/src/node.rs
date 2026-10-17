@@ -1923,7 +1923,11 @@ impl Node {
                  lowercase hex"
             ));
         };
-        let seed = crate::vdf::seed(orders, self.ledger.root_at(positions).as_deref());
+        let seed = crate::vdf::seed(
+            orders,
+            self.ledger.root_at(positions).as_deref(),
+            difficulty,
+        );
         if crate::vdf::verify(&seed, difficulty, &output, &witness) {
             None
         } else {

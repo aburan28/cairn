@@ -831,7 +831,7 @@ fn a_node_handed_a_log_is_handed_the_network_with_it() {
     use cairn::records::PeerRecord;
 
     let carol = PeerIdentity::generate();
-    let carol_addr: std::net::SocketAddr = "127.0.0.1:9401".parse().expect("loopback");
+    let carol_addr: std::net::SocketAddr = "192.0.2.10:9401".parse().expect("literal");
     let announcer = cairn::crypto::identity::Identity::from_secret_bytes([11u8; 32]);
 
     let mut writer = Node::new(
@@ -962,8 +962,8 @@ fn a_replayed_peer_record_cannot_steer_the_routing_table_back() {
     use cairn::records::PeerRecord;
 
     let moved = PeerIdentity::generate();
-    let old_addr: std::net::SocketAddr = "127.0.0.1:9501".parse().expect("loopback");
-    let new_addr: std::net::SocketAddr = "127.0.0.1:9502".parse().expect("loopback");
+    let old_addr: std::net::SocketAddr = "192.0.2.10:9501".parse().expect("literal");
+    let new_addr: std::net::SocketAddr = "192.0.2.10:9502".parse().expect("literal");
     let announcer = cairn::crypto::identity::Identity::from_secret_bytes([21u8; 32]);
     let transport = cairn::p2p::dht::NodeId::from_bytes(moved.id());
 
@@ -1041,7 +1041,7 @@ fn a_peer_record_a_node_cannot_parse_is_skipped_not_fatal() {
             &PeerRecord::new(
                 other.submitter_id(),
                 cairn::p2p::dht::NodeId::from_bytes(reachable.id()).to_hex(),
-                "127.0.0.1:9402",
+                "192.0.2.10:9402",
                 1,
                 TS,
             )

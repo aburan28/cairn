@@ -134,6 +134,10 @@ pub struct Service {
     /// seconds and a dial that times out costs ten, so without this one dead
     /// address would pin the loop.
     key_fetches: Mutex<BTreeMap<PeerId, Instant>>,
+    /// Keyless contacts the log names, queued by [`Service::seed_from_log`]
+    /// under the node's lock and asked by [`Service::fetch_logged_keys`] after
+    /// it is released. Replaced, not appended, each tick.
+    logged_keyless: Mutex<Vec<(PeerId, SocketAddr)>>,
     /// Who holds which blob, and whom to route through to find out.
     ///
     /// Behind a `Mutex` because every dial and accept path takes `&self` — a
@@ -189,6 +193,7 @@ impl Service {
             allowed: None,
             book: Mutex::new(AddressBook::new()),
             key_fetches: Mutex::new(BTreeMap::new()),
+            logged_keyless: Mutex::new(Vec::new()),
             peer_hints: Mutex::new(peers::Hints::new()),
             directory: Mutex::new(Directory::new(local)),
             hints: Mutex::new(std::collections::BTreeMap::new()),
@@ -346,8 +351,20 @@ impl Service {
     }
 
     /// Drop lapsed DHT state. Run once a tick; see [`Directory::expire`].
+    ///
+    /// Also forgets key-fetch attempts older than [`KEY_FETCH_BACKOFF`]. An
+    /// entry past its backoff decides nothing -- `may_ask_for_key` would allow
+    /// the ask either way -- and every hint source can name a fresh id for
+    /// free, so without this the map grew by one entry per id anybody ever
+    /// named, for the life of the process.
     pub fn expire(&self, now: u64) -> usize {
+        self.prune_key_fetches(Instant::now());
         self.with_directory(|directory| directory.expire(now))
+    }
+
+    fn prune_key_fetches(&self, now: Instant) {
+        let mut fetches = self.key_fetches.lock().unwrap_or_else(|e| e.into_inner());
+        fetches.retain(|_, last| now.duration_since(*last) < KEY_FETCH_BACKOFF);
     }
 
     /// The endpoints worth dialling when specific blobs are missing.
@@ -539,14 +556,17 @@ impl Service {
             // The address is a hint and this is the one place it is resolved.
             // The record format deliberately does not decide what a valid
             // address is -- see `records::MAX_PEER_ADDR` -- so a form this
-            // build cannot dial is skipped here rather than refused there.
+            // build will not dial is skipped here rather than refused there.
             //
-            // `dialable` accepts a hostname as well as a literal, which is what
-            // lets a peer record name a host whose address moves. It is safe to
-            // take from a stranger for the reason `discovery::dialable` gives:
-            // the peer id is the hash of the key, so a hostile answer costs a
-            // failed handshake and never a wrong peer.
-            let Some(addr) = crate::p2p::discovery::dialable_via(&record.addr, &self.proxy) else {
+            // A literal, and one that is not this host: see
+            // `discovery::routable_hint`. This runs under the daemon's node
+            // lock every tick, so a name in a record used to be a DNS lookup
+            // every inbound session waited behind, and the log replicates
+            // peer records other operators admitted -- so "this node's own
+            // log" is not the same thing as "this operator's address". A
+            // host whose address moves belongs in a bootstrap file or the
+            // seed list, which are resolved off the lock.
+            let Some(addr) = crate::p2p::discovery::routable_hint(&record.addr) else {
                 continue;
             };
             // The record's own signed sequence, not zero. `Node::peers` has
@@ -562,10 +582,35 @@ impl Service {
             seeded += 1;
         }
         // A log-named peer with an address and no key was, until now, a
-        // contact this node could only reach through some third peer. Ask it
-        // directly, the way a beacon contact is asked.
-        self.fetch_missing_keys(&keyless, KEY_FETCHES_PER_TICK);
+        // contact this node could only reach through some third peer, so it
+        // is asked directly -- but not *here*. The caller holds the node's
+        // lock, and a key request is a blocking dial of up to `DIAL_TIMEOUT`
+        // each: four dead addresses in the log held every inbound session for
+        // forty seconds a tick. Queued, and `fetch_logged_keys` asks once the
+        // lock is released.
+        *self
+            .logged_keyless
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = keyless;
         seeded
+    }
+
+    /// Ask the keyless contacts the last [`Service::seed_from_log`] queued for
+    /// their keys, directly. Returns how many keys were learned.
+    ///
+    /// Blocking, so call it **without** the node's lock held -- that is the
+    /// whole reason it is separate. Never retried on loopback: that retry is
+    /// for a beacon, whose address is a datagram's source on this segment; for
+    /// an address somebody wrote into a record it would knock on whatever
+    /// local service owns that port.
+    pub fn fetch_logged_keys(&self) -> usize {
+        let queued = std::mem::take(
+            &mut *self
+                .logged_keyless
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        self.fetch_missing_keys(&queued, KEY_FETCHES_PER_TICK, false)
     }
 
     /// How many peer identities the hint store currently holds.
@@ -594,7 +639,7 @@ impl Service {
     }
 
     /// Fold every held hint into the routing table, exactly as
-    /// [`Service::seed_from_log`] folds the log's records: address resolved at
+    /// [`Service::seed_from_log`] folds the log's records: address checked at
     /// the edge, the record's own signed `seq` carried through, and the
     /// McEliece key queued for any peer the book cannot yet dial.
     ///
@@ -603,8 +648,16 @@ impl Service {
     /// admitted, one gossip delivered — and the routing table is exactly the
     /// place where an untrusted address hint is allowed to matter, because a
     /// wrong one costs a dial and never a wrong peer.
+    ///
+    /// Unlike the log path, **no key is fetched directly** from a gossiped
+    /// contact, now or later. A hint's signer is a free identity and so is the
+    /// transport id it names, so a direct fetch let anybody with a session
+    /// point this node at an address of their choosing -- with the node's lock
+    /// held, mid-session -- and have it send a hello-sized 261 KiB frame
+    /// there, once per freshly minted id. The want is queued, and the DHT's
+    /// `GetKey` round fetches the key from a peer this node already talks to,
+    /// which costs a stranger's hint nothing it could aim.
     fn seed_from_hints(&self) {
-        let mut keyless = Vec::new();
         let records: Vec<PeerRecord> = {
             let hints = self.peer_hints.lock().unwrap_or_else(|e| e.into_inner());
             hints.records().cloned().collect()
@@ -616,7 +669,9 @@ impl Service {
             if transport == self.identity.id() {
                 continue;
             }
-            let Some(addr) = crate::p2p::discovery::dialable_via(&record.addr, &self.proxy) else {
+            // Literal and off this host, never resolved: see
+            // `discovery::routable_hint`. This runs inside a session.
+            let Some(addr) = crate::p2p::discovery::routable_hint(&record.addr) else {
                 continue;
             };
             self.note_contact_at(transport, addr, record.seq);
@@ -624,10 +679,8 @@ impl Service {
                 self.with_directory(|directory| {
                     directory.wants_key(NodeId::from_bytes(transport));
                 });
-                keyless.push((transport, addr));
             }
         }
-        self.fetch_missing_keys(&keyless, KEY_FETCHES_PER_TICK);
     }
 
     /// Run the peer-hint round on an established connection.
@@ -684,7 +737,8 @@ impl Service {
             }
             taken += 1;
         }
-        self.fetch_missing_keys(&keyless, KEY_FETCHES_PER_TICK);
+        // Beacons alone keep the loopback retry: see `fetch_missing_keys`.
+        self.fetch_missing_keys(&keyless, KEY_FETCHES_PER_TICK, true);
         taken
     }
 
@@ -695,7 +749,17 @@ impl Service {
     /// for keys too, rather than staying keyless for every peer its log and
     /// gossip name. Bounded per call and backed off per peer, because every
     /// attempt here is a blocking dial on the daemon's tick thread.
-    pub fn fetch_missing_keys(&self, contacts: &[(PeerId, SocketAddr)], limit: usize) -> usize {
+    ///
+    /// `retry_on_loopback` is for beacons and nothing else: see the comment at
+    /// the request below for why a beacon needs it, and
+    /// [`Service::fetch_logged_keys`] for why an address from a record must
+    /// not have it.
+    pub fn fetch_missing_keys(
+        &self,
+        contacts: &[(PeerId, SocketAddr)],
+        limit: usize,
+        retry_on_loopback: bool,
+    ) -> usize {
         let mut learned = 0;
         let mut asked = 0;
         let now = Instant::now();
@@ -722,8 +786,10 @@ impl Service {
             // node on *this* host that listens on loopback only is not there.
             // So a refused request is retried on loopback at the same port.
             // Reaching some other local node that way is harmless: its key
-            // does not hash to the id asked for and is dropped.
-            match self.request_key_into_book(peer, *addr, true) {
+            // does not hash to the id asked for and is dropped. Only a beacon
+            // earns that, because only a beacon's address was observed on this
+            // segment rather than written by somebody.
+            match self.request_key_into_book(peer, *addr, retry_on_loopback) {
                 Ok(reached) => {
                     log::info!(
                         "learned the transport key of {} from {reached}; it is dialable now",
@@ -1306,7 +1372,30 @@ fn exchange_records_and_code(
     // work this node accepted; a claim whose checker is still missing simply
     // records `Unavailable`, which is the truth and leaves the objective open.
     apply_records(node, &peer);
+    // The want set was computed from *staged* objectives, so the peer chose
+    // some of what it contained: an objective the rules then refused -- bad
+    // reward, unknown funder, a future timestamp -- still had its "checker"
+    // fetched and written, and nothing would ever pin or collect it. Only the
+    // blobs this round wrote are candidates; anything already on disk may be
+    // pinned by an objective this node has not synced yet, which is why
+    // collection is otherwise an operator's command (`BlobStore::retain`).
+    if let Ok(report) = &code {
+        discard_unpinned(node, &store, &report.stored);
+    }
     code.map(|report| (report, needs, said)).map_err(Into::into)
+}
+
+/// Remove each of `stored` that no objective in `node`'s log pins.
+fn discard_unpinned(node: &Node, store: &crate::blobs::BlobStore, stored: &BTreeSet<String>) {
+    if stored.is_empty() {
+        return;
+    }
+    let pinned = node.pinned_code();
+    for address in stored.difference(&pinned) {
+        if let Ok(path) = store.path_of(address) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// The content addresses this node will need once `peer`'s objectives are
@@ -1599,6 +1688,163 @@ mod tests {
     use super::*;
     use crate::canonical::Value;
     use crate::ledger::Ledger;
+
+    /// A peer record in the log is a hint somebody else may have written --
+    /// the log replicates them -- and `seed_from_log` runs under the daemon's
+    /// node lock. So it must neither resolve a name, nor take an address on
+    /// this host, nor dial anything: the one dialable record here names a
+    /// TEST-NET address that would take `DIAL_TIMEOUT` to fail, and is queued
+    /// for `fetch_logged_keys` instead.
+    #[test]
+    fn seeding_from_the_log_takes_only_reachable_literals_and_never_dials() {
+        use crate::records::PeerRecord;
+        let root = std::env::temp_dir().join(format!("cairn-p2p-log-hints-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut node = Node::new(Ledger::open(root.join("log.jsonl")).unwrap(), &root);
+        let ts = "2026-08-18T00:00:00+00:00";
+        let addrs = [
+            "203.0.113.9:9000",
+            "127.0.0.1:9000",
+            "169.254.169.254:80",
+            "[fe80::1]:9000",
+            "localhost:9000",
+        ];
+        for (n, addr) in addrs.iter().enumerate() {
+            let announcer =
+                crate::crypto::identity::Identity::from_secret_bytes([40 + n as u8; 32]);
+            let record = PeerRecord::new(
+                announcer.submitter_id(),
+                NodeId::from_bytes([n as u8 + 1; 32]).to_hex(),
+                *addr,
+                1,
+                ts,
+            )
+            .signed_with(&announcer);
+            node.post_peer(&record, ts)
+                .expect("an address is never a record rule");
+        }
+
+        let service = Service::new(Arc::new(PeerIdentity::generate()));
+        let started = Instant::now();
+        assert_eq!(
+            service.seed_from_log(&node),
+            1,
+            "only the public literal is a contact"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "seed_from_log dialled under the caller's lock"
+        );
+        let routed: Vec<SocketAddr> =
+            service.with_directory(|d| d.routing().contacts().map(|c| c.addr).collect());
+        assert_eq!(routed, vec!["203.0.113.9:9000".parse().unwrap()]);
+        let queued = service.logged_keyless.lock().unwrap().clone();
+        assert_eq!(
+            queued,
+            vec![([1u8; 32], "203.0.113.9:9000".parse().unwrap())]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_key_fetch_past_its_backoff_is_forgotten() {
+        let service = Service::new(Arc::new(PeerIdentity::generate()));
+        let now = Instant::now();
+        let Some(old) = now.checked_sub(KEY_FETCH_BACKOFF + Duration::from_secs(1)) else {
+            // A monotonic clock this close to its origin cannot express the
+            // past this needs; nothing to test on such a host.
+            return;
+        };
+        {
+            let mut fetches = service.key_fetches.lock().unwrap();
+            fetches.insert([1; 32], old);
+            fetches.insert([2; 32], now);
+        }
+        service.prune_key_fetches(now);
+        let held: Vec<PeerId> = service
+            .key_fetches
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        assert_eq!(
+            held,
+            vec![[2; 32]],
+            "a stale attempt was kept, or a live one dropped"
+        );
+        // And the live one still backs off.
+        assert!(!service.may_ask_for_key(&[2; 32], now));
+        assert!(service.may_ask_for_key(&[1; 32], now));
+    }
+
+    /// The code round runs before `apply_records`, from the *staged*
+    /// objectives' pins, so a peer that sends an objective the rules will
+    /// refuse still gets its "checker" written. What the round wrote and no
+    /// admitted objective pins is removed once the records are applied.
+    #[test]
+    fn code_fetched_for_a_refused_objective_does_not_stay_on_disk() {
+        let root = std::env::temp_dir().join(format!("cairn-p2p-unpinned-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut node = Node::new(Ledger::open(root.join("log.jsonl")).unwrap(), &root);
+        let kept = b"def check(artifact):\n    return True\n".to_vec();
+        let planted = b"#!/bin/sh\necho planted\n".to_vec();
+        let objective = |id: &str, code: &[u8], at: &str| {
+            Objective::new(
+                id,
+                "pins one checker",
+                Value::object([
+                    ("kind", Value::string("certificate")),
+                    ("checker", Value::string("checker.py")),
+                    ("checker_sha256", Value::string(crate::blobs::address(code))),
+                    ("entrypoint", Value::string("check")),
+                ]),
+                1,
+                "treasury",
+                at,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let now = "2026-08-18T00:00:00+00:00";
+        replay_records_at(
+            &mut node,
+            &[
+                (
+                    "objective".into(),
+                    objective("GOAL-kept", &kept, now).to_value(),
+                ),
+                // Refused: stamped after the local horizon.
+                (
+                    "objective".into(),
+                    objective("GOAL-refused", &planted, "9999-01-01T00:00:00+00:00").to_value(),
+                ),
+            ],
+            now,
+        );
+        assert_eq!(node.objectives().len(), 1, "the fixture needs one refusal");
+
+        let store = node.registry().blobs().clone();
+        let mut stored = BTreeSet::new();
+        for body in [&kept, &planted] {
+            let address = crate::blobs::address(body);
+            store.put(&address, body).unwrap();
+            stored.insert(address);
+        }
+        discard_unpinned(&node, &store, &stored);
+        assert!(
+            store.holds(&crate::blobs::address(&kept)),
+            "a pinned blob was removed"
+        );
+        assert!(
+            !store.holds(&crate::blobs::address(&planted)),
+            "a blob only a refused objective pinned stayed on disk"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn a_future_record_cannot_advance_the_local_settlement_clock() {

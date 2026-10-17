@@ -458,7 +458,7 @@ fn parse_node_id(text: &str) -> Result<NodeId, DhtError> {
     // multi-byte character across a pair boundary, and slicing there panics.
     let mut raw = [0u8; 32];
     for (slot, pair) in raw.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
-        *slot = hex_pair(pair).ok_or_else(|| DhtError::Malformed {
+        *slot = hex_pair(*pair).ok_or_else(|| DhtError::Malformed {
             detail: format!("{text:?} is not hexadecimal"),
         })?;
     }
@@ -467,12 +467,9 @@ fn parse_node_id(text: &str) -> Result<NodeId, DhtError> {
 
 /// One byte from two ASCII hex digits; `None` for anything else, a sign
 /// included, which `u8::from_str_radix` would accept.
-fn hex_pair(pair: &[u8]) -> Option<u8> {
+fn hex_pair([high, low]: [u8; 2]) -> Option<u8> {
     let digit = |byte: u8| char::from(byte).to_digit(16);
-    match pair {
-        [high, low] => Some(u8::try_from(digit(*high)? << 4 | digit(*low)?).ok()?),
-        _ => None,
-    }
+    u8::try_from(digit(high)? << 4 | digit(low)?).ok()
 }
 
 /// Hex-encode a public key for a [`DhtMessage::Keys`].
@@ -800,7 +797,22 @@ pub struct Directory {
     /// could answer -- a dead peer, or a made-up id -- was asked for every
     /// round forever and every other want behind it starved.
     key_cursor: Option<NodeId>,
+    /// How many rounds each want has been asked for without an answer.
+    ///
+    /// What lets a want *age*. The queue is capped, and before this nothing
+    /// ever left it but an answer: fill it with ids nobody holds -- free to
+    /// mint, and gossip and beacons deliver them -- and every later want was
+    /// dropped at the cap, so key discovery stopped for the life of the
+    /// process. See [`Directory::expire`].
+    key_asks: BTreeMap<NodeId, u32>,
 }
+
+/// Rounds a key want is asked for before it is dropped as unanswerable.
+///
+/// A dropped want costs nothing permanent: the next sighting of the contact
+/// queues it again, at the back of the rotation. An id nobody re-announces
+/// stays dropped, which is the point.
+pub const MAX_KEY_ASKS: u32 = 8;
 
 /// Key wants held at once.
 ///
@@ -822,6 +834,7 @@ impl Directory {
             outstanding: BTreeMap::new(),
             key_wants: BTreeSet::new(),
             key_cursor: None,
+            key_asks: BTreeMap::new(),
         }
     }
 
@@ -973,6 +986,18 @@ impl Directory {
         let held = |id: &NodeId| routing.contacts().any(|held| held.id() == *id);
         self.failures.retain(|id, _| held(id));
         self.pending.retain(|probe, _| held(probe));
+        // A key is wanted to dial a contact, so a want for a contact neither
+        // held nor parked is for nobody, and one asked for `MAX_KEY_ASKS`
+        // rounds unanswered is for somebody nobody can name. Both go, so the
+        // capped queue always has room for the next real contact.
+        let mut known: BTreeSet<NodeId> = routing.contacts().map(|held| held.id()).collect();
+        known.extend(self.pending.values().map(|parked| parked.id()));
+        let asks = &self.key_asks;
+        self.key_wants.retain(|want| {
+            known.contains(want) && asks.get(want).copied().unwrap_or(0) < MAX_KEY_ASKS
+        });
+        let wants = &self.key_wants;
+        self.key_asks.retain(|want, _| wants.contains(want));
         if self.lookups.is_empty() {
             // Deferral counts belong to lookups; with none in flight there is
             // nothing for them to bound.
@@ -1301,10 +1326,15 @@ impl Directory {
         if let Some(last) = asked.last() {
             self.key_cursor = Some(*last);
         }
+        for want in asked {
+            let asks = self.key_asks.entry(*want).or_insert(0);
+            *asks = asks.saturating_add(1);
+        }
     }
 
     /// Record that a key is now held, or that asking for it is pointless.
     pub fn resolved_key(&mut self, peer: NodeId) -> bool {
+        self.key_asks.remove(&peer);
         self.key_wants.remove(&peer)
     }
 
@@ -2187,6 +2217,52 @@ mod tests {
             directory.wants_key(NodeId::from_bytes(raw));
         }
         assert_eq!(directory.key_wants.len(), MAX_KEY_WANTS);
+    }
+
+    #[test]
+    fn key_wants_for_nobody_or_never_answered_age_out() {
+        // The queue is capped and only an answer used to empty it, so a burst
+        // of made-up ids filled it for good and no later contact was ever
+        // asked for. Expiry is what makes room.
+        let mut directory = Directory::new(peer(1));
+        for n in 0..(MAX_KEY_WANTS as u32 + 10) {
+            let mut raw = [0u8; 32];
+            raw[..4].copy_from_slice(&n.to_be_bytes());
+            raw[31] = 0xaa;
+            directory.wants_key(NodeId::from_bytes(raw));
+        }
+        assert_eq!(directory.key_wants.len(), MAX_KEY_WANTS);
+        directory.expire(0);
+        assert!(
+            directory.key_wants.is_empty(),
+            "wants for contacts nobody holds were kept"
+        );
+
+        // A real contact is queued now, and kept while it is held and asked
+        // fewer than `MAX_KEY_ASKS` times.
+        let real = NodeId::from_bytes(peer(2));
+        directory.saw(PeerContact::new(peer(2), addr(9002), 0));
+        directory.wants_key(real);
+        for _ in 0..MAX_KEY_ASKS - 1 {
+            directory.asked_keys(&[real]);
+            directory.expire(0);
+        }
+        assert_eq!(
+            directory.key_wants(),
+            vec![real],
+            "a live want aged out early"
+        );
+        directory.asked_keys(&[real]);
+        directory.expire(0);
+        assert!(
+            directory.key_wants().is_empty(),
+            "an unanswerable want was kept for ever"
+        );
+
+        // And the next sighting asks afresh.
+        directory.wants_key(real);
+        directory.expire(0);
+        assert_eq!(directory.key_wants(), vec![real]);
     }
 
     #[test]

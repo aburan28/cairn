@@ -659,6 +659,38 @@ fn seatbelt_profile(program: &Path, plan: &Confinement<'_>, writable: &[PathBuf]
          (allow process-fork)\n(allow process-exec)\n(allow signal (target self))\n\
          (allow file-read-metadata)\n",
     );
+    // Metadata is allowed broadly because path resolution stats every
+    // directory on the way down, and a tool that cannot is a broken jail. Not
+    // under home directories, though: there a stat is a fact about the
+    // operator (does `~/.ssh/id_ed25519` exist, how large is it, when did it
+    // change) that evidence can carry out. The paths granted below, and the
+    // directories above them, are allowed again; later rules win.
+    let homes: Vec<PathBuf> = std::iter::once(PathBuf::from("/Users"))
+        .chain(configured_home())
+        .collect();
+    for home in &homes {
+        profile.push_str(&format!(
+            "(deny file-read-metadata (subpath \"{}\"))\n",
+            escape(&home.to_string_lossy())
+        ));
+    }
+    let mut ancestors: Vec<&Path> = readable
+        .iter()
+        .flat_map(|path| path.ancestors().skip(1))
+        .filter(|dir| {
+            homes
+                .iter()
+                .any(|home| dir.starts_with(home) || home.starts_with(dir))
+        })
+        .collect();
+    ancestors.sort();
+    ancestors.dedup();
+    for dir in ancestors {
+        profile.push_str(&format!(
+            "(allow file-read-metadata (literal \"{}\"))\n",
+            escape(&dir.to_string_lossy())
+        ));
+    }
     for path in &readable {
         let text = path.to_string_lossy();
         profile.push_str(&format!(
@@ -974,8 +1006,40 @@ mod tests {
         assert!(!profile.contains("(allow default)"));
         assert!(profile.contains("/Volumes/objectives/example"));
         assert!(profile.contains("/private/tmp/proofwork-seatbelt-work"));
-        assert!(!profile.contains("/Users/"));
+        assert!(!profile
+            .lines()
+            .any(|line| line.starts_with("(allow") && line.contains("/Users/")));
         assert!(!profile.contains("(subpath \"/\")"));
+    }
+
+    /// A stat is a fact too. Under home directories only the granted paths,
+    /// and the directories above them, may be looked at.
+    #[test]
+    fn seatbelt_hides_home_metadata_but_the_granted_path_still_resolves() {
+        let work = PathBuf::from("/private/tmp/proofwork-seatbelt-home");
+        let bundle = PathBuf::from("/Users/alice/objectives/example");
+        let plan = Confinement::new(&work, &bundle, 1);
+        let profile = seatbelt_profile(
+            Path::new("/usr/bin/python3"),
+            &plan,
+            std::slice::from_ref(&work),
+        );
+        let deny = profile
+            .find("(deny file-read-metadata (subpath \"/Users\"))")
+            .expect("home metadata is denied");
+        for ancestor in ["/Users", "/Users/alice", "/Users/alice/objectives"] {
+            let allow = profile
+                .find(&format!(
+                    "(allow file-read-metadata (literal \"{ancestor}\"))"
+                ))
+                .unwrap_or_else(|| panic!("{ancestor} is not resolvable:\n{profile}"));
+            assert!(allow > deny, "a later rule wins, so the allow must follow");
+        }
+        let granted = profile
+            .find("(allow file-read* file-map-executable (subpath \"/Users/alice/objectives/example\"))")
+            .expect("the bundle is readable");
+        assert!(granted > deny);
+        assert!(!profile.contains("(literal \"/Users/alice/.ssh\")"));
     }
 
     #[test]

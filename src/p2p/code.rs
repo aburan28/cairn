@@ -320,6 +320,13 @@ pub struct CodeReport {
     pub served: usize,
     /// Pins still unmet after the exchange.
     pub outstanding: usize,
+    /// The addresses this exchange wrote that were not on disk before it.
+    ///
+    /// What a caller needs to undo the exchange: the want set can include pins
+    /// of objectives that were only *staged* when it was computed, and an
+    /// objective the rules then refuse leaves its blob here with nothing
+    /// pinning it. See `service::exchange_records_and_code`.
+    pub stored: BTreeSet<String>,
 }
 
 /// Store the blobs a peer sent, keeping only what was asked for.
@@ -342,9 +349,13 @@ pub fn admit(store: &BlobStore, wanted: &BTreeSet<String>, bodies: Vec<Vec<u8>>)
             report.refused += 1;
             continue;
         }
+        let held_before = store.holds(&address);
         match store.put(&address, &body) {
             Ok(_) => {
                 report.accepted += 1;
+                if !held_before {
+                    report.stored.insert(address.clone());
+                }
                 got.insert(address);
             }
             // A mismatch is unreachable here — the address was just computed
@@ -464,6 +475,18 @@ mod tests {
         assert_eq!(report.refused, 0);
         assert_eq!(report.outstanding, 0);
         assert_eq!(mine.read(&address).unwrap(), CHECKER);
+        assert_eq!(
+            report.stored,
+            set(&[&address]),
+            "the write was not reported"
+        );
+
+        // A blob already on disk is accepted again and not reported as
+        // written: the caller may remove what a round wrote, and must never
+        // remove what was there before it.
+        let again = admit(&mine, &set(&[&address]), vec![CHECKER.to_vec()]);
+        assert_eq!(again.accepted, 1);
+        assert!(again.stored.is_empty());
     }
 
     #[test]

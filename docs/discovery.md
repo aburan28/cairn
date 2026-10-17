@@ -385,12 +385,20 @@ to whoever you happen to be talking to.
 
 ## Using a hostname
 
-A bootstrap address and a signed peer record may both carry `host:port` as well
-as a literal `IP:port`. The name is resolved on the **dial path only**:
+A bootstrap address and a seed-list entry may carry `host:port` as well as a
+literal `IP:port`. The name is resolved on the **dial path only**, and only for
+those two, which are the operator's own configuration:
 
 ```json
 { "addr": "ec2-203-0-113-10.compute-1.amazonaws.com:9000", "public": "…" }
 ```
+
+A signed peer record may still *carry* a name -- admissibility never parses an
+address -- but a node does not dial one taken from its log or from gossip.
+Those paths run while the daemon holds its node lock, so a name there was a DNS
+lookup every inbound session waited behind, and the address came from whoever
+signed the record, not from this operator. The same paths refuse loopback,
+link-local, unspecified and multicast literals (`discovery::routable_hint`).
 
 This is the useful shape for a cloud instance. An EC2 box without an Elastic IP
 gets a new address every time it restarts, and a literal address in a bootstrap
