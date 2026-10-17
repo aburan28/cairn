@@ -235,7 +235,7 @@ through `gpu-box-1/gpu3`, four slices under one membership.
 | value | signs for |
 |---|---|
 | `enrolled` | verified members, from any address. **The recommended setting, and Cairn.app's default for a new fleet.** |
-| `enrolled,loopback` | members, and anything on this host: an `ssh -L` tunnel, the Mac's own tools |
+| `enrolled,loopback` | members, and anything on this host that sends the operator token (`CAIRN_SWARM_OPERATOR_TOKEN` as a Bearer credential). Loopback is also where a reverse proxy delivers public traffic, so the address alone is not enough; an `ssh -L` worker enrolls instead |
 | `private`, `loopback`, CIDRs | anything on those networks with no header, as today. Kept for compatibility; the leader says at start that it is trusting a network. |
 
 `GET /network` adds `node.fleet.members: {"enrolled": n, "live": k}`, counts

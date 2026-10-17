@@ -342,8 +342,13 @@ request from inside them with no header at all. The leader says at start that
 it is trusting a network. It is how fleets ran before enrollment, and a
 setting somebody typed is kept, but it makes the address the credential: a
 guest on the Wi-Fi, a compromised printer, a laptop on the office VPN can each
-have records signed in the leader's name. `enrolled,loopback` keeps that
-convenience for this host alone. Two consequences if you use networks:
+have records signed in the leader's name. **Loopback is never trusted by
+address alone**: a reverse proxy that adds no forwarding header (nginx's
+default `proxy_pass`, `ssh -R`, socat) delivers the whole internet from
+127.0.0.1, so `loopback` and the loopback part of `private` sign only for a
+request that also carries `Authorization: Bearer` with
+`CAIRN_SWARM_OPERATOR_TOKEN`. `enrolled,loopback` keeps that for this host's
+own tools. Two consequences if you use networks:
 
 - Workers name the leader with `--worker gpu-box-1 --submitter <signs_as>`,
   and must learn `signs_as` from somewhere they trust. The HTTP side is
@@ -353,7 +358,8 @@ convenience for this host alone. Two consequences if you use networks:
 - Across the internet the fleet's network *is* a tunnel. **WireGuard**: give
   the leader and every box an address on `wg0` and set `CAIRN_FLEET` to that
   subnet (`10.99.0.0/24`), not `private`. **SSH**, for one box: `ssh -N -L
-  8080:127.0.0.1:8080 leader`, and `CAIRN_FLEET=loopback` admits it. **A cloud
+  8080:127.0.0.1:8080 leader`, and enroll the box (`cairn fleet join`): a
+  tunnel arrives from loopback, which is not admitted by address. **A cloud
   VPC with peering** is a private network already; the security groups decide
   who else is in it.
 

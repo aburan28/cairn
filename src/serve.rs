@@ -945,12 +945,24 @@ impl Serving {
         value: Value,
         remote: Option<std::net::IpAddr>,
         member: Option<&Member>,
+        authorization: Option<&str>,
     ) -> Result<(Value, Option<String>), Refusal> {
         let Some(signer) = &self.fleet else {
             return Ok((value, None));
         };
         let me = signer.identity.submitter_id();
-        let admitted = || member.is_some() || remote.is_some_and(|ip| signer.sources.admits(ip));
+        // Loopback is never a credential on its own. A reverse proxy that adds
+        // no forwarding header (nginx's default `proxy_pass`, `ssh -R`, socat)
+        // delivers the whole internet from 127.0.0.1, so a loopback source is
+        // signed for only with the operator's token. An SSH-forwarded worker
+        // enrolls instead: a member is admitted by its key, from anywhere.
+        let operator = || operator::authorized(&self.operator_token, authorization);
+        let admitted = || {
+            member.is_some()
+                || remote.is_some_and(|ip| {
+                    signer.sources.admits(ip) && (!ip.is_loopback() || operator())
+                })
+        };
         let refused = || {
             let how = match (signer.members.is_some(), signer.sources.trusts_networks()) {
                 (true, false) => "an enrolled member's signed request (`cairn fleet join`)".to_string(),
@@ -966,10 +978,20 @@ impl Serving {
                 format!(
                     "this record names this node's identity {me} and carries no signature. \
                      This node signs such a record only for a fleet member -- {how} -- and {} \
-                     is not one. Submit under your own name, or sign it yourself",
+                     is not one{}. Submit under your own name, or sign it yourself",
                     remote
                         .map(|ip| ip.to_string())
-                        .unwrap_or_else(|| "an unknown address".into())
+                        .unwrap_or_else(|| "an unknown address".into()),
+                    if remote.is_some_and(|ip| ip.is_loopback()) {
+                        format!(
+                            " (from loopback, which is where a proxy delivers public traffic, \
+                             a request also needs `Authorization: Bearer` with {}; or enroll \
+                             with `cairn fleet join`)",
+                            operator::ENV
+                        )
+                    } else {
+                        String::new()
+                    }
                 ),
             )
         };
@@ -1289,6 +1311,9 @@ struct Request {
     /// The `Cookie` header, if the client sent one. Read by the optional
     /// Google session and by nothing that admits a record.
     cookie: Option<String>,
+    /// The `Origin` header, which a browser adds to a cross-origin POST and
+    /// a page cannot forge. Read only by the cookie-bearing auth routes.
+    origin: Option<String>,
 }
 
 /// Serve until the process is killed.
@@ -1655,7 +1680,23 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         ("GET", "/auth") => auth_status(stream, serving, &request),
         ("GET", "/auth/google") => auth_start(stream, serving, &request),
         ("GET", "/auth/google/callback") => auth_callback(stream, serving, &request),
-        ("POST", "/auth/logout") => auth_logout(stream, serving),
+        ("POST", "/auth/logout") => {
+            // A session cookie rides along with a cross-site form post, so a
+            // page elsewhere could sign the reader out. A browser names the
+            // page it posted from; anything but this node's own origin is
+            // refused.
+            if !same_origin(request.origin.as_deref(), request.host.as_deref()) {
+                return json_refusal(
+                    stream,
+                    &Refusal::new(
+                        403,
+                        "cross_origin",
+                        "POST /auth/logout is taken only from this node's own pages",
+                    ),
+                );
+            }
+            auth_logout(stream, serving)
+        }
         ("GET", "/verifiers") => verifiers(stream, serving),
         ("GET", "/objectives") => objectives(stream, serving),
         ("GET", path) if path.starts_with("/payouts/") => {
@@ -1895,6 +1936,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
     let mut authorization = None;
     let mut forwarded = false;
     let mut cookie = None;
+    let mut origin = None;
     let mut headers = 0usize;
     let mut header_bytes = 0usize;
     let mut length_seen = false;
@@ -1940,6 +1982,9 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
                     return Err("multiple Authorization headers are not supported".into());
                 }
                 authorization = Some(value.to_string());
+            }
+            if name == "origin" {
+                origin = Some(value.to_string());
             }
             if name == "cookie" {
                 cookie = Some(match cookie {
@@ -2024,6 +2069,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
         authorization,
         forwarded,
         cookie,
+        origin,
     })
 }
 
@@ -5258,7 +5304,13 @@ fn submit(
     // A fleet leader signs its workers' records here, before the gate and the
     // queue, so what is queued is exactly what will be admitted.
     let member = verified.map(|v| &v.member);
-    let (value, signed_as) = match serving.fleet_sign(&kind, value, remote, member) {
+    let (value, signed_as) = match serving.fleet_sign(
+        &kind,
+        value,
+        remote,
+        member,
+        request.authorization.as_deref(),
+    ) {
         Ok(signed) => signed,
         Err(refusal) => return json_refusal(stream, &refusal),
     };
@@ -6093,6 +6145,20 @@ fn auth_callback(stream: &mut TcpStream, serving: &Serving, request: &Request) -
     )
 }
 
+/// Whether a request's `Origin` is the node it was addressed to. No `Origin`
+/// is not a browser's cross-origin request (a browser always sends one on a
+/// cross-origin POST), so it passes; `null` and any other authority do not.
+fn same_origin(origin: Option<&str>, host: Option<&str>) -> bool {
+    let Some(origin) = origin else { return true };
+    let authority = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"));
+    match (authority, host) {
+        (Some(authority), Some(host)) => authority.eq_ignore_ascii_case(host.trim()),
+        _ => false,
+    }
+}
+
 fn auth_logout(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
     write_auth(stream, serving.google.logout())
 }
@@ -6507,6 +6573,20 @@ mod tests {
         );
         assert_eq!(still.body, "ok\n");
 
+        // A form on another site posts with the reader's cookie, and names
+        // itself in `Origin`; that is refused. The node's own page is not.
+        let forged = http(
+            on_addr,
+            "POST /auth/logout HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        assert!(forged.status.starts_with("HTTP/1.1 403"), "{}", forged.head);
+        let own = http(
+            on_addr,
+            "POST /auth/logout HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        assert!(own.status.starts_with("HTTP/1.1 200"), "{}", own.head);
         let logout = http(
             on_addr,
             "POST /auth/logout HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\
@@ -9589,17 +9669,38 @@ mod tests {
             .canonical_string()
         };
 
-        // Inside the fleet: loopback is the test's own address.
+        // Inside the fleet: loopback is the test's own address, and loopback
+        // is signed for only with the operator's token.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
-        let serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")))
+        let secret = "5c".repeat(32);
+        let bearer = format!("Bearer {secret}");
+        let mut serving = Serving::new(&log, concat!(env!("CARGO_MANIFEST_DIR")))
             .accepting_into(dir.path.join("queue"))
             .with_fleet(Fleet::parse("loopback").unwrap(), identity.clone());
+        serving.operator_token = Ok(Some(operator::Token::parse(&secret).unwrap()));
         assert_eq!(serving.fleet_signs_as(), Some(me.clone()));
         std::thread::spawn(move || {
             let _ = serve_on(listener, serving);
         });
+        let leader_post = |route: &str, body: &str| {
+            ask_raw(
+                addr,
+                "POST",
+                route,
+                &[("Authorization", bearer.as_str())],
+                body.as_bytes(),
+            )
+        };
+        // A proxy that adds no forwarding header looks exactly like this: an
+        // address alone is not a fleet member.
         let (status, body) = ask_json(addr, "/submit?kind=commitment", &commitment(&me));
+        assert!(status.contains("403"), "{status} {body:?}");
+        assert_eq!(
+            body.get("reason").and_then(Value::as_str),
+            Some("not_a_member")
+        );
+        let (status, body) = leader_post("/submit?kind=commitment", &commitment(&me));
         assert!(status.contains("202"), "{status} {body:?}");
         assert_eq!(body.get("signed_as").unwrap().as_str(), Some(me.as_str()));
         assert!(body.get("queued").unwrap().as_str().is_some());
@@ -9655,7 +9756,7 @@ mod tests {
             ),
         ])
         .canonical_string();
-        let (status, body) = ask_json(addr, "/submit?kind=claim", &retraction);
+        let (status, body) = leader_post("/submit?kind=claim", &retraction);
         assert!(status.contains("403"), "{status} {body:?}");
         assert!(body
             .get("error")
