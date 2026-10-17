@@ -1,5 +1,12 @@
 # Changelog
 
+## [12.2.0](https://github.com/aburan28/cairn/compare/v12.1.0...v12.2.0) (2026-10-17)
+
+
+### Features
+
+* Conductor on the reader's agent panel, and conductor.json for working on cairn ([#334](https://github.com/aburan28/cairn/issues/334)) ([fa85cc5](https://github.com/aburan28/cairn/commit/fa85cc53583bdd45e970153d06f4ba6937c685b7))
+
 ## [12.1.0](https://github.com/aburan28/cairn/compare/v12.0.0...v12.1.0) (2026-10-17)
 
 
