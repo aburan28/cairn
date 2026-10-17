@@ -148,11 +148,20 @@ pub fn verify(seed: &[u8], difficulty: u64, output: &[u8], witness: &[u8]) -> bo
     (pi.modpow(&l, &n) * x.modpow(&r, &n)) % &n == y
 }
 
+/// The first epoch whose seed covers the beacon's difficulty: for one seed a
+/// longer delay is one more squaring of a shorter one, so a `T` the record
+/// chose freely was a grinding knob at a squaring per candidate.
+pub const SEED_BINDS_DIFFICULTY_FROM: u64 = 2_989_152;
+
 /// The seed a delay beacon for `epoch` is computed over: the log's Merkle
-/// root below the beacon, so it is not knowable before those records exist.
-pub fn seed(epoch: u64, root: Option<&str>) -> Vec<u8> {
+/// root below the beacon, so it is not knowable before those records exist,
+/// and from [`SEED_BINDS_DIFFICULTY_FROM`] the difficulty it claims.
+pub fn seed(epoch: u64, root: Option<&str>, difficulty: u64) -> Vec<u8> {
     let mut seed = b"proofwork/vdf/seed".to_vec();
     seed.extend_from_slice(&epoch.to_be_bytes());
+    if epoch >= SEED_BINDS_DIFFICULTY_FROM {
+        seed.extend_from_slice(&difficulty.to_be_bytes());
+    }
     seed.extend_from_slice(root.unwrap_or_default().as_bytes());
     seed
 }
@@ -160,6 +169,21 @@ pub fn seed(epoch: u64, root: Option<&str>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bytes, pinned: `src/node.rs` pins the same ones, so the two
+    /// implementations agree past the cutover, which no interop log reaches.
+    #[test]
+    fn the_seed_covers_the_difficulty_from_the_cutover() {
+        let hex = |bytes: Vec<u8>| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        assert_eq!(
+            hex(seed(SEED_BINDS_DIFFICULTY_FROM, None, 1 << 16)),
+            "70726f6f66776f726b2f7664662f7365656400000000002d9c600000000000010000"
+        );
+        assert_eq!(
+            seed(SEED_BINDS_DIFFICULTY_FROM - 1, None, 1),
+            seed(SEED_BINDS_DIFFICULTY_FROM - 1, None, 2)
+        );
+    }
 
     /// A tiny prover, for tests only: `T` squarings and the long division
     /// for `π`, slowly but plainly.

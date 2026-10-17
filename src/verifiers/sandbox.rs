@@ -170,6 +170,24 @@ pub struct Unavailable(pub String);
 /// `program` must already be an absolute path: resolving a name through `PATH`
 /// inside the jail would pick a different binary than the one the caller
 /// checked, and under `bwrap` it would usually not resolve at all.
+/// The first path `plan` grants that contains the operator's `~/.cairn` or
+/// secrets directory, if any does.
+fn exposes_operator_secrets(plan: &Confinement<'_>) -> Option<PathBuf> {
+    let resolve = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let protected: Vec<PathBuf> = configured_home()
+        .map(|home| home.join(".cairn"))
+        .into_iter()
+        .chain(std::iter::once(crate::secrets::default_dir()))
+        .map(|path| resolve(&path))
+        .collect();
+    std::iter::once(plan.cwd)
+        .chain(std::iter::once(plan.workdir))
+        .chain(plan.readable.iter().map(PathBuf::as_path))
+        .chain(plan.writable.iter().map(PathBuf::as_path))
+        .map(resolve)
+        .find(|granted| protected.iter().any(|secret| secret.starts_with(granted)))
+}
+
 pub fn confine(
     program: &Path,
     args: &[OsString],
@@ -183,6 +201,20 @@ pub fn confine(
     // print those values into verdict evidence without using the network.
     // Requiring the sandbox therefore also requires a scrubbed environment.
     let scrub_env = effective_scrub_env(plan, required);
+
+    // A jail is only as narrow as what it is shown. A bundle root that holds
+    // the operator's own key and secrets (`--root ~` does) would show them to
+    // every objective's code, which can print a digest of what it read into
+    // public evidence; no jail, so no grant, is made for that.
+    if !matches!(mechanism, Mechanism::None(_)) {
+        if let Some(granted) = exposes_operator_secrets(plan) {
+            return Err(Unavailable(format!(
+                "this jail would be shown {}, which holds this node's key or secrets; \
+                 serve objectives from a directory that does not contain them",
+                granted.display()
+            )));
+        }
+    }
 
     match mechanism {
         Mechanism::None(why) if required => Err(Unavailable(format!(
@@ -627,6 +659,38 @@ fn seatbelt_profile(program: &Path, plan: &Confinement<'_>, writable: &[PathBuf]
          (allow process-fork)\n(allow process-exec)\n(allow signal (target self))\n\
          (allow file-read-metadata)\n",
     );
+    // Metadata is allowed broadly because path resolution stats every
+    // directory on the way down, and a tool that cannot is a broken jail. Not
+    // under home directories, though: there a stat is a fact about the
+    // operator (does `~/.ssh/id_ed25519` exist, how large is it, when did it
+    // change) that evidence can carry out. The paths granted below, and the
+    // directories above them, are allowed again; later rules win.
+    let homes: Vec<PathBuf> = std::iter::once(PathBuf::from("/Users"))
+        .chain(configured_home())
+        .collect();
+    for home in &homes {
+        profile.push_str(&format!(
+            "(deny file-read-metadata (subpath \"{}\"))\n",
+            escape(&home.to_string_lossy())
+        ));
+    }
+    let mut ancestors: Vec<&Path> = readable
+        .iter()
+        .flat_map(|path| path.ancestors().skip(1))
+        .filter(|dir| {
+            homes
+                .iter()
+                .any(|home| dir.starts_with(home) || home.starts_with(dir))
+        })
+        .collect();
+    ancestors.sort();
+    ancestors.dedup();
+    for dir in ancestors {
+        profile.push_str(&format!(
+            "(allow file-read-metadata (literal \"{}\"))\n",
+            escape(&dir.to_string_lossy())
+        ));
+    }
     for path in &readable {
         let text = path.to_string_lossy();
         profile.push_str(&format!(
@@ -942,8 +1006,40 @@ mod tests {
         assert!(!profile.contains("(allow default)"));
         assert!(profile.contains("/Volumes/objectives/example"));
         assert!(profile.contains("/private/tmp/proofwork-seatbelt-work"));
-        assert!(!profile.contains("/Users/"));
+        assert!(!profile
+            .lines()
+            .any(|line| line.starts_with("(allow") && line.contains("/Users/")));
         assert!(!profile.contains("(subpath \"/\")"));
+    }
+
+    /// A stat is a fact too. Under home directories only the granted paths,
+    /// and the directories above them, may be looked at.
+    #[test]
+    fn seatbelt_hides_home_metadata_but_the_granted_path_still_resolves() {
+        let work = PathBuf::from("/private/tmp/proofwork-seatbelt-home");
+        let bundle = PathBuf::from("/Users/alice/objectives/example");
+        let plan = Confinement::new(&work, &bundle, 1);
+        let profile = seatbelt_profile(
+            Path::new("/usr/bin/python3"),
+            &plan,
+            std::slice::from_ref(&work),
+        );
+        let deny = profile
+            .find("(deny file-read-metadata (subpath \"/Users\"))")
+            .expect("home metadata is denied");
+        for ancestor in ["/Users", "/Users/alice", "/Users/alice/objectives"] {
+            let allow = profile
+                .find(&format!(
+                    "(allow file-read-metadata (literal \"{ancestor}\"))"
+                ))
+                .unwrap_or_else(|| panic!("{ancestor} is not resolvable:\n{profile}"));
+            assert!(allow > deny, "a later rule wins, so the allow must follow");
+        }
+        let granted = profile
+            .find("(allow file-read* file-map-executable (subpath \"/Users/alice/objectives/example\"))")
+            .expect("the bundle is readable");
+        assert!(granted > deny);
+        assert!(!profile.contains("(literal \"/Users/alice/.ssh\")"));
     }
 
     #[test]

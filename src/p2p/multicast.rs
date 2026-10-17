@@ -177,9 +177,32 @@ pub fn hear(bytes: &[u8], source: IpAddr, us: &PeerId) -> Heard {
     if beacon.port == 0 {
         return Heard::Ignored;
     }
+    // A beacon is a claim about *this segment*, and the socket hears unicast
+    // to its port as well as the group. So a datagram from an address no LAN
+    // hands out is somebody on the internet -- with a source they may well
+    // have spoofed -- and acting on it meant a key request, a 261 KiB TCP send,
+    // to wherever 39 bytes of UDP said.
+    if !on_the_segment(source) {
+        return Heard::Ignored;
+    }
     Heard::Peer {
         peer: beacon.peer,
         addr: SocketAddr::new(source, beacon.port),
+    }
+}
+
+/// Whether `source` is an address a host on a local segment can have:
+/// RFC 1918, link-local or loopback for IPv4; loopback, link-local or unique
+/// local (`fc00::/7`) for IPv6. An IPv4-mapped IPv6 source is judged as the
+/// IPv4 address it maps.
+///
+/// Deliberately not "anything but global": a CGNAT or documentation range is
+/// no more a LAN than a public address is, and a segment that uses one can
+/// still bootstrap the ordinary way.
+fn on_the_segment(source: IpAddr) -> bool {
+    match source.to_canonical() {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_loopback(),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unicast_link_local() || v6.is_unique_local(),
     }
 }
 
@@ -481,6 +504,38 @@ mod tests {
         padded.push(0);
         assert_eq!(Beacon::decode(&padded), None);
         assert_eq!(Beacon::decode(&beacon[..FRAME_LEN - 1]), None);
+    }
+
+    #[test]
+    fn a_beacon_from_off_the_segment_is_ignored() {
+        // The socket hears unicast too, so this is somebody on the internet
+        // -- or a spoofed source -- asking for a 261 KiB key request.
+        let bytes = Beacon::new(peer(7), 9000).encode();
+        for source in [
+            "203.0.113.5",
+            "8.8.8.8",
+            "100.64.0.1",
+            "2001:db8::5",
+            "::ffff:8.8.8.8",
+        ] {
+            let source: IpAddr = source.parse().expect("addr");
+            assert_eq!(hear(&bytes, source, &peer(0)), Heard::Ignored, "{source}");
+        }
+        for source in [
+            "10.0.0.5",
+            "172.16.3.4",
+            "192.168.1.2",
+            "169.254.10.10",
+            "fe80::1",
+            "fd12::1",
+            "::ffff:192.168.1.2",
+        ] {
+            let source: IpAddr = source.parse().expect("addr");
+            assert!(
+                matches!(hear(&bytes, source, &peer(0)), Heard::Peer { .. }),
+                "{source}"
+            );
+        }
     }
 
     #[test]

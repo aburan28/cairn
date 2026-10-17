@@ -34,8 +34,8 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -111,7 +111,49 @@ impl From<io::Error> for TransferError {
 /// An [`Action`] may name a peer other than the one whose message produced it --
 /// a `have` goes to everybody, an endgame `cancel` goes to the loser -- so
 /// dispatch cannot be "write to the socket I am reading from".
-type Outbox = Arc<Mutex<BTreeMap<PeerId, Sender<Message>>>>;
+type Outbox = Arc<Mutex<BTreeMap<PeerId, SyncSender<Message>>>>;
+
+/// Messages queued for one peer's writer before that peer is disconnected.
+///
+/// Bounded because the peer decides how fast the queue drains: one that stops
+/// reading while it keeps sending `Request`s would otherwise have every piece
+/// it asked for -- a quarter-megabyte clone for a few bytes on the wire --
+/// held here until memory runs out. An honest peer has at most
+/// `max_in_flight` pieces outstanding, far below this.
+const OUTBOX_DEPTH: usize = 64;
+
+/// Inbound connections allowed to be in the transport handshake at once.
+///
+/// Every accepted socket gets a thread, and before authentication that thread
+/// is a stranger's for up to `transport::HANDSHAKE_TIMEOUT`: opening sockets
+/// and going quiet used to cost this node one thread each, without bound,
+/// until spawning failed -- and `thread::spawn` panics when it fails, which
+/// took the accept loop, and every blob this node serves, down with it. The
+/// same number as the daemon's `MAX_INBOUND_HANDSHAKES`, for the same reason.
+/// Only the handshake holds a slot; an authenticated transfer is bounded per
+/// blob by `Limits::max_peers` instead.
+const MAX_INBOUND_HANDSHAKES: usize = 16;
+
+/// Releases one inbound handshake slot however the handshake ends -- including
+/// a spawn that failed, which drops the closure holding it.
+struct HandshakeSlot(Arc<AtomicUsize>);
+
+impl HandshakeSlot {
+    /// A slot, if fewer than `limit` are taken.
+    fn take(counter: &Arc<AtomicUsize>, limit: usize) -> Option<HandshakeSlot> {
+        if counter.fetch_add(1, Ordering::AcqRel) >= limit {
+            counter.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(HandshakeSlot(Arc::clone(counter)))
+    }
+}
+
+impl Drop for HandshakeSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// The node's address book, shared across every connection and every swarm.
 ///
@@ -313,50 +355,68 @@ pub fn serve_full(
 
     let stop_thread = Arc::clone(&stop);
     let identity = Arc::clone(&identity);
-    thread::spawn(move || {
-        // One swarm per digest being served, shared across the connections that
-        // want it -- choking has to allocate slots across peers, so a swarm per
-        // connection would make every peer look like the only peer.
-        let swarms: Arc<Mutex<BTreeMap<String, Arc<Mutex<Swarm>>>>> =
-            Arc::new(Mutex::new(BTreeMap::new()));
-        let outboxes: Arc<Mutex<BTreeMap<String, Outbox>>> = Arc::new(Mutex::new(BTreeMap::new()));
-        let next_peer = Arc::new(AtomicU64::new(1));
+    let handshakes = Arc::new(AtomicUsize::new(0));
+    thread::Builder::new()
+        .name("swarm-accept".into())
+        .spawn(move || {
+            // One swarm per digest being served, shared across the connections that
+            // want it -- choking has to allocate slots across peers, so a swarm per
+            // connection would make every peer look like the only peer.
+            let swarms: Arc<Mutex<BTreeMap<String, Arc<Mutex<Swarm>>>>> =
+                Arc::new(Mutex::new(BTreeMap::new()));
+            let outboxes: Arc<Mutex<BTreeMap<String, Outbox>>> =
+                Arc::new(Mutex::new(BTreeMap::new()));
+            let next_peer = Arc::new(AtomicU64::new(1));
 
-        while !stop_thread.load(Ordering::SeqCst) {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let ctx = Serving {
-                        blobs: blobs.clone(),
-                        swarms: Arc::clone(&swarms),
-                        outboxes: Arc::clone(&outboxes),
-                        next_peer: Arc::clone(&next_peer),
-                        limits,
-                        book: Arc::clone(&book),
-                        dht: dht.clone(),
-                    };
-                    let identity = Arc::clone(&identity);
-                    thread::spawn(move || {
-                        // The McEliece decapsulation happens here, on the
-                        // connection thread rather than the accept loop: it
-                        // costs ~12 ms, and a handshake that blocked the
-                        // listener would let one slow peer stop every other.
-                        // The amplification this exposes is named in
-                        // `p2p::handshake` and is the responder's to price.
-                        let Ok(connection) = transport::accept(stream, &identity) else {
-                            return;
+            while !stop_thread.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        // Refused by closing: the socket is dropped here, before a
+                        // thread or a decapsulation is spent on it.
+                        let Some(slot) = HandshakeSlot::take(&handshakes, MAX_INBOUND_HANDSHAKES)
+                        else {
+                            continue;
                         };
-                        let _ = serve_one(connection, ctx);
-                    });
+                        let ctx = Serving {
+                            blobs: blobs.clone(),
+                            swarms: Arc::clone(&swarms),
+                            outboxes: Arc::clone(&outboxes),
+                            next_peer: Arc::clone(&next_peer),
+                            limits,
+                            book: Arc::clone(&book),
+                            dht: dht.clone(),
+                        };
+                        let identity = Arc::clone(&identity);
+                        // `Builder`, not `thread::spawn`: a spawn that fails -- out
+                        // of threads or memory -- is one refused connection, and
+                        // must not be a panic on the only thread accepting them.
+                        let spawned = thread::Builder::new().spawn(move || {
+                            // The McEliece decapsulation happens here, on the
+                            // connection thread rather than the accept loop: it
+                            // costs ~12 ms, and a handshake that blocked the
+                            // listener would let one slow peer stop every other.
+                            // The amplification this exposes is named in
+                            // `p2p::handshake` and is the responder's to price.
+                            let accepted = transport::accept(stream, &identity);
+                            drop(slot);
+                            let Ok(connection) = accepted else {
+                                return;
+                            };
+                            let _ = serve_one(connection, ctx);
+                        });
+                        if spawned.is_err() {
+                            thread::sleep(TICK);
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(TICK);
+                    }
+                    // An accept that fails for any other reason is this machine's
+                    // problem, not a peer's, and retrying is the only sane response.
+                    Err(_) => thread::sleep(TICK),
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(TICK);
-                }
-                // An accept that fails for any other reason is this machine's
-                // problem, not a peer's, and retrying is the only sane response.
-                Err(_) => thread::sleep(TICK),
             }
-        }
-    });
+        })?;
 
     Ok(Listener { addr: bound, stop })
 }
@@ -947,7 +1007,7 @@ fn run_peer(
     book: &Book,
     dht: &Dht,
 ) -> io::Result<()> {
-    let (tx, rx) = mpsc::channel::<Message>();
+    let (tx, rx) = mpsc::sync_channel::<Message>(OUTBOX_DEPTH);
     outbox
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1084,10 +1144,15 @@ fn dispatch(actions: &[Action], outbox: &Outbox) {
     for action in actions {
         match action {
             Action::Send(peer, message) => {
-                if let Some(sender) = table.get(peer) {
-                    // A closed queue is a peer that has already gone. Nothing to
-                    // do about it here, and the reader thread is what notices.
-                    let _ = sender.send(message.clone());
+                // A closed queue is a peer that has already gone. Nothing to
+                // do about it here, and the reader thread is what notices. A
+                // full one is a peer not reading what it asked for, and is
+                // disconnected the way a `Drop` is.
+                let full = table.get(peer).is_some_and(|sender| {
+                    matches!(sender.try_send(message.clone()), Err(TrySendError::Full(_)))
+                });
+                if full {
+                    table.remove(peer);
                 }
             }
             // Removing the queue *is* the disconnect: dropping the last `Sender`
@@ -1214,6 +1279,49 @@ mod tests {
     /// make one rather than one per dial.
     fn leech_identity() -> Arc<PeerIdentity> {
         Arc::new(PeerIdentity::generate())
+    }
+
+    #[test]
+    fn a_handshake_slot_is_returned_however_it_is_released() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let held: Vec<HandshakeSlot> = (0..3)
+            .map(|_| HandshakeSlot::take(&counter, 3).expect("under the cap"))
+            .collect();
+        assert!(
+            HandshakeSlot::take(&counter, 3).is_none(),
+            "the cap was not enforced"
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 3, "a refusal leaked a slot");
+        drop(held);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        assert!(HandshakeSlot::take(&counter, 3).is_some());
+    }
+
+    #[test]
+    fn silent_sockets_cannot_hold_more_than_the_handshake_cap() {
+        // Strangers who connect and say nothing each hold a thread until the
+        // handshake times out. Past the cap the next socket is closed at
+        // once instead of becoming one more thread.
+        use std::io::Read;
+        let dir = scratch("silent");
+        let (listener, _) = seeder_at(store(&dir, "seed"));
+        let silent: Vec<std::net::TcpStream> = (0..MAX_INBOUND_HANDSHAKES)
+            .map(|_| std::net::TcpStream::connect(listener.addr()).expect("connects"))
+            .collect();
+        // Let the accept loop take every one of them.
+        thread::sleep(TICK * 3);
+        let mut extra = std::net::TcpStream::connect(listener.addr()).expect("connects");
+        extra
+            .set_read_timeout(Some(transport::HANDSHAKE_TIMEOUT / 2))
+            .expect("timeout");
+        let started = Instant::now();
+        let mut byte = [0u8; 1];
+        let closed = matches!(extra.read(&mut byte), Ok(0) | Err(_));
+        assert!(
+            closed && started.elapsed() < transport::HANDSHAKE_TIMEOUT / 2,
+            "a socket past the cap was given a handshake"
+        );
+        drop(silent);
     }
 
     fn evaluator(size: usize) -> Vec<u8> {

@@ -3761,16 +3761,26 @@ impl Server {
         // otherwise redirect a credential the operator already chose, and
         // every script that reads it after. Replacing one is the operator's
         // call, made at a terminal.
-        if secrets::list(&dir)
-            .map_err(|e| e.to_string())?
-            .contains(&name)
-        {
+        //
+        // The node's own keys share the directory and are not the agent's to
+        // seed either: a session key it chose is one it can sign cookies with.
+        if crate::google_auth::is_reserved_secret(&name) {
             return Err(format!(
-                "secret {name} already exists, and this tool only creates secrets. To replace \
-                 it, the operator runs `cairn secret set {name} --stdin` at a terminal."
+                "secret {name} is this node's own key, which this tool does not write"
             ));
         }
-        secrets::set(&dir, &name, &value).map_err(|e| e.to_string())?;
+        match secrets::create(&dir, &name, &value) {
+            Ok(_) => {}
+            Err(secrets::SecretsError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::AlreadyExists =>
+            {
+                return Err(format!(
+                    "secret {name} already exists, and this tool only creates secrets. To replace \
+                     it, the operator runs `cairn secret set {name} --stdin` at a terminal."
+                ))
+            }
+            Err(error) => return Err(error.to_string()),
+        }
         // Confirm the name only. Echoing the value would put it in the agent's
         // transcript, which is exactly the leak this tool exists to avoid.
         Ok(format!(

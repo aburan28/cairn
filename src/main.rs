@@ -5801,7 +5801,7 @@ fn cmd_beacon(
                      cost a sequencer would pay per ordering it tried"
                 ),
             );
-            let seed = node.vdf_seed(orders, node.ledger().len());
+            let seed = node.vdf_seed(orders, node.ledger().len(), difficulty);
             let computed = cairn::vdf::prove(&seed, difficulty);
             (
                 computed.output_hex(),

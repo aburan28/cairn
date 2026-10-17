@@ -86,13 +86,31 @@ pub fn prepare(dir: &Path) -> Result<(), SecretsError> {
 /// value pasted from a file with a final newline is the value without it, and
 /// an interior newline is part of the secret.
 pub fn set(dir: &Path, name: &str, value: &str) -> Result<PathBuf, SecretsError> {
+    store(dir, name, value, secret_file::replace)
+}
+
+/// Store a named secret that does not exist yet.
+///
+/// Never replaces one: the check and the write are one `link`, so a secret
+/// that appears in between is refused rather than overwritten. Refused as an
+/// `Io` error of kind [`io::ErrorKind::AlreadyExists`].
+pub fn create(dir: &Path, name: &str, value: &str) -> Result<PathBuf, SecretsError> {
+    store(dir, name, value, secret_file::write_new)
+}
+
+fn store(
+    dir: &Path,
+    name: &str,
+    value: &str,
+    write: fn(&Path, &[u8]) -> io::Result<()>,
+) -> Result<PathBuf, SecretsError> {
     prepare(dir)?;
     let path = path_for(dir, name)?;
     let trimmed = value.trim_end_matches(['\n', '\r']);
     if trimmed.is_empty() {
         return Err(SecretsError::EmptyValue);
     }
-    secret_file::replace(&path, trimmed.as_bytes()).map_err(|source| SecretsError::Io {
+    write(&path, trimmed.as_bytes()).map_err(|source| SecretsError::Io {
         context: format!("writing {}", path.display()),
         source,
     })?;
