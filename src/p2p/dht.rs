@@ -457,7 +457,7 @@ fn parse_node_id(text: &str) -> Result<NodeId, DhtError> {
     // Byte-wise, never by slicing `text`: a peer's string can put a
     // multi-byte character across a pair boundary, and slicing there panics.
     let mut raw = [0u8; 32];
-    for (slot, pair) in raw.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+    for (slot, pair) in raw.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
         *slot = hex_pair(pair).ok_or_else(|| DhtError::Malformed {
             detail: format!("{text:?} is not hexadecimal"),
         })?;

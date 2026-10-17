@@ -128,14 +128,11 @@ pub fn parse_peer_id(text: &str) -> Result<PeerId, DiscoveryError> {
     // pair boundary would panic, and `from_str_radix` accepts a sign.
     let digit = |byte: u8| char::from(byte).to_digit(16);
     let mut id = [0u8; 32];
-    for (byte, pair) in id.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
-        *byte = match pair {
-            [high, low] => digit(*high)
-                .zip(digit(*low))
-                .and_then(|(high, low)| u8::try_from(high << 4 | low).ok()),
-            _ => None,
-        }
-        .ok_or_else(|| DiscoveryError::BadPeerId { value: text.into() })?;
+    for (byte, &[high, low]) in id.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
+        *byte = digit(high)
+            .zip(digit(low))
+            .and_then(|(high, low)| u8::try_from(high << 4 | low).ok())
+            .ok_or_else(|| DiscoveryError::BadPeerId { value: text.into() })?;
     }
     Ok(id)
 }
