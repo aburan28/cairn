@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: the launcher refuses a GPU and a missing key
         run: python3 launch/runpod-seed/test_spec.py
 
@@ -27,7 +27,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: rent the CPU pod
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
