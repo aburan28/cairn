@@ -14,6 +14,10 @@ paid `replica_id:period` keys across those objectives. The buyer sets the
 price, period length, funded number of replica-periods, and auditor key before
 posting. No amount is hard coded as a fair rate. The auditor approves each
 replica's capacity and health, including an idle replica that stayed available.
+Choose the period length before funding to keep a complete receipt below
+900 kB. At a busy fleet's object rate, 600-second periods may be more suitable
+than the 3600-second example below. `prepare` refuses an oversized receipt so
+it cannot silently omit committed objects to fit Cairn's HTTP claim limit.
 
 ## Run the service continuously
 

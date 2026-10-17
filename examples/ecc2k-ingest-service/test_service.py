@@ -134,6 +134,31 @@ class ServiceReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "poll export does not match"):
             service.prepare(args)
 
+    def test_prepare_refuses_a_period_too_large_for_http_claims(self):
+        period = 500000
+        objects = [{"key": f"dp/{i:06d}.bin", "sha256": "ab" * 32,
+                    "bytes": 64, "records": 2, "version_id": None}
+                   for i in range(6000)]
+        (self.root / "objects.json").write_text(json.dumps(objects))
+        (self.root / "progress.json").write_text(json.dumps([
+            {"key": obj["key"], "records": 2, "duplicates": 0,
+             "sha256": obj["sha256"], "bytes": 64, "version_id": None,
+             "ingested_at": "2026-10-10T00:00:00Z"} for obj in objects]))
+        (self.root / "polls.json").write_text(json.dumps({
+            "replica_id": "ingest-a", "start": period * 3600,
+            "end": (period + 1) * 3600, "events": [{"completed_at": "2026-10-10T00:00:00Z",
+                                                    "objects": 0, "rows_added": 0}]}))
+        (self.root / "before.json").write_text(self.receipt()["body"]["before_status"]["raw"])
+        (self.root / "after.json").write_text(self.receipt()["body"]["after_status"]["raw"])
+        args = SimpleNamespace(replica_id="ingest-a", period=period, period_seconds=3600,
+                               service="ecc2k130-dp-ingest-v2", input_bucket="example-private-dp",
+                               operator="operator", nonce="ab" * 32,
+                               objects=self.root / "objects.json", progress=self.root / "progress.json",
+                               polls_file=self.root / "polls.json", before=self.root / "before.json",
+                               after=self.root / "after.json", out=self.root / "body.json")
+        with self.assertRaisesRegex(ValueError, "receipt exceeds 900 kB"):
+            service.prepare(args)
+
     def test_rfc8032_known_signature(self):
         # Independent RFC 8032 test vector 1, not a sign/verify round trip.
         self.checker.AUDITOR_KEY = bytes.fromhex(

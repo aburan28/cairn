@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DOMAIN = b"cairn/ecc2k130-ingest-service/v2\n"
+MAX_RECEIPT_BODY_BYTES = 900_000
 HERE = Path(__file__).resolve().parent
 
 
@@ -140,6 +141,8 @@ def prepare(args):
         "before_status": snapshot(args.before),
         "after_status": snapshot(args.after),
     }
+    if len(canonical(body)) > MAX_RECEIPT_BODY_BYTES:
+        raise ValueError("receipt exceeds 900 kB; use shorter service periods before posting the objective")
     write_json(args.out, body)
     print(args.out)
 
