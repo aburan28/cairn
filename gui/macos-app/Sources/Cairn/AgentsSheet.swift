@@ -7,10 +7,16 @@ struct AgentsSheet: View {
     @ObservedObject var node: Node
     @Binding var isPresented: Bool
     @State private var arrangement: AgentArrangement = .shared
-    @State private var client: AgentClient = .claudeCode
+    @State private var client: AgentClient
     @State private var identityBusy = false
     @State private var installConfirmation = false
     @State private var message: (ok: Bool, text: String)?
+
+    init(node: Node, isPresented: Binding<Bool>) {
+        self.node = node
+        self._isPresented = isPresented
+        self._client = State(initialValue: node.agentsClient)
+    }
 
     private var binary: String {
         (node.binary ?? Node.locateBinary())?.path ?? "/usr/local/cairn/bin/cairn"

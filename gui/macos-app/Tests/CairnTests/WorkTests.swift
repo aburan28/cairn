@@ -118,6 +118,7 @@ final class WorkTests: XCTestCase {
         XCTAssertEqual(try PageRequest.parse(["kind": "open", "sheet": "work", "objective": objective]).get(),
                        .open(.work, objective: objective))
         XCTAssertEqual(try PageRequest.parse(["kind": "open", "sheet": "agents"]).get(), .open(.agents, objective: nil))
+        XCTAssertEqual(try PageRequest.parse(["kind": "open", "sheet": "conductor"]).get(), .open(.conductor, objective: nil))
         XCTAssertEqual(try PageRequest.parse(["kind": "open", "sheet": "new-challenge"]).get(), .open(.newChallenge, objective: nil))
         func refused(_ body: Any) -> Bool {
             if case .failure = PageRequest.parse(body) { return true }
