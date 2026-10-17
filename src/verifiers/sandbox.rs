@@ -1016,9 +1016,11 @@ mod tests {
         assert!(!profile.contains("(allow default)"));
         assert!(profile.contains("/Volumes/objectives/example"));
         assert!(profile.contains("/private/tmp/proofwork-seatbelt-work"));
-        assert!(!profile
-            .lines()
-            .any(|line| line.starts_with("(allow") && line.contains("/Users/")));
+        // Nothing under a home directory is granted. The metadata rule names
+        // `$HOME` too, but only to carve it out (`require-not`).
+        assert!(!profile.lines().any(|line| line.starts_with("(allow")
+            && !line.contains("require-not")
+            && line.contains("/Users/")));
         assert!(!profile.contains("(subpath \"/\")"));
     }
 
