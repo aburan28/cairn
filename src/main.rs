@@ -4487,6 +4487,10 @@ fn print_help(out: &mut dyn Write) {
     say(out, "options:");
     say(
         out,
+        "  CAIRN_NETWORK=private  use explicit private peers; no public discovery or port mapping",
+    );
+    say(
+        out,
         "  --log PATH    JSONL log (default: $CAIRN_LOG_PATH, else cairn.jsonl)",
     );
     say(

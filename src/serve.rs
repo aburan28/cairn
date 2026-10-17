@@ -1212,6 +1212,7 @@ impl Serving {
     /// wants an unattended key should hold an unwrapped one with file
     /// permissions, which is what `cairn store keygen` writes by default.
     pub fn check_startup(&self) -> io::Result<()> {
+        crate::deployment::Profile::from_env().map_err(io::Error::other)?;
         if let Err(why) = &self.operator_token {
             return Err(io::Error::other(why.clone()));
         }
@@ -1357,12 +1358,13 @@ pub fn serve_on_all(
     mut serving: Serving,
 ) -> io::Result<()> {
     serving.bound = listener.local_addr().ok();
+    let profile = crate::deployment::Profile::from_env().map_err(io::Error::other)?;
     // Ask Tailscale only when the tailnet can reach this listener: bound to a
     // tailnet address, or to every address. A loopback or LAN-only server
     // never runs the command.
     if let (None, Some(bound)) = (&serving.tailnet, serving.bound) {
         let ip = bound.ip();
-        if ip.is_unspecified() || crate::tailnet::is_tailnet_ip(ip) {
+        if !profile.is_private() && (ip.is_unspecified() || crate::tailnet::is_tailnet_ip(ip)) {
             match crate::tailnet::status() {
                 Ok(status) => {
                     eprintln!(
@@ -5893,11 +5895,23 @@ mod ui {
 /// somebody is looking at this response, and the generic answer sends them to
 /// check their URL instead.
 fn ui_asset(stream: &mut TcpStream, path: &str) -> io::Result<()> {
+    let private = crate::deployment::Profile::from_env()
+        .map_err(io::Error::other)?
+        .is_private();
     // `/ui` -> "", `/ui/` -> "", `/ui/peers/` -> "peers/"
     let relative = path
         .strip_prefix("/ui")
         .unwrap_or("")
         .trim_start_matches('/');
+    // The embedded export also serves the public site's seed list. A failed
+    // same-origin health probe must not send a private reader to those seeds.
+    if relative == "seeds.json" && private {
+        return json(
+            stream,
+            200,
+            &Value::object([("version", Value::Int(1)), ("seeds", Value::array([]))]),
+        );
+    }
     // A directory, or the root: the exported index inside it.
     let candidate = if relative.is_empty() || relative.ends_with('/') {
         format!("{relative}index.html")
@@ -5907,7 +5921,7 @@ fn ui_asset(stream: &mut TcpStream, path: &str) -> io::Result<()> {
 
     for (name, mime, bytes) in ui::ASSETS {
         if *name == candidate {
-            return respond(stream, 200, mime, bytes);
+            return ui_asset_response(stream, mime, bytes, private);
         }
     }
     // A bare directory path without the trailing slash: Next's own links carry
@@ -5915,7 +5929,7 @@ fn ui_asset(stream: &mut TcpStream, path: &str) -> io::Result<()> {
     let with_index = format!("{relative}/index.html");
     for (name, mime, bytes) in ui::ASSETS {
         if *name == with_index {
-            return respond(stream, 200, mime, bytes);
+            return ui_asset_response(stream, mime, bytes, private);
         }
     }
 
@@ -5937,6 +5951,27 @@ fn ui_asset(stream: &mut TcpStream, path: &str) -> io::Result<()> {
         "application/json",
         error_body("no such path").as_bytes(),
     )
+}
+
+fn ui_asset_response(
+    stream: &mut TcpStream,
+    mime: &str,
+    bytes: &[u8],
+    private: bool,
+) -> io::Result<()> {
+    if private && mime.starts_with("text/html") {
+        // This marker is owned by the server, never interpolated from operator
+        // or peer input. It arrives before hydration, including when /health
+        // fails and the reader must show recovery instructions.
+        let html = std::str::from_utf8(bytes).map_err(io::Error::other)?;
+        let marked = html.replacen(
+            "<head>",
+            "<head><meta name=\"cairn-network\" content=\"private\"/>",
+            1,
+        );
+        return respond(stream, 200, mime, marked.as_bytes());
+    }
+    respond(stream, 200, mime, bytes)
 }
 
 fn auth_status(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {

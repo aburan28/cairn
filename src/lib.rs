@@ -32,6 +32,7 @@ pub mod contributor_score;
 pub mod corpus;
 pub mod crypto;
 pub mod daemon;
+pub mod deployment;
 pub mod deposit;
 pub mod dht;
 pub mod drand;

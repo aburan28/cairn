@@ -307,6 +307,12 @@ fn command_path() -> Option<std::path::PathBuf> {
 
 /// Ask the local Tailscale daemon who this machine is.
 pub fn status() -> Result<Status, Error> {
+    if crate::deployment::Profile::from_env()
+        .map_err(Error::Command)?
+        .is_private()
+    {
+        return Err(Error::Command("CAIRN_NETWORK=private does not probe Tailscale; use an explicit internal or WireGuard IP address".into()));
+    }
     let path = command_path().ok_or(Error::NotInstalled)?;
     let mut child = Command::new(&path)
         .args(["status", "--json"])
