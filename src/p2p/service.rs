@@ -1149,11 +1149,50 @@ impl Service {
         inbound: transport::Inbound,
         node: &mut Node,
     ) -> Result<PeerId, ServiceError> {
-        let mut connection = inbound.complete(&self.identity)?;
+        self.serve_connection_once(self.complete_inbound(inbound)?, node)
+    }
+
+    /// Finish the responder side of the handshake and apply the allowlist,
+    /// needing nothing but this node's identity -- and so, again, no lock.
+    ///
+    /// # Why the handshake is not done under the node lock
+    ///
+    /// The daemon's tick holds its node lock for the whole of an outbound
+    /// session, handshake included. Two nodes that dial each other in the same
+    /// tick -- two peers bootstrapped at each other and started together do it
+    /// every time -- each held their own lock waiting for the other's reply,
+    /// while each one's inbound thread had read the hello and was queued on
+    /// that same lock before answering it. Both dials ran out the handshake
+    /// timeout at the same instant, which put the next tick's dials back in
+    /// step, so the pair could stay apart indefinitely.
+    ///
+    /// Completing here, before the lock, means the dialler's handshake no
+    /// longer waits on this node's lock, and it gives the caller the
+    /// *authenticated* remote id while it still holds nothing -- which is what
+    /// it needs to see that the session holding its lock is a dial to this
+    /// very peer, and break the tie. A hello's key is only a claim until the
+    /// handshake proves it, so a stranger naming a peer cannot use it to make
+    /// this node drop or skip that peer.
+    pub fn complete_inbound(
+        &self,
+        inbound: transport::Inbound,
+    ) -> Result<Connection, ServiceError> {
+        let connection = inbound.complete(&self.identity)?;
         let remote = connection.remote();
         if !self.allows(&remote) {
             return Err(ServiceError::NotAllowed(remote));
         }
+        Ok(connection)
+    }
+
+    /// [`Self::serve_inbound_once`] on a connection [`Self::complete_inbound`]
+    /// already authenticated and allowed.
+    pub fn serve_connection_once(
+        &self,
+        mut connection: Connection,
+        node: &mut Node,
+    ) -> Result<PeerId, ServiceError> {
+        let remote = connection.remote();
         let (_, wanted, said) = exchange_records_and_code(&mut connection, node, self.about())?;
         self.learn(remote, said);
         self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
@@ -1186,16 +1225,29 @@ impl Service {
         node: &mut Node,
         population: &mut Population,
         limits: PopLimits,
+        rescore: F,
+    ) -> Result<(PeerId, PopReport), ServiceError>
+    where
+        F: FnMut(&Node, &Candidate) -> Option<i64>,
+    {
+        let connection = self.complete_inbound(inbound)?;
+        self.serve_connection_and_population(connection, node, population, limits, rescore)
+    }
+
+    /// [`Self::serve_inbound_and_population`] on a connection
+    /// [`Self::complete_inbound`] already authenticated and allowed.
+    pub fn serve_connection_and_population<F>(
+        &self,
+        mut connection: Connection,
+        node: &mut Node,
+        population: &mut Population,
+        limits: PopLimits,
         mut rescore: F,
     ) -> Result<(PeerId, PopReport), ServiceError>
     where
         F: FnMut(&Node, &Candidate) -> Option<i64>,
     {
-        let mut connection = inbound.complete(&self.identity)?;
         let remote = connection.remote();
-        if !self.allows(&remote) {
-            return Err(ServiceError::NotAllowed(remote));
-        }
         let (_, wanted, said) = exchange_records_and_code(&mut connection, node, self.about())?;
         self.learn(remote, said);
         self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
