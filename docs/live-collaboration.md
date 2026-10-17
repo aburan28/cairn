@@ -167,12 +167,15 @@ Sync and execution remain separate operator-configured operations.
 
 ## Current scope and validation
 
-The first version is a CLI/MCP collaboration substrate, not a graphical editor,
-a mounted filesystem, or a full Git hosting/review replacement. It edits UTF-8
+The collaboration substrate supports CLI/MCP agents and the
+[local graphical workbench](collaboration-workbench.md). It is not a mounted
+filesystem or a full hosting/review replacement. It edits UTF-8
 text; binary assets and renames can remain in the ordinary lab. A rename can
 also be expressed as an atomic remove/create, without tracking rename identity.
-There is no automatic semantic merge, exclusive distributed lock, storage quota
-or tombstone compaction.
+There is no automatic semantic merge, exclusive distributed lock or storage
+quota. Administrator-only generation rollover resets the active character graph
+and preserves signed history as an archive; it does not delete old anchors from
+a live space or automatically translate late old-space edits.
 
 Limits are 64 causal parents, 64 paths per edit, 1 MiB of inserted source bytes
 per path along a causal history, 1,000,000 historical Unicode scalars per
