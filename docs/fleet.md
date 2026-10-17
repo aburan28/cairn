@@ -83,6 +83,66 @@ the member did not sign is refused with `403` and `"reason": "name_reserved"`.
 
 ## Setting it up
 
+### Private installations and WireGuard
+
+Set `CAIRN_NETWORK=private` on each Cairn node for an internal deployment. The
+node never loads the compiled public seed list, refreshes it from GitHub,
+announces multicast beacons, asks a router to open ports, or probes Tailscale.
+This overrides ambient `CAIRN_PORTMAP`, `CAIRN_PORTMAP_HTTP`, and beacon settings.
+An unknown profile refuses startup. Google sign-in is incompatible: remove
+`CAIRN_GOOGLE_CLIENT_ID` explicitly before starting rather than having a sign-in
+configuration silently disappear. Fleet enrollment and member signatures work
+unchanged and are recommended even on a private tunnel.
+
+WireGuard itself is provisioned by the operator: install it, distribute its
+public keys, assign internal addresses, and establish permitted routes before
+starting Cairn. No Tailscale account, public DNS or external discovery server is
+needed. Bind to the actual address on that interface, for example:
+
+```sh
+CAIRN_NETWORK=private CAIRN_FLEET=enrolled \
+  cairn --data-dir /var/lib/cairn run --no-mcp \
+  --listen 127.0.0.1:9000 --serve 10.80.0.1:8080 \
+  --mcp-identity /var/lib/cairn/leader.identity.json
+```
+
+This leader peers with nobody, including inbound strangers. Invite a member
+with `--node http://10.80.0.1:8080`; the member's `cairn agent` and `cairn work`
+then reach it through the existing WireGuard routes. The tunnel supplies
+confidentiality; the fleet member key supplies application authentication.
+An enterprise gateway forwarding separate WireGuard tunnels can read the
+forwarded HTTP payload. Provision direct tunnels when that gateway must not
+see it; this profile does not add application-layer encryption to HTTP.
+
+For a private network of replicating Cairn nodes, bind p2p to each node's internal
+address and distribute bootstrap files containing that address and the node's
+real transport public key. Add them with `--bootstrap FILE` (repeatable).
+Private mode defaults to allowing exactly those bootstrap identities. With no
+files it allows zero peers. `CAIRN_PEERS=open` is refused; an explicit list of
+peer ids, optionally including `bootstrap`, can allow more. A local
+`CAIRN_SEEDS=/etc/cairn/seeds.json` file is also supported; its peers must appear
+in that explicit allowlist. Public-list refresh is always off in private mode.
+
+The embedded reader resolves this node on the same origin first. In private
+mode its `/ui/seeds.json` is empty, including when a public-site seed list was
+embedded at build time, so a failed health probe cannot fall back to public
+seeds. Build with `NEXT_PUBLIC_CAIRN_NODE` unset for this same-origin behavior;
+that build-time variable is an explicit endpoint override. The reader loads
+no external authentication script or font CDN. Operators can still explicitly
+enter another node URL. A server-owned HTML marker makes the setup panel show
+internal/WireGuard recovery guidance in private mode, including when the health
+endpoint is unavailable.
+
+The profile is a network-discovery policy, not a firewall or an air-gap
+certification. Explicit bootstrap/seed hostnames use the host's resolver (use
+internal DNS or literal IPs); explicit peers can still carry public IPs. Solver
+commands, model endpoints, container images and operator-requested downloads
+need their own offline provisioning and egress policy. Cairn does not yet
+provision WireGuard keys, routes, relays or exit nodes, and does not provide an
+enterprise identity provider or workspace access-control boundary. Enforce
+network isolation outside Cairn and keep exported logs and artifacts within
+the installation's approved transfer process.
+
 ### The leader
 
 **On a Mac**: Cairn.app, **Settings → Fleet → Lead a fleet**, with *Who may

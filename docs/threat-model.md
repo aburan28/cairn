@@ -1,5 +1,12 @@
 # Threat model
 
+`CAIRN_NETWORK=private` is an operator-selected discovery policy; it does not
+enforce a physical air gap. See [private installations](fleet.md#private-installations-and-wireguard).
+
+| attack | defence | status |
+|---|---|---|
+| Accidental public discovery from a private installation | Private startup disables compiled/public seed discovery, published-list refresh, multicast discovery, automatic router mappings and Tailscale probing. P2P permits only configured peer identities (zero is valid). External Google sign-in conflicts refuse startup instead of silently removing the configured sign-in. Explicit peer addresses, DNS, tools and job execution still need operator egress controls; WireGuard gateway forwarding exposes HTTP payloads to the gateway | partial |
+
 What breaks this, and which parts Stage 0 actually handles. "Handled" below
 means there is code and a test; everything else is named so it is not mistaken
 for solved.
