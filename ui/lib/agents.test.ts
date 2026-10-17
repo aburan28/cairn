@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentStanza, claudeAdd, describePresence, slashCommand } from "./agents";
+import { agentStanza, claudeAdd, conductorSetup, describePresence, slashCommand } from "./agents";
 
 describe("agent stanzas", () => {
   it("launch the node itself, so the agent and this reader share one process", () => {
@@ -9,6 +9,15 @@ describe("agent stanzas", () => {
     expect(opencode.mcp.cairn.command).toEqual(["/opt/cairn", "run"]);
     expect(agentStanza("codex")).toBe('[mcp_servers.cairn]\ncommand = "cairn"\nargs = ["run"]\n');
     expect(claudeAdd()).toBe("claude mcp add cairn --scope user -- cairn run");
+  });
+
+  it("point Conductor's clients at one node over HTTP, with no local paths", () => {
+    expect(conductorSetup()).toEqual({
+      serve: "cairn run --mcp-http 127.0.0.1:8001",
+      claude: "claude mcp add --transport http --scope user cairn http://127.0.0.1:8001/mcp",
+      codex: "codex mcp add cairn --url http://127.0.0.1:8001/mcp",
+    });
+    expect(conductorSetup("http://127.0.0.1:50123/mcp").serve).toBe("cairn run --mcp-http 127.0.0.1:50123");
   });
 
   it("name a prompt as Claude Code's slash command", () => {

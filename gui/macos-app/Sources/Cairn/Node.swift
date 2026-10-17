@@ -64,6 +64,9 @@ final class Node: ObservableObject {
     /// What New Challenge… opens with: the description the reader's Post a
     /// challenge page handed over, or nil from the Node menu.
     private(set) var challengeBrief: String?
+    /// What Connect an Agent… opens on: Conductor when the reader's page
+    /// asked for it, else Claude Code.
+    private(set) var agentsClient: AgentClient = .claudeCode
 
     /// Where the node keeps its log, keys and queue.
     var dataDir: URL { settings.dataFolder }
@@ -161,7 +164,9 @@ final class Node: ObservableObject {
         if sheetIsOpen { return "Close the sheet that is open in Cairn.app first." }
         switch sheet {
         case .agents:
-            presentAgents = true
+            connectAgent()
+        case .conductor:
+            connectAgent(.conductor)
         case .work:
             work(on: objective)
         case .peers:
@@ -175,6 +180,12 @@ final class Node: ObservableObject {
             return "Settings opens from the Cairn menu."
         }
         return nil
+    }
+
+    /// Connect an Agent…, open on `client`.
+    func connectAgent(_ client: AgentClient = .claudeCode) {
+        agentsClient = client
+        presentAgents = true
     }
 
     /// Start `cairn work` as the sheet asked, with the key it is paid to

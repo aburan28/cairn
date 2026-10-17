@@ -384,7 +384,8 @@ stops with the app.
 
 The reader's **Contribute** page (and the challenge page's *Join this
 challenge* box) has a button for every role when it is shown in this
-window, so nothing there asks for a terminal: **Connect an agent…** and
+window, so nothing there asks for a terminal: **Connect an agent…**,
+**Connect Conductor…** (the same sheet, on its Conductor tab) and
 **Work on this Mac…** open the sheets above, and **Check answers here**,
 **Relay here** and **Share on my network** flip the matching toggle in
 Settings ▸ Roles and restart the node. Each toggle asks first, with a

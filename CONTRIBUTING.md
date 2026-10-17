@@ -53,6 +53,24 @@ from either Rust implementation would quietly turn the contract into a
 description of one program's behaviour. A *diff* in an existing vector means
 you moved ids and orphaned live work.
 
+### Working in Conductor
+
+[`conductor.json`](conductor.json) sets up [Conductor](https://conductor.build)
+workspaces for this repository, through
+[`scripts/conductor.sh`](scripts/conductor.sh):
+
+- **Setup** compiles the test targets, so an agent's first
+  `cargo test --all-targets` tests rather than builds, and runs `npm ci` in
+  `ui/` when Node is installed.
+- **Run** starts `cairn run` from the workspace's own source, on its own data
+  (`.local/conductor/`, so it goes when the workspace does). The reader is on
+  `$CONDUCTOR_PORT`, P2P on the next port and MCP over HTTP on the one after.
+  It runs with `CAIRN_NETWORK=private`: no seeds, no LAN beacon, no peers. A
+  branch under development never syncs with your real node, another
+  workspace's, or the network.
+
+Workspaces run side by side, each on the ports Conductor gave it.
+
 ### House style
 
 Comments explain *why*, and especially why the obvious alternative was not

@@ -34,11 +34,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    // Rerun rules first, so they apply even on the early return. Without the
-    // `ui/out` line, turning the feature on after a build that skipped it
-    // leaves a cached empty table.
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=ui/out");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is always set by cargo"));
     let generated = out_dir.join("ui_assets.rs");
@@ -58,6 +54,13 @@ fn main() {
         .expect("cannot write the empty asset table");
         return;
     }
+
+    // Watched only with the feature on. A path that does not exist is stale
+    // to cargo on every build, so watching it unconditionally recompiled the
+    // whole crate on every `cargo build` and `cargo test` in any checkout
+    // without an exported reader. Turning the feature on needs no watch: the
+    // features are part of this script's fingerprint, so it reruns anyway.
+    println!("cargo:rerun-if-changed=ui/out");
 
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("set by cargo"));
     let dist = root.join("ui").join("out");
