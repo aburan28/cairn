@@ -4524,11 +4524,10 @@ fn print_help(out: &mut dyn Write) {
     say(out, "  3  reveal produced a verdict that settles nothing");
 }
 
-/// `cairn --version`: the crate version, and the feature that changes the
-/// command set.
+/// `cairn --version`: the crate version and embedded-reader readiness.
 ///
-/// The `ui` feature is reported because it is the only build-time choice an
-/// operator can hit from outside the binary: without it `run` refuses to start,
+/// Reader availability is reported because it changes the command set an
+/// operator can use from outside the binary: without assets `run` refuses to start,
 /// and from a support thread "which version" and "did your build embed the
 /// reader" are the same question asked twice. `cairn::VERSION` is the same
 /// constant the MCP server announces in its handshake and the HTTP index puts
@@ -4537,8 +4536,10 @@ fn print_version(out: &mut dyn Write) {
     say(out, format!("cairn {}", cairn::VERSION));
     say(
         out,
-        if cfg!(feature = "ui") {
+        if cairn::serve::embedded_reader_available() {
             "  ui       embedded -- `cairn run` will start"
+        } else if cfg!(feature = "ui") {
+            "  ui       missing assets -- `cairn run` refuses; build with `make ui-build`"
         } else {
             "  ui       not embedded -- `cairn run` refuses; build with `make ui-build`"
         },
@@ -4588,10 +4589,11 @@ fn cli_globals(options: &Options) -> cairn::cli::Globals {
 /// A wrapper would have to rediscover binary paths and would make the release's
 /// promise of one node process less clear.
 fn cmd_run(_out: &mut dyn Write, options: &Options, request: &RunRequest) -> Result<i32, CliError> {
-    if !cfg!(feature = "ui") {
+    if !cairn::serve::embedded_reader_available() {
         return Err(CliError::Usage(String::from(
-            "run requires the embedded UI; build with `make ui-build` or \
-             `cargo build --release --features ui`, then run the resulting binary",
+            "run requires the embedded UI assets; build with `make ui-build` \
+             (or build ui/out, then cargo build --release --features ui), \
+             then run the resulting binary",
         )));
     }
 
@@ -12854,6 +12856,12 @@ mod tests {
         assert!(
             text.contains("ui"),
             "the ui feature must be reported: {text}"
+        );
+        assert_eq!(
+            text.lines()
+                .any(|line| line.trim_start().starts_with("ui       embedded --")),
+            cairn::serve::embedded_reader_available(),
+            "the affirmative status must describe compiled assets: {text}"
         );
     }
 

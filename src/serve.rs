@@ -5883,6 +5883,25 @@ mod ui {
     include!(concat!(env!("OUT_DIR"), "/ui_assets.rs"));
 }
 
+/// Whether this binary contains the reader's root HTML and JavaScript.
+///
+/// The `ui` feature alone is insufficient: source-only builds may intentionally
+/// have no exported assets. This readiness check reads only the compiled table;
+/// it neither starts a listener nor probes the network. Browser acceptance still
+/// checks that the packaged reader actually loads and works.
+pub fn embedded_reader_available() -> bool {
+    reader_assets_available(ui::ASSETS)
+}
+
+fn reader_assets_available(assets: &[ui::Asset]) -> bool {
+    assets
+        .iter()
+        .any(|(name, _, bytes)| *name == "index.html" && !bytes.is_empty())
+        && assets
+            .iter()
+            .any(|(name, _, bytes)| name.ends_with(".js") && !bytes.is_empty())
+}
+
 /// Serve one file of the embedded `ui/` reader.
 ///
 /// The export is built with `trailingSlash`, so a directory URL maps to
@@ -6138,6 +6157,28 @@ fn respond_with(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn reader_readiness_requires_nonempty_root_html_and_javascript() {
+        let html: ui::Asset = ("index.html", "text/html", b"<html></html>");
+        let js: ui::Asset = ("_next/static/app.js", "text/javascript", b"console.log(1)");
+        assert!(!reader_assets_available(&[]));
+        assert!(!reader_assets_available(&[html]));
+        assert!(!reader_assets_available(&[js]));
+        assert!(!reader_assets_available(&[
+            ("peers/index.html", "text/html", b"<html></html>"),
+            js,
+        ]));
+        assert!(!reader_assets_available(&[
+            ("index.html", "text/html", b""),
+            js
+        ]));
+        assert!(!reader_assets_available(&[
+            html,
+            ("_next/static/app.js", "text/javascript", b""),
+        ]));
+        assert!(reader_assets_available(&[html, js]));
+    }
 
     struct TempDir {
         path: PathBuf,
