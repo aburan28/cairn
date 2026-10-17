@@ -51,6 +51,10 @@ struct NodeSettings: Equatable {
         /// Serve a fleet this node leads on the tailnet, not every interface:
         /// `--serve tailnet:PORT`. See `fleetTailnet`.
         static let fleetTailnet = "fleetTailnet"
+        /// Answer agents on this Mac over MCP, Streamable HTTP on loopback
+        /// (`--mcp-http`), so any number of them share this one node. See
+        /// `agentArguments`.
+        static let serveAgents = "serveAgents"
     }
 
     /// Who may join a fleet this node leads.
@@ -143,6 +147,10 @@ struct NodeSettings: Equatable {
     /// tailnet address. Membership is unchanged: being on the tailnet admits
     /// nobody, and an invited fleet still signs only for invited keys.
     var fleetTailnet: Bool = false
+    /// Serve MCP over HTTP on loopback beside the node's other work. Off by
+    /// default: the endpoint acts as this node's identity for any program on
+    /// this Mac that connects, so it opens when a person asks for it.
+    var serveAgents: Bool = false
 
     /// `CAIRN_FLEET` for this fleet.
     var fleetSources: String {
@@ -175,6 +183,37 @@ struct NodeSettings: Equatable {
     /// reuses with an identity of its own.
     var fleetArguments: [String] {
         leadFleet ? ["--mcp-identity", leaderIdentity.path] : []
+    }
+
+    /// Where agents reach the node unless that port was taken: the address
+    /// docs/agents.md uses, fixed so a client's config outlives a restart.
+    static let agentsPort: UInt16 = 8001
+
+    static func agentsURL(port: UInt16) -> URL {
+        URL(string: "http://127.0.0.1:\(port)/mcp")!
+    }
+
+    /// The key Connect an Agent… makes for agents to sign with.
+    var agentIdentity: URL { dataFolder.appendingPathComponent("agent.identity.json") }
+
+    /// `agentIdentity`, when it has been made.
+    var existingAgentIdentity: URL? {
+        FileManager.default.fileExists(atPath: agentIdentity.path) ? agentIdentity : nil
+    }
+
+    /// Flags of `run` that answer agents over MCP on loopback `port`; empty
+    /// unless `serveAgents`. Every client that connects opens its own
+    /// session on the one log, which is what lets several agents -- each
+    /// Conductor workspace starts its own -- work at once, where each
+    /// spawning a `cairn run` of its own would be refused the log's lock.
+    /// Submissions are signed with `identity` when one is given, except on a
+    /// fleet leader: the node has one `--mcp-identity`, and a leader's is the
+    /// key its fleet is paid to, which `fleetArguments` already passes.
+    func agentArguments(port: UInt16, signedBy identity: URL?) -> [String] {
+        guard serveAgents else { return [] }
+        var args = ["--mcp-http", "127.0.0.1:\(port)"]
+        if !leadFleet, let identity { args += ["--mcp-identity", identity.path] }
+        return args
     }
 
     /// Whether Settings asked for the launchd agent.
@@ -221,6 +260,7 @@ struct NodeSettings: Equatable {
             Key.leadFleet: false,
             Key.fleetNetworks: defaultFleetNetworks,
             Key.fleetTailnet: false,
+            Key.serveAgents: false,
         ]
     }
 
@@ -270,7 +310,8 @@ struct NodeSettings: Equatable {
                 return text.isEmpty ? defaultFleetNetworks : text
             }(),
             fleetJoin: FleetJoin(rawValue: defaults.string(forKey: Key.fleetJoin) ?? "") ?? .invited,
-            fleetTailnet: defaults.bool(forKey: Key.fleetTailnet)
+            fleetTailnet: defaults.bool(forKey: Key.fleetTailnet),
+            serveAgents: defaults.bool(forKey: Key.serveAgents)
         )
     }
 
