@@ -62,6 +62,17 @@ A certificate proves a positive result is real; a search that found nothing is
 a scoped negative observation about the region searched, and it mints nothing at
 V0–V2. Rewarding "I looked and found nothing" pays for not looking.
 
+## Prescribed execution in the proof chain
+
+[Execution-proof integration](design/execution-proof-chain.md) is a required
+workstream for objectives that promise a particular computation. It binds
+the approved protocol, executable, inputs, complete workload and raw results
+through metrics to research evidence and settlement. The proposed execution
+verifier is **not implemented**. Existing certificates establish their witness
+relation; replay reproduces the pinned computation. Neither should be labeled
+as cryptographic proof of prescribed execution. The design names the real-proof,
+primary/reference, availability and promotion gates required before release.
+
 ## Authoring a verifier
 
 This is the scarce skill in the whole system. Turning "understand X" into a

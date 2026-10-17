@@ -1,5 +1,17 @@
 # Roadmap
 
+## Required execution-proof integration
+
+The owner's 2026-10-16 requirement makes prescribed-execution proofs integral
+to the [proof chain](proving-it.md), with the implementation/release contract
+in [design/execution-proof-chain.md](design/execution-proof-chain.md).
+All milestones remain open: versioned statement and program/input/output
+bindings; real small-walk and complete-count proofs; primary/reference
+verification and availability; crypto-autoresearcher promotion/settlement
+bindings; adversarial and cost evidence; then newly funded enforcement.
+An optional receipt attachment or a postprocessing-only proof does not finish
+this work. This design does not change existing settlement or scientific state.
+
 Ordered by value delivered per unit of consensus complexity — roughly the
 reverse of how these projects are usually built.
 

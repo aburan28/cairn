@@ -27,6 +27,7 @@ below is either reference (what a command, a setting, or a word does) or design
 | know what a word means | [glossary.md](glossary.md) |
 | fix something that is not working | [troubleshooting.md](troubleshooting.md) |
 | understand the whole design | [architecture.md](architecture.md), then [diagrams.md](diagrams.md) |
+| integrate prescribed-computation proofs through evidence and settlement | [design/execution-proof-chain.md](design/execution-proof-chain.md), then [proving-it.md](proving-it.md) |
 | keep a research program's shared state without git, and run its experiments in sandboxes | [lab.md](lab.md) |
 | put a Linux box with GPUs on the network as a place executor jobs run, under systemd | [agent.md](agent.md) |
 | attack it | [threat-model.md](threat-model.md) |
