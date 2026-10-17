@@ -107,6 +107,20 @@ pub const VDF_SOURCE: &str = "vdf";
 /// makes sure the log's claim that somebody waited is never vacuous.
 pub const MIN_VDF_DIFFICULTY: u64 = 1 << 16;
 
+/// The first epoch whose delay-beacon seed covers the beacon's own difficulty
+/// (2026-11-01T00:00Z at [`crate::partition::EPOCH_SECONDS`]).
+///
+/// The record names its difficulty `T`, and for one seed `y_{T+1} = y_T^2`:
+/// a sequencer squaring once past its floor had a fresh beacon value per
+/// squaring, each with a valid proof once it chose one, so it ground the
+/// settlement order at one squaring a candidate and paid the delay once.
+/// With `T` inside the seed, each `T` starts from a different `x` and costs
+/// a whole evaluation -- the parallel-seed bound [`crate::vdf`] describes.
+/// Earlier epochs keep the seed they were written against, so logs that
+/// already hold beacons still audit; the cutover is a function of the
+/// record's own epoch, never of a clock.
+pub const VDF_SEED_BINDS_DIFFICULTY_FROM: u64 = 2_989_152;
+
 /// A reader's own minimum for delay beacons, above [`MIN_VDF_DIFFICULTY`].
 ///
 /// The record names its difficulty, and a useful one fills most of an epoch,
@@ -6604,7 +6618,7 @@ impl Node {
     /// Bounded by position for the reason every derivation here is: a beacon
     /// must stay checkable against the log as it stood when it was written,
     /// and a beacon is itself an entry, so it cannot be inside its own seed.
-    pub fn vdf_seed(&self, epoch: u64, positions: usize) -> Vec<u8> {
+    pub fn vdf_seed(&self, epoch: u64, positions: usize, difficulty: u64) -> Vec<u8> {
         let root = self
             .ledger
             .prefix(positions)
@@ -6613,6 +6627,10 @@ impl Node {
         let mut seed = Vec::new();
         seed.extend_from_slice(b"proofwork/vdf/seed");
         seed.extend_from_slice(&epoch.to_be_bytes());
+        // Fixed width, and before the root, which may be empty.
+        if epoch >= VDF_SEED_BINDS_DIFFICULTY_FROM {
+            seed.extend_from_slice(&difficulty.to_be_bytes());
+        }
         seed.extend_from_slice(root.as_bytes());
         seed
     }
@@ -6649,7 +6667,11 @@ impl Node {
         let witness = crate::hex::decode(payload_str(payload, "witness").ok_or_else(fail)?)
             .ok_or_else(fail)?;
         let proof = crate::vdf::Proof { output, witness };
-        if crate::vdf::verify(&self.vdf_seed(epoch, positions), difficulty, &proof) {
+        if crate::vdf::verify(
+            &self.vdf_seed(epoch, positions, difficulty),
+            difficulty,
+            &proof,
+        ) {
             Ok(())
         } else {
             Err(fail())
@@ -14099,7 +14121,7 @@ mod tests {
         // real difficulty is chosen so one beacon takes most of an epoch,
         // which is what makes trying a hundred orderings unaffordable.
         const DIFFICULTY: u64 = crate::node::MIN_VDF_DIFFICULTY;
-        let seed = honest_node.vdf_seed(orders, honest_node.ledger().len());
+        let seed = honest_node.vdf_seed(orders, honest_node.ledger().len(), DIFFICULTY);
         let proof = crate::vdf::prove(&seed, DIFFICULTY);
 
         honest_node
@@ -14121,7 +14143,7 @@ mod tests {
         let mut node = node(&forged_dir);
         // Two empty logs share a seed, so the honest proof above is this
         // node's honest proof too, and the floor is paid once.
-        assert_eq!(node.vdf_seed(orders, node.ledger().len()), seed);
+        assert_eq!(node.vdf_seed(orders, node.ledger().len(), DIFFICULTY), seed);
         let honest = proof.clone();
         let preferred =
             crate::vdf::element(b"the answer I wanted").to_be_bytes(crate::vdf::ELEMENT_BYTES);
@@ -14321,7 +14343,7 @@ mod tests {
         // uppercase copy of an honest value is a different order.
         let dir = TempDir::new("vdf-spelling");
         let mut spelled = node(&dir);
-        let seed = spelled.vdf_seed(orders, spelled.ledger().len());
+        let seed = spelled.vdf_seed(orders, spelled.ledger().len(), MIN_VDF_DIFFICULTY);
         let honest = crate::vdf::prove(&seed, MIN_VDF_DIFFICULTY);
         let upper = honest.output_hex().to_ascii_uppercase();
         assert_ne!(upper, honest.output_hex());
@@ -14372,7 +14394,7 @@ mod tests {
         // A difficulty the record chose to be nothing: x itself, proved by 1.
         let dir = TempDir::new("vdf-free");
         let mut free = node(&dir);
-        let seed = free.vdf_seed(orders, free.ledger().len());
+        let seed = free.vdf_seed(orders, free.ledger().len(), 0);
         let instant = crate::vdf::prove(&seed, 0);
         assert!(
             crate::vdf::verify(&seed, 0, &instant),
@@ -14416,14 +14438,52 @@ mod tests {
     /// The seed is the epoch's own anchor, so it is not knowable before the
     /// epoch's records exist — and a sequencer that reorders them has to pay
     /// the delay again for each ordering it tries.
+    /// For one seed a longer delay is one more squaring of a shorter one, so
+    /// a difficulty the record chose freely let a sequencer grind the order
+    /// at a squaring per candidate. From the cutover the seed covers `T`: the
+    /// value a grinder gets by squaring on is not a beacon for `T + 1`.
+    #[test]
+    fn a_delay_beacon_cannot_be_lengthened_by_squaring_on() {
+        let dir = TempDir::new("vdf-lengthened");
+        let node = node(&dir);
+        let at = node.ledger().len();
+        let before = VDF_SEED_BINDS_DIFFICULTY_FROM - 1;
+        let after = VDF_SEED_BINDS_DIFFICULTY_FROM;
+        const T: u64 = MIN_VDF_DIFFICULTY;
+        // Before the cutover, the seed is what it always was.
+        assert_eq!(
+            node.vdf_seed(before, at, T),
+            node.vdf_seed(before, at, T + 1)
+        );
+        // After it, a different `T` is a different starting point.
+        assert_ne!(node.vdf_seed(after, at, T), node.vdf_seed(after, at, T + 1));
+
+        // The bytes, pinned alongside `reference/rust/src/vdf.rs`: an empty
+        // log has no root, so the seed is the prefix, the epoch and `T`.
+        assert_eq!(
+            crate::hex::encode(&node.vdf_seed(after, 0, T)),
+            "70726f6f66776f726b2f7664662f7365656400000000002d9c600000000000010000"
+        );
+
+        // The grinder's chain: one seed, carried one squaring further.
+        let chain = node.vdf_seed(after, at, T);
+        let lengthened = crate::vdf::prove(&chain, T + 1);
+        assert!(crate::vdf::verify(&chain, T + 1, &lengthened));
+        assert!(!crate::vdf::verify(
+            &node.vdf_seed(after, at, T + 1),
+            T + 1,
+            &lengthened
+        ));
+    }
+
     #[test]
     fn the_delay_seed_moves_when_the_log_does() {
         let dir = TempDir::new("vdf-seed");
         let mut node = node(&dir);
         let orders = epoch_at(EPOCH);
-        let before = node.vdf_seed(orders, node.ledger().len());
+        let before = node.vdf_seed(orders, node.ledger().len(), MIN_VDF_DIFFICULTY);
         node.post_objective(&lean_objective(1), TS).expect("post");
-        let after = node.vdf_seed(orders, node.ledger().len());
+        let after = node.vdf_seed(orders, node.ledger().len(), MIN_VDF_DIFFICULTY);
         assert_ne!(
             before, after,
             "the seed ignored the log, so grinding it would still be free"
