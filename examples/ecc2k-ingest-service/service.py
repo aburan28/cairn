@@ -10,7 +10,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-DOMAIN = b"cairn/ecc2k130-ingest-service/v1\n"
+DOMAIN = b"cairn/ecc2k130-ingest-service/v2\n"
 HERE = Path(__file__).resolve().parent
 
 
@@ -43,9 +43,9 @@ def objective(args):
         raise ValueError("input bucket must be a valid S3 bucket name")
     if args.period_seconds < 60 or args.period_seconds > 86400 or 86400 % args.period_seconds:
         raise ValueError("period must divide one day and be between 60 and 86400 seconds")
-    if args.unit_price < 1 or args.periods < 1:
-        raise ValueError("unit price and funded periods must be positive")
-    reward = args.unit_price * args.periods
+    if args.unit_price < 1 or args.funded_replica_periods < 1:
+        raise ValueError("unit price and funded replica-periods must be positive")
+    reward = args.unit_price * args.funded_replica_periods
     if reward >= 2**64:
         raise ValueError("reward does not fit Cairn's u64 amount")
     public_key = bytes.fromhex(args.auditor_public_key)
@@ -65,23 +65,23 @@ def objective(args):
         "funder": args.funder,
         "goal": args.goal,
         "reward": reward,
-        "piecework": {"key": "period", "unit_price": args.unit_price},
+        "piecework": {"key": "unit", "unit_price": args.unit_price},
         "statement": (
             "Pay one claim for each elapsed ECC2K-130 distinguished-point ingester "
-            "service period approved by the pinned auditor. The receipt names the intended "
+            "replica-period approved by the pinned auditor. The receipt names the replica and intended "
             "operator; the auditor must deliver it privately until that operator commits, "
             "because the current checker cannot bind the outer submitter. A receipt includes S3 input-object "
             "digests, the matching RDS progress rows, and exact before/after public status JSON. "
             "The checker replays the auditor signature and receipt consistency. Private S3/RDS "
             "contents are checked by that auditor, so acceptance means auditor approval, not "
-            "public verification of those private stores. The unit is a period, including one "
+            "public verification of those private stores. The unit is a replica and period, including one "
             "with zero new points; distinguished-point production has a separate objective. "
             "Each period can be paid once across objectives with the same checker and piecework "
-            "terms. The pool funds a configurable number of periods, not a completion date."
+            "terms. The pool funds a configurable number of replica-periods, not a completion date."
         ),
         "artifact_schema": {
             "type": "object",
-            "required": ["body", "period", "signature"],
+            "required": ["body", "unit", "signature"],
             "description": "Auditor-signed period receipt. See examples/ecc2k-ingest-service/README.md.",
         },
         "verifier": {
@@ -112,17 +112,29 @@ def snapshot(path):
 
 
 def prepare(args):
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", args.replica_id):
+        raise ValueError("replica id must be 1-80 ASCII letters, digits, dot, underscore, or hyphen")
     objects = load_json(args.objects)
     progress = load_json(args.progress)
+    poll_export = load_json(args.polls_file)
     if type(objects) is not list or type(progress) is not list:
         raise ValueError("objects and progress must be arrays")
+    start = args.period * args.period_seconds
+    end = start + args.period_seconds
+    if (type(poll_export) is not dict or set(poll_export) != {"replica_id", "start", "end", "events"}
+            or poll_export["replica_id"] != args.replica_id
+            or poll_export["start"] != start or poll_export["end"] != end
+            or type(poll_export["events"]) is not list or not poll_export["events"]):
+        raise ValueError("poll export does not match the replica and period")
     body = {
         "service": args.service,
         "input_bucket": args.input_bucket,
         "period": args.period,
+        "replica_id": args.replica_id,
         "operator": args.operator,
         "nonce": args.nonce,
-        "polls": args.polls,
+        "polls": len(poll_export["events"]),
+        "poll_events": poll_export["events"],
         "input_objects": objects,
         "progress": progress,
         "before_status": snapshot(args.before),
@@ -141,7 +153,9 @@ def sign(args):
     if not isinstance(key, Ed25519PrivateKey):
         raise ValueError("auditor key must be Ed25519")
     signature = key.sign(DOMAIN + canonical(body)).hex()
-    write_json(args.out, {"body": body, "period": body["period"], "signature": signature})
+    write_json(args.out, {"body": body,
+                          "unit": f"{body['replica_id']}:{body['period']}",
+                          "signature": signature})
     print(args.out)
 
 
@@ -165,6 +179,9 @@ def collect(args):
     import boto3
     import psycopg
 
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", args.replica_id):
+        raise ValueError("invalid replica id")
+
     def utc_stamp(value):
         if not value.endswith("Z"):
             raise ValueError("collect timestamps must be UTC and end in Z")
@@ -181,34 +198,82 @@ def collect(args):
     with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
         with conn.cursor() as cursor:
             cursor.execute(
-                "SELECT object_key, records, duplicates FROM dp_ingest_progress "
-                "WHERE campaign_id = %s AND ingested_at >= %s AND ingested_at < %s "
+                "SELECT object_key, records, duplicates, object_sha256, "
+                "object_version_id, object_bytes, ingested_at FROM dp_ingest_progress "
+                "WHERE campaign_id = %s AND ingester_id = %s "
+                "AND ingested_at >= %s AND ingested_at < %s "
                 "ORDER BY object_key",
-                (args.campaign, args.start, args.end),
+                (args.campaign, args.replica_id, args.start, args.end),
             )
             rows = cursor.fetchall()
+            cursor.execute(
+                "SELECT completed_at, objects, rows_added FROM dp_ingest_polls "
+                "WHERE campaign_id = %s AND ingester_id = %s "
+                "AND completed_at >= %s AND completed_at < %s "
+                "ORDER BY completed_at",
+                (args.campaign, args.replica_id, args.start, args.end),
+            )
+            poll_rows = cursor.fetchall()
     if len(rows) > args.max_objects:
         raise ValueError(f"{len(rows)} input objects exceeds --max-objects")
-    for key, records, duplicates in rows:
+    if not poll_rows or len(poll_rows) > args.max_polls:
+        raise ValueError(f"{len(poll_rows)} completed polls outside allowed range")
+    poll_events = []
+    for completed_at, objects_done, rows_added in poll_rows:
+        if (not isinstance(completed_at, datetime) or completed_at.tzinfo is None
+                or type(objects_done) is not int or objects_done < 0
+                or type(rows_added) is not int or rows_added < 0):
+            raise ValueError("invalid completed poll row")
+        poll_events.append({"completed_at": completed_at.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                            "objects": objects_done, "rows_added": rows_added})
+    for key, records, duplicates, stored_digest, version_id, stored_bytes, ingested_at in rows:
         if not key.startswith("dp/") or records < 0 or duplicates < 0 or duplicates > records:
             raise ValueError(f"invalid progress row for {key}")
+        if (not isinstance(stored_digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", stored_digest)
+                or not isinstance(stored_bytes, int) or stored_bytes < 0
+                or (version_id is not None and not isinstance(version_id, str))
+                or not isinstance(ingested_at, datetime)
+                or ingested_at.tzinfo is None):
+            raise ValueError(f"missing or invalid ingestion-time source receipt for {key}")
         digest = hashlib.sha256()
         size = 0
-        response = s3.get_object(Bucket=args.bucket, Key=key)
+        request = {"Bucket": args.bucket, "Key": key}
+        if version_id is not None:
+            request["VersionId"] = version_id
+        response = s3.get_object(**request)
         stream = response["Body"]
+        header = b""
         try:
             while chunk := stream.read(1024 * 1024):
+                if len(header) < 16:
+                    header += chunk[:16 - len(header)]
                 digest.update(chunk)
                 size += len(chunk)
         finally:
             stream.close()
-        if size != records * 32:
-            raise ValueError(f"{key}: {size} bytes do not match {records} 32-byte records")
-        objects.append({"key": key, "sha256": digest.hexdigest(), "bytes": size, "records": records})
-        progress.append({"key": key, "records": records, "duplicates": duplicates})
+        raw_records = size == records * 32
+        table_records = (size == records * 32 + 16
+                         and header == b"ECC2KDT3" + (3).to_bytes(4, "little")
+                         + (32).to_bytes(4, "little"))
+        if not (raw_records or table_records):
+            raise ValueError(f"{key}: {size} bytes do not match {records} records")
+        if size != stored_bytes or digest.hexdigest() != stored_digest:
+            raise ValueError(f"{key}: S3 version differs from the committed progress receipt")
+        stamp = ingested_at.astimezone(timezone.utc).replace(microsecond=0)
+        progress.append({"key": key, "records": records, "duplicates": duplicates,
+                         "sha256": stored_digest, "bytes": stored_bytes,
+                         "version_id": version_id,
+                         "ingested_at": stamp.isoformat().replace("+00:00", "Z")})
+        objects.append({"key": key, "sha256": digest.hexdigest(), "bytes": size,
+                        "records": records, "version_id": version_id})
     write_json(args.objects_out, objects)
     write_json(args.progress_out, progress)
-    print(f"audited {len(rows)} committed input objects")
+    write_json(args.polls_out, {"replica_id": args.replica_id,
+                                "start": int(utc_stamp(args.start).timestamp()),
+                                "end": int(utc_stamp(args.end).timestamp()),
+                                "events": poll_events})
+    print(f"audited {len(rows)} committed input objects and {len(poll_rows)} completed polls")
 
 
 def main():
@@ -218,22 +283,24 @@ def main():
     p.add_argument("private_key")
     p = commands.add_parser("objective", help="build a pinned checker and service objective")
     p.add_argument("--auditor-public-key", required=True)
-    p.add_argument("--service", default="ecc2k130-dp-ingest-v1")
+    p.add_argument("--service", default="ecc2k130-dp-ingest-v2")
     p.add_argument("--input-bucket", required=True)
     p.add_argument("--period-seconds", type=int, default=3600)
     p.add_argument("--unit-price", type=int, required=True)
-    p.add_argument("--periods", type=int, required=True)
+    p.add_argument("--funded-replica-periods", type=int, required=True)
     p.add_argument("--funder", required=True)
     p.add_argument("--goal", default="GOAL-certicom-ecc2k130")
     p.add_argument("--created-at", required=True)
     p.add_argument("--out-dir", required=True)
     p = commands.add_parser("prepare", help="combine audited source exports into a receipt body")
-    p.add_argument("--service", default="ecc2k130-dp-ingest-v1")
+    p.add_argument("--service", default="ecc2k130-dp-ingest-v2")
     p.add_argument("--input-bucket", required=True)
     p.add_argument("--period", type=int, required=True)
+    p.add_argument("--replica-id", required=True)
     p.add_argument("--operator", required=True)
     p.add_argument("--nonce", required=True)
-    p.add_argument("--polls", type=int, required=True)
+    p.add_argument("--period-seconds", type=int, default=3600)
+    p.add_argument("--polls-file", required=True)
     p.add_argument("--objects", required=True)
     p.add_argument("--progress", required=True)
     p.add_argument("--before", required=True)
@@ -248,12 +315,15 @@ def main():
     p.add_argument("--out", required=True)
     p = commands.add_parser("collect", help="hash S3 inputs named by committed RDS progress rows")
     p.add_argument("--bucket", required=True)
+    p.add_argument("--replica-id", required=True)
     p.add_argument("--campaign", default="ecc2k-130")
     p.add_argument("--start", required=True, help="UTC inclusive ISO timestamp")
     p.add_argument("--end", required=True, help="UTC exclusive ISO timestamp")
     p.add_argument("--max-objects", type=int, default=10000)
+    p.add_argument("--max-polls", type=int, default=10000)
     p.add_argument("--objects-out", required=True)
     p.add_argument("--progress-out", required=True)
+    p.add_argument("--polls-out", required=True)
     args = parser.parse_args()
     if args.command == "public-key":
         print(auditor_public_key(args.private_key))

@@ -22,6 +22,7 @@ class OperatorTests(unittest.TestCase):
             evidence = root / "evidence"
             result = subprocess.run(
                 [sys.executable, str(HERE / "operator.py"),
+                 "--replica-id", "ingest-a",
                  "--evidence-dir", str(evidence),
                  "--status-url", status.as_uri(),
                  "--period-seconds", "2", "--poll-seconds", "0.1",
@@ -32,6 +33,7 @@ class OperatorTests(unittest.TestCase):
             periods = list(evidence.glob("period-*.json"))
             self.assertEqual(len(periods), 1)
             journal = json.loads(periods[0].read_text())
+            self.assertEqual(journal["replica_id"], "ingest-a")
             self.assertTrue(any("started_pid" in event for event in journal["events"]))
             self.assertTrue(journal["healthy_at_end"])
             self.assertTrue(journal["snapshots"])
@@ -46,6 +48,7 @@ class OperatorTests(unittest.TestCase):
             evidence = root / "evidence"
             result = subprocess.run(
                 [sys.executable, str(HERE / "operator.py"),
+                 "--replica-id", "ingest-b",
                  "--evidence-dir", str(evidence), "--status-url", status.as_uri(),
                  "--period-seconds", "3", "--poll-seconds", "0.1",
                  "--restart-delay", "0.1", "--max-periods", "2", "--",

@@ -84,17 +84,26 @@ def prepare_fixture(root, operator):
         (root / f"{name}.json").write_text(json.dumps(value, sort_keys=True) + "\n")
     (root / "objects.json").write_text(json.dumps([
         {"key": "dp/fixture.bin", "sha256": "ab" * 32,
-         "bytes": 64, "records": 2}]))
+         "bytes": 64, "records": 2, "version_id": "fixture-v1"}]))
+    ingested = datetime.fromtimestamp(period * 3600 + 60, timezone.utc)
     (root / "progress.json").write_text(json.dumps([
-        {"key": "dp/fixture.bin", "records": 2, "duplicates": 1}]))
+        {"key": "dp/fixture.bin", "records": 2, "duplicates": 1,
+         "sha256": "ab" * 32, "bytes": 64, "version_id": "fixture-v1",
+         "ingested_at": ingested.strftime("%Y-%m-%dT%H:%M:%SZ")}]))
+    (root / "polls.json").write_text(json.dumps({
+        "replica_id": "ingest-a", "start": period * 3600,
+        "end": (period + 1) * 3600,
+        "events": [{"completed_at": ingested.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "objects": 1, "rows_added": 1}]}))
     service.objective(SimpleNamespace(
-        service="ecc2k130-dp-ingest-v1", input_bucket="example-private-dp",
-        period_seconds=3600, unit_price=17, periods=2, funder="treasury",
+        service="ecc2k130-dp-ingest-v2", input_bucket="example-private-dp",
+        period_seconds=3600, unit_price=17, funded_replica_periods=2, funder="treasury",
         goal="GOAL-certicom-ecc2k130", created_at="2026-10-10T00:00:00Z",
         auditor_public_key=service.auditor_public_key(auditor), out_dir=root))
     service.prepare(SimpleNamespace(
-        service="ecc2k130-dp-ingest-v1", input_bucket="example-private-dp",
-        period=period, operator=operator, nonce="ab" * 32, polls=3,
+        service="ecc2k130-dp-ingest-v2", input_bucket="example-private-dp",
+        period=period, period_seconds=3600, replica_id="ingest-a", operator=operator,
+        nonce="ab" * 32, polls_file=root / "polls.json",
         objects=root / "objects.json", progress=root / "progress.json",
         before=root / "before.json", after=root / "after.json",
         out=root / "body.json"))
@@ -120,10 +129,14 @@ def main():
         posted = command(*common, "post", str(root / "objective.json"), env=env)
         objective_id = posted.splitlines()[0].split()[1]
         remote = free_port()
+        reader = free_port()
+        peer = free_port()
         with open(root / "node.log", "w") as output:
             node = subprocess.Popen(
-                [*common, "mcp", "--http", f"127.0.0.1:{remote}",
-                 "--identity", str(identity)],
+                [*common, "run", "--mcp-http", f"127.0.0.1:{remote}",
+                 "--mcp-identity", str(identity), "--no-mcp", "--no-queue",
+                 "--serve", f"127.0.0.1:{reader}",
+                 "--listen", f"127.0.0.1:{peer}"],
                 env=env, stdin=subprocess.DEVNULL, stdout=output, stderr=output)
             try:
                 for _ in range(100):

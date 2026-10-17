@@ -45,20 +45,34 @@ idle_status = {"campaign_id": "ecc2k-130",
 (root / "idle-objects.json").write_text("[]\n")
 (root / "idle-progress.json").write_text("[]\n")
 (root / "objects.json").write_text(json.dumps([{"key": "dp/example.bin", "sha256": "ab" * 32,
-                                                  "bytes": 64, "records": 2}]))
+                                                  "bytes": 64, "records": 2,
+                                                  "version_id": "fixture-v1"}]))
+ingested_at = datetime.fromtimestamp(period * 3600 + 60, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 (root / "progress.json").write_text(json.dumps([{"key": "dp/example.bin", "records": 2,
-                                                   "duplicates": 1}]))
+                                                   "duplicates": 1, "sha256": "ab" * 32,
+                                                   "bytes": 64, "version_id": "fixture-v1",
+                                                   "ingested_at": ingested_at}]))
+for name, number, replica in (("polls", period, "ingest-a"),
+                               ("idle-polls", period - 1, "ingest-a"),
+                               ("second-polls", period, "ingest-b")):
+    completed_at = datetime.fromtimestamp(number * 3600 + 120, timezone.utc)
+    (root / (name + ".json")).write_text(json.dumps({
+        "replica_id": replica, "start": number * 3600, "end": (number + 1) * 3600,
+        "events": [{"completed_at": completed_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "objects": 0 if name != "polls" else 1,
+                    "rows_added": 0 if name != "polls" else 1}]}))
 PY
 
 TOOL=examples/ecc2k-ingest-service/service.py
 PUBLIC=$(python3 "$TOOL" public-key "$WORK/auditor.pem")
 python3 "$TOOL" objective --auditor-public-key "$PUBLIC" \
     --input-bucket example-private-dp --unit-price 800000 \
-    --periods 3 --funder treasury --created-at 2026-10-10T00:00:00Z \
+    --funded-replica-periods 4 --funder treasury --created-at 2026-10-10T00:00:00Z \
     --out-dir "$WORK" >/dev/null
 python3 "$TOOL" prepare --input-bucket example-private-dp \
     --period "$(cat "$WORK/period.txt")" \
-    --operator ingester-operator --nonce "$(printf 'ab%.0s' {1..32})" --polls 3 \
+    --replica-id ingest-a \
+    --operator ingester-operator --nonce "$(printf 'ab%.0s' {1..32})" --polls-file "$WORK/polls.json" \
     --objects "$WORK/objects.json" --progress "$WORK/progress.json" \
     --before "$WORK/before.json" --after "$WORK/after.json" \
     --out "$WORK/body.json" >/dev/null
@@ -82,7 +96,8 @@ echo "$OUT" | grep -q 'reward 800000' || { echo "expected 800000-unit service pa
 echo "settling an earlier idle operating period with no new input objects"
 python3 "$TOOL" prepare --input-bucket example-private-dp \
     --period "$(cat "$WORK/idle-period.txt")" \
-    --operator ingester-operator --nonce "$(printf 'cd%.0s' {1..32})" --polls 3 \
+    --replica-id ingest-a \
+    --operator ingester-operator --nonce "$(printf 'cd%.0s' {1..32})" --polls-file "$WORK/idle-polls.json" \
     --objects "$WORK/idle-objects.json" --progress "$WORK/idle-progress.json" \
     --before "$WORK/idle-before.json" --after "$WORK/before.json" \
     --out "$WORK/idle-body.json" >/dev/null
@@ -93,11 +108,25 @@ IDLE=$(pw try "$WORK/objective.json" --submitter ingester-operator \
 echo "$IDLE"
 echo "$IDLE" | grep -q 'reward 800000' || { echo "expected idle-period service payment" >&2; exit 1; }
 
+echo "settling a second replica in the same period"
+python3 "$TOOL" prepare --input-bucket example-private-dp \
+    --period "$(cat "$WORK/period.txt")" --replica-id ingest-b \
+    --operator ingester-operator --nonce "$(printf 'ef%.0s' {1..32})" --polls-file "$WORK/second-polls.json" \
+    --objects "$WORK/idle-objects.json" --progress "$WORK/idle-progress.json" \
+    --before "$WORK/before.json" --after "$WORK/after.json" \
+    --out "$WORK/second-body.json" >/dev/null
+python3 "$TOOL" sign --body "$WORK/second-body.json" --auditor-key "$WORK/auditor.pem" \
+    --out "$WORK/second-receipt.json" >/dev/null
+SECOND=$(pw try "$WORK/objective.json" --submitter ingester-operator \
+    --artifact "$WORK/second-receipt.json" --settle)
+echo "$SECOND"
+echo "$SECOND" | grep -q 'reward 800000' || { echo "expected second replica payment" >&2; exit 1; }
+
 echo "auditing the settled log with the independent reference implementation"
 "$REF" --log "$WORK/log.jsonl" --root "$WORK" audit --rerun | grep 'log verified'
 
-echo "the same period has already been paid"
+echo "the same replica-period has already been paid"
 DUP=$(pw try "$WORK/objective.json" --submitter another-operator \
     --artifact "$WORK/receipt.json" --settle 2>&1 || true)
 echo "$DUP"
-echo "$DUP" | grep -q 'duplicate unit' || { echo "duplicate period was not detected" >&2; exit 1; }
+echo "$DUP" | grep -q 'duplicate unit' || { echo "duplicate replica-period was not detected" >&2; exit 1; }

@@ -14,7 +14,7 @@ AUDITOR_KEY = bytes.fromhex("@AUDITOR_PUBLIC_KEY@")
 SERVICE = "@SERVICE_ID@"
 INPUT_BUCKET = "@INPUT_BUCKET@"
 PERIOD_SECONDS = @PERIOD_SECONDS@
-DOMAIN = b"cairn/ecc2k130-ingest-service/v1\n"
+DOMAIN = b"cairn/ecc2k130-ingest-service/v2\n"
 
 # RFC 8032 Ed25519 verification, kept in this pinned single file because the
 # certificate sandbox cannot rely on third-party Python packages.
@@ -109,7 +109,7 @@ def timestamp(value):
 
 
 def check(artifact):
-    if type(artifact) is not dict or set(artifact) != {"body", "period", "signature"}:
+    if type(artifact) is not dict or set(artifact) != {"body", "unit", "signature"}:
         return False, "receipt shape"
     body = artifact["body"]
     sig = artifact["signature"]
@@ -122,12 +122,15 @@ def check(artifact):
         return False, "receipt encoding"
     if not verify_signature(signature, message):
         return False, "auditor signature"
-    required = {"service", "input_bucket", "period", "operator", "nonce", "input_objects", "progress", "before_status", "after_status", "polls"}
+    required = {"service", "input_bucket", "period", "replica_id", "operator", "nonce", "input_objects", "progress", "before_status", "after_status", "polls", "poll_events"}
     if set(body) != required or body["service"] != SERVICE or body["input_bucket"] != INPUT_BUCKET:
         return False, "service receipt shape"
     period = body["period"]
-    if not nonnegative(period) or type(artifact["period"]) is not int or artifact["period"] != period or type(body["operator"]) is not str or not body["operator"]:
+    replica_id = body["replica_id"]
+    if not nonnegative(period) or type(replica_id) is not str or not (1 <= len(replica_id) <= 80) or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for c in replica_id) or type(artifact["unit"]) is not str or artifact["unit"] != f"{replica_id}:{period}" or type(body["operator"]) is not str or not body["operator"]:
         return False, "period or operator"
+    start = period * PERIOD_SECONDS
+    end = start + PERIOD_SECONDS
     if type(body["nonce"]) is not str or len(body["nonce"]) != 64:
         return False, "receipt nonce"
     try:
@@ -135,16 +138,30 @@ def check(artifact):
             return False, "receipt nonce"
     except ValueError:
         return False, "receipt nonce"
-    if not nonnegative(body["polls"]) or body["polls"] == 0:
+    events = body["poll_events"]
+    if (not nonnegative(body["polls"]) or type(events) is not list
+            or not events or len(events) > 10000 or len(events) != body["polls"]):
         return False, "no observed poll"
+    previous_poll = None
+    for event in events:
+        if (type(event) is not dict or set(event) != {"completed_at", "objects", "rows_added"}
+                or not nonnegative(event["objects"]) or not nonnegative(event["rows_added"])):
+            return False, "poll event shape"
+        try:
+            completed_at = timestamp(event["completed_at"])
+        except ValueError:
+            return False, "poll timestamp"
+        if not start <= completed_at < end or (previous_poll is not None and completed_at < previous_poll):
+            return False, "poll outside period or order"
+        previous_poll = completed_at
     objects, progress = body["input_objects"], body["progress"]
     if type(objects) is not list or type(progress) is not list or len(objects) != len(progress):
         return False, "input/progress shape"
     keys = set()
     for obj, row in zip(objects, progress):
-        if type(obj) is not dict or set(obj) != {"key", "sha256", "bytes", "records"}:
+        if type(obj) is not dict or set(obj) != {"key", "sha256", "bytes", "records", "version_id"}:
             return False, "input object shape"
-        if type(row) is not dict or set(row) != {"key", "records", "duplicates"}:
+        if type(row) is not dict or set(row) != {"key", "records", "duplicates", "sha256", "bytes", "version_id", "ingested_at"}:
             return False, "progress row shape"
         key, digest = obj["key"], obj["sha256"]
         if type(key) is not str or not key or key in keys or type(digest) is not str or len(digest) != 64:
@@ -160,6 +177,18 @@ def check(artifact):
             return False, "progress mismatch"
         if not nonnegative(row["duplicates"]) or row["duplicates"] > row["records"]:
             return False, "duplicate counter"
+        if (type(row["sha256"]) is not str or type(row["bytes"]) is not int
+                or row["sha256"] != digest or row["bytes"] != obj["bytes"]
+                or row["version_id"] != obj["version_id"]
+                or (obj["version_id"] is not None and
+                    (type(obj["version_id"]) is not str or not obj["version_id"]))):
+            return False, "source receipt mismatch"
+        try:
+            ingested_at = timestamp(row["ingested_at"])
+        except ValueError:
+            return False, "ingest timestamp"
+        if not start <= ingested_at < end:
+            return False, "progress outside period"
         keys.add(key)
     before, after = body["before_status"], body["after_status"]
     if type(before) is not dict or type(after) is not dict:
@@ -194,8 +223,6 @@ def check(artifact):
         after_published = timestamp(parsed[1]["published_at"])
     except ValueError:
         return False, "status timestamp"
-    start = period * PERIOD_SECONDS
-    end = start + PERIOD_SECONDS
     if not (start - PERIOD_SECONDS <= before_at <= start and end <= after_at <= end + PERIOD_SECONDS):
         return False, "status does not bracket period"
     if not (before_at <= before_published <= start and after_at <= after_published <= end + PERIOD_SECONDS):

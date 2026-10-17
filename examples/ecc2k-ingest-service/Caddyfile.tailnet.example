@@ -1,0 +1,19 @@
+# Local authentication and Host rewrite; Tailscale Serve supplies HTTPS and
+# the stable cairn-hub.<tailnet>.ts.net name to enrolled agents worldwide.
+:8082 {
+    bind 127.0.0.1
+    handle /mcp {
+        # Populate distinct hashes using `caddy hash-password`.
+        basic_auth {
+            agent_americas {$CAIRN_MCP_AGENT_AMERICAS_HASH}
+            agent_europe {$CAIRN_MCP_AGENT_EUROPE_HASH}
+        }
+        reverse_proxy 127.0.0.1:8001 {
+            header_up Host 127.0.0.1:8001
+            header_up -Authorization
+        }
+    }
+    handle {
+        respond 404
+    }
+}

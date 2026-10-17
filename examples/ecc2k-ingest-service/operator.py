@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -77,14 +78,18 @@ def run(args):
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     period = int(time.time()) // args.period_seconds
-    journal = {"schema": "cairn-dp-operator-period-v1",
-               "period": period, "period_seconds": args.period_seconds,
-               "started_at": int(time.time()), "events": [], "snapshots": []}
+    def new_journal(number, started_at):
+        return {"schema": "cairn-dp-operator-period-v2", "replica_id": args.replica_id,
+                "period": number, "period_seconds": args.period_seconds,
+                "started_at": started_at, "events": [], "snapshots": []}
+
+    journal = new_journal(period, int(time.time()))
     current_path = directory / "current-period.json"
     if current_path.exists():
         previous = json.loads(current_path.read_text(encoding="utf-8"))
-        if previous.get("schema") != "cairn-dp-operator-period-v1":
-            raise SystemExit("unrecognized current-period journal; preserve it for review")
+        if (previous.get("schema") != "cairn-dp-operator-period-v2"
+                or previous.get("replica_id") != args.replica_id):
+            raise SystemExit("journal belongs to another replica or schema; preserve it for review")
         if previous.get("period") == period:
             journal = previous
             journal["events"].append({"at": int(time.time()), "supervisor_restart": True})
@@ -104,9 +109,7 @@ def run(args):
             if current != period:
                 if not any("started_pid" in event for event in journal["events"]):
                     period = current
-                    journal = {"schema": "cairn-dp-operator-period-v1",
-                               "period": period, "period_seconds": args.period_seconds,
-                               "started_at": int(now), "events": [], "snapshots": []}
+                    journal = new_journal(period, int(now))
                     continue
                 journal["ended_at"] = int(now)
                 journal["healthy_at_end"] = child is not None and child.poll() is None
@@ -120,9 +123,7 @@ def run(args):
                 if args.max_periods and periods_written >= args.max_periods:
                     break
                 period = current
-                journal = {"schema": "cairn-dp-operator-period-v1",
-                           "period": period, "period_seconds": args.period_seconds,
-                           "started_at": int(now), "events": [], "snapshots": []}
+                journal = new_journal(period, int(now))
             if child is not None and child.poll() is not None:
                 journal["events"].append({"at": int(now), "exit_code": child.returncode})
                 child = None
@@ -152,6 +153,8 @@ def run(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--replica-id", required=True,
+                        help="stable identifier shared with dp_ingest.py and the Cairn receipt")
     parser.add_argument("--evidence-dir", required=True)
     parser.add_argument("--status-url", required=True)
     parser.add_argument("--period-seconds", type=int, default=3600)
@@ -163,6 +166,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.period_seconds < 2 or args.poll_seconds <= 0 or args.restart_delay < 0:
         parser.error("period must be >=2 seconds, poll >0, and restart delay >=0")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", args.replica_id):
+        parser.error("replica id must be 1-80 ASCII letters, digits, dot, underscore, or hyphen")
     return run(args)
 
 

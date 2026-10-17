@@ -309,20 +309,46 @@ non-loopback `Host` authorities; browser clients cannot call it directly.
 
 ### One global address for trusted ingester agents
 
-Use `cairn run --mcp-http 127.0.0.1:8001 --mcp-identity
+Build the deployed binary with `make ui-build`; `cairn run` requires its
+embedded UI assets. Then use `cairn run --mcp-http 127.0.0.1:8001 --mcp-identity
 /srv/cairn/ingester.identity.json --no-mcp` on the node that owns the service
 ledger. This shares one rules engine and writer between remote MCP sessions,
 P2P synchronization, the HTTP reader, and the embedded UI. The node keeps the
 signing key; agents never receive it. Each remote session has separate citation
 capabilities. The commit/reveal nonce store survives a reconnect.
 
-Put `examples/ecc2k-ingest-service/Caddyfile.example` on the **same host** as
-the loopback listener. Set `CAIRN_MCP_DOMAIN` to a DNS name pointing to that
-host, and set distinct Caddy password hashes for the listed agent accounts.
-Open 80/443 for Caddy's HTTPS certificate and client traffic. The proxy
+The proposed first deployment is a dedicated, persistent Linux `cairn-hub`
+node in the AWS region that holds the ingester database. Keep Cairn's log and
+identity on durable storage, separate from the private ingester hosts. Enroll
+the hub and each trusted remote agent in one Tailscale tailnet, with access
+restricted to the hub's HTTPS service. Tailscale's MagicDNS gives the hub a
+stable `cairn-hub.<tailnet>.ts.net` name, so this needs no purchased domain or
+public inbound 80/443. Put `Caddyfile.tailnet.example` on that hub, configure
+distinct password hashes for agent accounts, and run:
+
+```sh
+caddy validate --config /etc/caddy/Caddyfile
+tailscale serve --bg --https=8443 http://127.0.0.1:8082
+tailscale serve status
+```
+
+The agent URL is `https://cairn-hub.<tailnet>.ts.net:8443/mcp` from anywhere
+its enrolled machine can reach the tailnet. Tailscale Serve supplies the
+certificate and HTTPS; Caddy binds only to loopback, authenticates each agent,
+rewrites `Host` for Cairn, and strips Basic credentials before forwarding.
+Tailscale [documents the persistent Serve mode](https://tailscale.com/docs/reference/tailscale-cli/serve)
+and [MagicDNS names](https://tailscale.com/docs/features/magicdns).
+The actual `<tailnet>` value comes from that tailnet's DNS settings after
+enrollment. This is a proposed deployment, not a URL currently running.
+
+If independently operated agents must connect without tailnet enrollment,
+use `Caddyfile.example` on the **same host** as the loopback listener instead.
+Set `CAIRN_MCP_DOMAIN` to an owned DNS name pointing to that host, configure
+password hashes, and open 80/443 for Caddy's HTTPS certificate and clients.
+The proxy
 accepts only `/mcp`, authenticates each agent, resets `Host` to the loopback
 authority Cairn checks, and removes the Basic credential before forwarding.
-Each client's remote MCP URL is `https://<domain>/mcp`; it must send its Basic
+Each client's remote MCP URL is the selected HTTPS `/mcp` address; it must send its Basic
 authorization header on every request. Check the exact header configuration
 supported by that MCP client before deployment. The Caddyfile uses the
 [documented `basic_auth` hash format](https://caddyserver.com/docs/caddyfile/directives/basic_auth)

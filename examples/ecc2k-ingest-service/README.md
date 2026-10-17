@@ -8,37 +8,43 @@ audited period of that service**, including a period with no new point files.
 It does not pay for producing points; the orbit objective does that separately.
 
 An objective has a configurable `unit_price` and a finite pool of
-`unit_price * funded_periods`. It has no completion condition. A later tranche
-can use the exact same checker and piecework block; Cairn carries the paid
-period keys across those objectives. The buyer sets the price, period length,
-funded number of periods, and auditor key before posting. No amount is hard
-coded as a fair rate.
+`unit_price * funded_replica_periods`. It has no completion condition. A later
+tranche can use the exact same checker and piecework block; Cairn carries the
+paid `replica_id:period` keys across those objectives. The buyer sets the
+price, period length, funded number of replica-periods, and auditor key before
+posting. No amount is hard coded as a fair rate. The auditor approves each
+replica's capacity and health, including an idle replica that stayed available.
 
 ## Run the service continuously
 
-On the host with the approved S3 and RDS access, `operator.py` supervises the
-existing ingester. It keeps one local process under a host lock, restarts a
+On each host with approved S3 and RDS access, `operator.py` supervises one
+replica of the existing ingester. It keeps one local process under a host lock, restarts a
 failed process after a delay, and archives exact public status bytes and a
 timestamped operating journal. It neither funds an objective nor signs its
 own period receipts. The auditor still checks operation and source evidence.
-The existing AWS ingest host already has a `rho-ingest.service` systemd unit;
-do not start this supervisor beside that unit. Use it only for a reviewed
-replacement deployment after the old unit is stopped, or keep the current
-systemd process and collect its logs/status snapshots for the same Cairn
-period contract.
+The existing AWS ingest host already has a `rho-ingest.service` systemd unit.
+Stop **all** old `dp_ingest.py` processes before a replica rollout: old builds
+do not take cross-host object locks. Replace that unit through a reviewed
+deployment, then add more replicas. Keep exactly one designated status
+publisher; other replicas use `--worker-only`. Each replica needs a distinct,
+stable id and evidence directory. The ingester writes its id, exact source
+SHA-256, S3 version (where available), and byte count into the committed
+progress row. See `ecc2k130/aws/README.md` in the crypto repository for the
+database coordination rule. Each completed S3 pass also writes a timestamped
+`dp_ingest_polls` row, including a pass that found no new objects.
 
 ```sh
 python3 examples/ecc2k-ingest-service/operator.py \
-  --evidence-dir /srv/cairn/dp-operator-evidence \
+  --replica-id ingest-a --evidence-dir /srv/cairn/evidence/ingest-a \
   --status-url "$PUBLIC_STATUS_URL" \
   --period-seconds 3600 -- \
   /opt/rho-ingest/venv/bin/python3 /opt/rho-ingest/dp_ingest.py \
-    --bucket "$DP_BUCKET" --status-bucket "$STATUS_BUCKET"
+    --replica-id ingest-a --bucket "$DP_BUCKET" --status-bucket "$STATUS_BUCKET"
 ```
 
 Run this foreground command under the host's service manager. The command
 after `--` must be the ingester itself, not a cloud allocation command.
-`period-N.json` records starts, exits, snapshot observations, and whether the
+`period-N.json` records the replica id, starts, exits, snapshot observations, and whether the
 ingester was alive at the boundary. It is operator evidence, not a payout
 certificate. A restart, status failure, missing input inventory, or uncovered
 portion of a period needs an auditor decision before signing. `--max-periods`
@@ -56,8 +62,9 @@ Run the local two-session payment and independent replay with
 `python3 scripts/mcp-http-ingest-smoke.py` after building the Cairn and
 reference binaries.
 
-The signed Cairn artifact publishes input object digests and progress rows as
-input and output receipts, with exact status bytes on both sides of the period.
+The signed Cairn artifact publishes S3 input object digests and matching
+ingestion-time RDS progress digests, bytes, version ids, and commit timestamps
+as input and output receipts, with exact status bytes on both sides of the period.
 An independent verifier can check the signature, status hashes, timing, and
 payment from the log alone. Checking that private data matches a digest still
 requires retained object versions or an independent auditor with source
@@ -69,11 +76,11 @@ input/output replay. A hash-only manifest does not establish that proof.
 
 The claim includes a receipt with:
 
-- the service id, pinned private S3 bucket name, UTC period number, operator name, random nonce, and auditor
-  observed poll count;
+- the service id, pinned private S3 bucket name, UTC period number, stable replica id, operator name, random nonce, and auditor
+  exported completed-poll rows;
 - for every S3 object whose RDS progress row was committed in the period:
-  object key, byte length, SHA-256 of its bytes, record count, and duplicate
-  count from that committed row;
+  object key, byte length, S3 version id if available, SHA-256 of its bytes,
+  record count, duplicate count, and ingestion timestamp from that committed row;
 - exact public status JSON bytes captured before and after the period, plus
   their SHA-256 digests; and
 - an Ed25519 signature over the canonical receipt body from the auditor key
@@ -89,26 +96,29 @@ themselves are public in the claim even after the mutable feed is overwritten.
 
 The auditor should sign only after independently checking:
 
-1. the ingester was polling throughout the period and the observed poll count
-   is accurate; check its process logs or a separately retained health trace;
+1. the exported completed-poll rows match RDS and represent the ingester's
+   operation throughout the period; check process logs or a separately retained
+   health trace for gaps and unexpected replica ids;
 2. the RDS progress rows are committed and match the S3 objects it rehashed;
 3. the input inventory is complete for the period, including unreadable or
    outstanding objects, and the published status reflects the RDS state; and
 4. the before/after status bytes were captured from the public feed at the
    relevant boundaries.
 
-`collect` performs the read-only S3/RDS hash and progress-row check for step
-2. It does not certify steps 1, 3, or 4 by itself. In particular, a signed
+`collect` performs the read-only S3/RDS hash, progress-row, and poll-row export.
+It does not certify continuous operation, inventory completeness, or the public
+feed's provenance by itself. In particular, a signed
 receipt means **auditor approval of operation**, not a publicly proven claim
 that every private database row is correct. A progress row is transactionally
 committed with point insertion by the current ingester, but `collect` does not
 recompute every point row in RDS; the auditor must decide how much additional
 database sampling or replay the contract requires.
-The current progress table does not store an object digest or S3 version id at
-ingestion time. `collect` hashes the object version it can read at audit time;
-an overwritten object could therefore have different bytes from those the
-ingester processed. The auditor should require immutable object keys or S3
-version retention before treating that hash as an ingestion-time input receipt.
+The replica code stores an object digest, byte count, and S3 version id at
+ingestion time in the same transaction as the points. `collect` rereads that
+version and refuses a mismatch. Older progress rows have no such metadata and
+cannot be used for this receipt. If bucket versioning is off, an overwritten
+object may make collection impossible; require immutable object keys or S3
+version retention for durable audits.
 
 ## Run a local Cairn payment
 
@@ -121,9 +131,10 @@ python3 -m unittest discover -s examples/ecc2k-ingest-service -p 'test_*.py'
 
 The demo creates an ephemeral auditor key, two status snapshots, an input
 manifest and a matching progress export; it builds the pinned objective,
-signs one period, settles its 800000-unit example payment, pays an earlier
-idle period at the same rate, checks the settled log with `cairn-reference`,
-and confirms the same period cannot be paid twice. The
+signs one replica-period, settles its 800000-unit example payment, pays an
+earlier idle period and a second replica in the same period at the same rate,
+checks the settled log with `cairn-reference`, and confirms the same
+replica-period cannot be paid twice. The
 fixture exercises the payment contract and receipt verification. It does not
 claim a live S3/RDS audit.
 
@@ -161,9 +172,10 @@ is half open and uses `dp_ingest_progress.ingested_at`:
 
 ```sh
 python3 examples/ecc2k-ingest-service/service.py collect \
-  --bucket "$DP_BUCKET" \
+  --bucket "$DP_BUCKET" --replica-id "$REPLICA_ID" \
   --start 2026-10-10T12:00:00Z --end 2026-10-10T13:00:00Z \
-  --objects-out objects.json --progress-out progress.json
+  --objects-out objects.json --progress-out progress.json \
+  --polls-out polls.json
 ```
 
 Then the auditor checks the other conditions above and prepares the signed
@@ -176,9 +188,9 @@ operator has committed. This is a limitation of this objective design.
 
 ```sh
 python3 examples/ecc2k-ingest-service/service.py prepare \
-  --input-bucket "$DP_BUCKET" --period "$PERIOD" \
+  --input-bucket "$DP_BUCKET" --period "$PERIOD" --replica-id "$REPLICA_ID" \
   --operator "$OPERATOR" --nonce "$NONCE" \
-  --polls "$AUDITED_POLLS" --objects objects.json --progress progress.json \
+  --polls-file polls.json --objects objects.json --progress progress.json \
   --before before-status.json --after after-status.json --out body.json
 python3 examples/ecc2k-ingest-service/service.py sign \
   --body body.json --auditor-key "$AUDITOR_PRIVATE_KEY" --out receipt.json
@@ -192,7 +204,7 @@ AUDITOR_PUBLIC_KEY=$(python3 examples/ecc2k-ingest-service/service.py \
 python3 examples/ecc2k-ingest-service/service.py objective \
   --auditor-public-key "$AUDITOR_PUBLIC_KEY" \
   --input-bucket "$DP_BUCKET" \
-  --unit-price "$PRICE" --periods "$FUNDED_PERIODS" \
+  --unit-price "$PRICE" --funded-replica-periods "$FUNDED_REPLICA_PERIODS" \
   --funder "$FUNDER" --created-at "$CREATED_AT" --out-dir "$OBJECTIVE_DIR"
 ```
 
