@@ -698,14 +698,18 @@ fn dechunk(mut body: &[u8]) -> Option<String> {
         if size == 0 {
             return Some(String::from_utf8_lossy(&out).into_owned());
         }
-        if body.len() < size + 2 {
+        // Checked: the size is the router's -- or whoever answered the SSDP
+        // search -- and `ffffffffffffffff` made `size + 2` overflow, which is
+        // a panic with `overflow-checks` on, in release too.
+        let end = size.checked_add(2)?;
+        if body.len() < end {
             return None;
         }
         out.extend_from_slice(&body[..size]);
         if out.len() > MAX_BODY {
             return Some(String::new());
         }
-        body = &body[size + 2..];
+        body = &body[end..];
     }
 }
 
@@ -720,6 +724,19 @@ mod tests {
     use super::*;
     use std::io::BufRead;
     use std::net::TcpListener;
+
+    #[test]
+    fn a_chunk_size_near_the_top_of_usize_is_refused_not_a_panic() {
+        let huge = format!("{:x}\r\nabc\r\n0\r\n\r\n", usize::MAX);
+        assert_eq!(dechunk(huge.as_bytes()), None);
+        let almost = format!("{:x}\r\nabc\r\n0\r\n\r\n", usize::MAX - 1);
+        assert_eq!(dechunk(almost.as_bytes()), None);
+        // And an honest body still decodes.
+        assert_eq!(
+            dechunk(b"3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n").as_deref(),
+            Some("abcde")
+        );
+    }
 
     const DESCRIPTION_XML: &str = r#"<?xml version="1.0"?>
 <root xmlns="urn:schemas-upnp-org:device-1-0">

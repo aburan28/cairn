@@ -1665,6 +1665,10 @@ pub fn run(config: Config) -> Result<(), String> {
                 );
             guard.node.missing_code()
         };
+        // The direct key requests `seed_from_log` queued, now that the lock is
+        // released: each is a blocking dial, and a log naming dead addresses
+        // used to hold every inbound session for as long as they took.
+        service.fetch_logged_keys();
         for endpoint in service.peers_for(&needs, config.fanout) {
             let mut guard = state
                 .lock()

@@ -208,6 +208,10 @@ pub enum Dropped {
     Protocol { detail: String },
     /// Too many peers; this one arrived last.
     TooManyPeers,
+    /// Supplied the manifest in use, and the manifest lost a dispute: another
+    /// peer's piece failed against it, or every piece matched it and the
+    /// assembled blob did not hash to the digest the log fixed.
+    DisputedManifest,
 }
 
 impl fmt::Display for Dropped {
@@ -218,6 +222,9 @@ impl fmt::Display for Dropped {
             Dropped::UnsolicitedPiece { index } => write!(f, "sent piece {index} unrequested"),
             Dropped::Protocol { detail } => write!(f, "protocol error: {detail}"),
             Dropped::TooManyPeers => f.write_str("peer limit reached"),
+            Dropped::DisputedManifest => {
+                f.write_str("supplied a manifest the pieces or the digest disagreed with")
+            }
         }
     }
 }
@@ -318,6 +325,24 @@ impl Peer {
 pub struct Swarm {
     digest: String,
     manifest: Option<Manifest>,
+    /// Who supplied `manifest`, or `None` when this node computed it itself.
+    ///
+    /// Needed because a manifest is the one input nothing checks on arrival:
+    /// `describes` compares a *claimed* digest string, and anyone can claim
+    /// the right one over piece hashes for other bytes. Without knowing whose
+    /// it was, a lying manifest made every honest peer's pieces fail, and each
+    /// was dropped for `BadPiece` -- the liar evicted the swarm and stayed.
+    manifest_from: Option<PeerId>,
+    /// Peers whose failed piece has already cost one supplier its manifest.
+    ///
+    /// The other half of the dispute rule, and what keeps it from being the
+    /// same attack pointed the other way. A piece that fails against somebody
+    /// else's manifest is ambiguous -- either could be lying -- so the first
+    /// time, the manifest is blamed. A peer that then fails against a *second*
+    /// supplier's manifest is the common factor, and is blamed itself. So a
+    /// lying piece-sender can evict at most one honest supplier per connection,
+    /// rather than all of them. Kept across resets for that reason.
+    accusers: BTreeSet<PeerId>,
     have: Bitfield,
     /// Verified pieces, held individually until the blob is complete.
     ///
@@ -343,6 +368,8 @@ impl Swarm {
         Swarm {
             digest: digest.into(),
             manifest: None,
+            manifest_from: None,
+            accusers: BTreeSet::new(),
             // A placeholder until the manifest fixes the piece count. Nothing
             // consults it before then: `on_message` refuses bitfields and pieces
             // while `manifest` is `None`.
@@ -372,6 +399,8 @@ impl Swarm {
             digest: manifest.digest().to_string(),
             have: Bitfield::full(count),
             manifest: Some(manifest),
+            manifest_from: None,
+            accusers: BTreeSet::new(),
             pieces,
             peers: BTreeMap::new(),
             availability: vec![0; count as usize],
@@ -580,6 +609,27 @@ impl Swarm {
         self.availability = vec![0; count as usize];
         self.complete = false;
         self.manifest = Some(manifest);
+        self.manifest_from = Some(peer);
+        // Bitfields can already be held here, after a disputed manifest was
+        // discarded (`dispute_manifest`): peers do not resend theirs, so the
+        // ones that still fit the new piece count are kept and counted, and a
+        // peer whose bitfield does not fit is treated as having said nothing.
+        let mut held = Vec::new();
+        for state in self.peers.values_mut() {
+            if state
+                .have
+                .as_ref()
+                .is_some_and(|field| field.len() != count)
+            {
+                state.have = None;
+            }
+            if let Some(field) = &state.have {
+                held.extend((0..count).filter(|index| field.contains(*index)));
+            }
+        }
+        for index in held {
+            self.increment(index);
+        }
 
         // Everyone connected now needs our (empty) bitfield. Announcing to all
         // rather than just to the sender removes an ordering hazard that would
@@ -701,8 +751,17 @@ impl Swarm {
             return self.schedule();
         }
         if !manifest.verify_piece(index, &bytes) {
-            // The whole reason piece hashes exist: a lie localised to one piece
-            // and one peer, with the rest of the transfer unaffected.
+            // Against a manifest this peer supplied -- or one this node computed
+            // -- the lie is provably the sender's, localised to one piece and one
+            // peer, which is the whole reason piece hashes exist. Against a
+            // manifest somebody *else* supplied it is a disagreement between
+            // two strangers, and the manifest is the half nothing has checked.
+            // See `accusers` for why the benefit of the doubt is given once.
+            let disputed = self.manifest_from.is_some_and(|supplier| supplier != peer)
+                && self.accusers.insert(peer);
+            if disputed {
+                return self.dispute_manifest();
+            }
             return vec![Action::Drop(peer, Dropped::BadPiece { index })];
         }
 
@@ -730,11 +789,74 @@ impl Swarm {
         }
 
         if self.have.is_complete() && !self.complete {
+            // Every piece matched the manifest; whether the manifest matched the
+            // *content* is only known now. Checked here rather than left to
+            // `finish`, which a driver calls after `Complete` and which can only
+            // say no: a swarm that announced completion over the wrong bytes
+            // sat "complete" until its deadline with nobody blamed.
+            if !self.assembles_to_digest() {
+                actions.extend(self.dispute_manifest());
+                return actions;
+            }
             self.complete = true;
             actions.push(Action::Complete);
             return actions;
         }
         actions.extend(self.schedule());
+        actions
+    }
+
+    /// Whether the held pieces, in order, hash to the digest the log fixed.
+    ///
+    /// Streamed, so checking costs no second copy of a blob that may be a
+    /// gigabyte; `finish` makes the copy only once this has said yes.
+    fn assembles_to_digest(&self) -> bool {
+        use sha2::{Digest as _, Sha256};
+        let Some(manifest) = &self.manifest else {
+            return false;
+        };
+        let mut hasher = Sha256::new();
+        for index in 0..manifest.pieces() {
+            match self.pieces.get(&index) {
+                Some(bytes) => hasher.update(bytes),
+                None => return false,
+            }
+        }
+        let digest = format!("sha256:{}", crate::hex::encode(&hasher.finalize()));
+        manifest.describes(&digest) && manifest.describes(&self.digest)
+    }
+
+    /// Discard the manifest in use, and everything verified against it, and
+    /// ask the remaining peers for another.
+    ///
+    /// The supplier is dropped and forgotten at once, rather than left for the
+    /// driver to remove: until then it could answer the `WantManifest` below
+    /// with the same lie and be adopted again. Pieces go too -- they were
+    /// verified against hashes now known to be untrustworthy -- and so does
+    /// every outstanding request, since the piece numbering may change.
+    /// Peers' bitfields stay, and `on_manifest` keeps the ones that fit.
+    fn dispute_manifest(&mut self) -> Vec<Action> {
+        let mut actions = Vec::new();
+        if let Some(supplier) = self.manifest_from.take() {
+            if self.peers.contains_key(&supplier) {
+                self.remove_peer(supplier);
+                actions.push(Action::Drop(supplier, Dropped::DisputedManifest));
+            }
+        }
+        self.manifest = None;
+        self.have = Bitfield::new(0);
+        self.pieces.clear();
+        self.availability.clear();
+        self.complete = false;
+        for state in self.peers.values_mut() {
+            state.in_flight.clear();
+        }
+        let peers: Vec<PeerId> = self.peers.keys().copied().collect();
+        actions.extend(
+            peers
+                .into_iter()
+                .map(|peer| Action::Send(peer, Message::WantManifest)),
+        );
         actions
     }
 
@@ -1075,6 +1197,175 @@ mod tests {
             vec![Action::Drop(peer, Dropped::BadPiece { index })]
         );
         assert_eq!(leech.progress(), Some((0, 3)), "and nothing was accepted");
+    }
+
+    /// Every piece hash of `data` replaced, under the right digest: the
+    /// manifest a liar sends, which `describes` cannot tell from the truth.
+    fn lying_manifest(data: &[u8]) -> Manifest {
+        let honest = Manifest::of(data, PIECE).expect("valid");
+        let wrong = (0..honest.pieces())
+            .map(|index| digest_bytes(&index.to_be_bytes()))
+            .collect();
+        Manifest::new(honest.digest(), data.len() as u64, PIECE, wrong).expect("well formed")
+    }
+
+    /// Answer every request in `actions` addressed to `from` with the true
+    /// piece, feeding the replies back, until the leech stops asking. Returns
+    /// every action the leech emitted along the way.
+    fn serve_honestly(
+        leech: &mut Swarm,
+        from: PeerId,
+        data: &[u8],
+        actions: Vec<Action>,
+    ) -> Vec<Action> {
+        let layout = Manifest::of(data, PIECE).expect("valid").layout();
+        let mut pending = actions;
+        let mut seen = Vec::new();
+        while !pending.is_empty() {
+            let asked: Vec<u32> = requests(&pending)
+                .into_iter()
+                .filter(|(peer, _)| *peer == from)
+                .map(|(_, index)| index)
+                .collect();
+            seen.append(&mut pending);
+            for index in asked {
+                let bytes = layout.slice(data, index).expect("in range").to_vec();
+                pending.extend(leech.on_message(from, Message::Piece { index, bytes }));
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn a_lying_manifest_costs_its_supplier_and_not_the_honest_peers() {
+        // The attack: be first with a manifest that claims the right digest over
+        // the wrong piece hashes. Before the supplier was remembered, every
+        // honest peer's piece failed against it and each was dropped for
+        // `BadPiece`, while the liar -- who never sent a piece -- stayed.
+        let data = blob(3);
+        let (liar, honest) = (PeerId(1), PeerId(2));
+        let mut leech = Swarm::leech(digest_bytes(&data), Limits::default());
+        leech.add_peer(liar);
+        leech.add_peer(honest);
+        leech.on_message(liar, Message::Manifest(Box::new(lying_manifest(&data))));
+        leech.on_message(honest, Message::Bitfield(Bitfield::full(3)));
+        let actions = leech.on_message(honest, Message::Choke(false));
+        let (_, index) = requests(&actions)[0];
+        let bytes = Manifest::of(&data, PIECE)
+            .expect("valid")
+            .layout()
+            .slice(&data, index)
+            .expect("in range")
+            .to_vec();
+
+        let disputed = leech.on_message(honest, Message::Piece { index, bytes });
+        assert!(
+            disputed.contains(&Action::Drop(liar, Dropped::DisputedManifest)),
+            "the manifest's supplier was not blamed: {disputed:?}"
+        );
+        assert!(
+            !disputed
+                .iter()
+                .any(|a| matches!(a, Action::Drop(peer, _) if *peer == honest)),
+            "the honest peer was blamed for the liar's manifest"
+        );
+        assert!(disputed.contains(&Action::Send(honest, Message::WantManifest)));
+        assert!(leech.manifest().is_none(), "the disputed manifest was kept");
+        // The liar is forgotten at once, so it cannot be adopted again by
+        // answering the re-ask before its connection closes.
+        assert_eq!(leech.peer_count(), 1);
+        assert!(leech
+            .on_message(liar, Message::Manifest(Box::new(lying_manifest(&data))))
+            .is_empty());
+
+        // The honest peer's manifest is adopted, its bitfield is still known,
+        // and the transfer finishes from it.
+        let honest_manifest = Manifest::of(&data, PIECE).expect("valid");
+        let resumed = leech.on_message(honest, Message::Manifest(Box::new(honest_manifest)));
+        let seen = serve_honestly(&mut leech, honest, &data, resumed);
+        assert!(
+            seen.contains(&Action::Complete),
+            "the transfer did not resume"
+        );
+        assert_eq!(leech.finish(), Some(data));
+    }
+
+    #[test]
+    fn a_manifest_whose_pieces_assemble_to_other_content_is_disputed_not_completed() {
+        // A manifest internally consistent with the bytes its supplier serves,
+        // under a digest those bytes do not have. Every piece verifies; only the
+        // whole does not, and that used to announce `Complete` and then sit
+        // until the deadline because `finish` said no.
+        let wanted = blob(2);
+        let served: Vec<u8> = wanted.iter().map(|byte| byte ^ 0xff).collect();
+        let inner = Manifest::of(&served, PIECE).expect("valid");
+        let lie = Manifest::new(
+            digest_bytes(&wanted),
+            served.len() as u64,
+            PIECE,
+            inner.piece_hashes().to_vec(),
+        )
+        .expect("well formed");
+        let liar = PeerId(1);
+        let mut leech = Swarm::leech(digest_bytes(&wanted), Limits::default());
+        leech.add_peer(liar);
+        leech.on_message(liar, Message::Manifest(Box::new(lie)));
+        leech.on_message(liar, Message::Bitfield(Bitfield::full(2)));
+        let actions = leech.on_message(liar, Message::Choke(false));
+        let seen = serve_honestly(&mut leech, liar, &served, actions);
+        assert!(
+            !seen.contains(&Action::Complete),
+            "completion was announced over the wrong bytes"
+        );
+        assert!(seen.contains(&Action::Drop(liar, Dropped::DisputedManifest)));
+        assert!(!leech.is_complete() && leech.manifest().is_none());
+    }
+
+    #[test]
+    fn a_piece_sender_gets_the_benefit_of_the_doubt_once() {
+        // The dispute rule pointed the other way: a liar sending bad pieces
+        // against an honest supplier's manifest. The first time it is
+        // ambiguous and the manifest goes; against a second supplier's
+        // manifest the sender is the common factor, and is the one dropped.
+        let data = blob(3);
+        let manifest = Manifest::of(&data, PIECE).expect("valid");
+        let (first, second, liar) = (PeerId(1), PeerId(2), PeerId(3));
+        let mut leech = Swarm::leech(digest_bytes(&data), Limits::default());
+        for peer in [first, second, liar] {
+            leech.add_peer(peer);
+        }
+        let lie_once = |leech: &mut Swarm, supplier: PeerId| {
+            // After a dispute the liar's bitfield and unchoke are still held,
+            // so its requests may already come with the manifest.
+            let mut actions =
+                leech.on_message(supplier, Message::Manifest(Box::new(manifest.clone())));
+            actions.extend(leech.on_message(liar, Message::Bitfield(Bitfield::full(3))));
+            actions.extend(leech.on_message(liar, Message::Choke(false)));
+            let (_, index) = requests(&actions)
+                .into_iter()
+                .find(|(peer, _)| *peer == liar)
+                .expect("the liar is asked");
+            (
+                index,
+                leech.on_message(
+                    liar,
+                    Message::Piece {
+                        index,
+                        bytes: vec![0; PIECE as usize],
+                    },
+                ),
+            )
+        };
+
+        let (_, once) = lie_once(&mut leech, first);
+        assert!(once.contains(&Action::Drop(first, Dropped::DisputedManifest)));
+
+        let (index, twice) = lie_once(&mut leech, second);
+        assert_eq!(twice, vec![Action::Drop(liar, Dropped::BadPiece { index })]);
+        assert!(
+            leech.manifest().is_some(),
+            "the second manifest was discarded too"
+        );
     }
 
     #[test]
