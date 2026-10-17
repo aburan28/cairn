@@ -70,9 +70,9 @@ ci_workflow="$script_dir/../workflows/ci.yml"
 ios_workflow="$script_dir/../workflows/ios-app.yml"
 seed_workflow="$script_dir/../workflows/seed-pod.yml"
 guard_count="$(grep -Fc "if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs." "$ci_workflow")"
-[[ "$guard_count" == 11 ]]
+[[ "$guard_count" == 12 ]]
 exact_false_count="$(grep -Fc " != 'false')" "$ci_workflow")"
-[[ "$exact_false_count" == 11 ]]
+[[ "$exact_false_count" == 12 ]]
 
 should_run_gate() {
   local result="$1" output="$2" cancelled="$3"
