@@ -51,7 +51,7 @@ use crate::gossip::{Candidate, Population};
 use crate::ledger::Ledger;
 use crate::node::Node;
 use crate::p2p::discovery::{peer_id_string, Endpoint};
-use crate::p2p::handshake::{PeerIdentity, PeerPublic};
+use crate::p2p::handshake::{PeerId, PeerIdentity, PeerPublic};
 use crate::p2p::multicast;
 
 /// Moves the LAN beacon port, or `off` disables beacons. See `run` in this
@@ -77,6 +77,21 @@ const BEACONS_PER_TICK: usize = 64;
 
 /// Seconds between sync rounds.
 pub const TICK_SECONDS: u64 = 5;
+
+fn inbound_guard<'a, T>(
+    state: &'a Mutex<T>,
+    local: &PeerId,
+    remote: &PeerId,
+) -> Option<std::sync::MutexGuard<'a, T>> {
+    match state.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) if local <= remote => None,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            Some(state.lock().unwrap_or_else(|error| error.into_inner()))
+        }
+    }
+}
 
 /// Ticks between LAN beacon announcements.
 const BEACON_EVERY_TICKS: u64 = multicast::INTERVAL_SECONDS.div_ceil(TICK_SECONDS);
@@ -1388,9 +1403,35 @@ pub fn run(config: Config) -> Result<(), String> {
                 }
                 return;
             }
-            let mut guard = accept_state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let connection = match accept_service.authenticate_inbound(inbound) {
+                Ok(connection) => connection,
+                Err(error) => {
+                    log::warn!("inbound authentication: {error}");
+                    accept_sessions
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .inbound_failed();
+                    return;
+                }
+            };
+            // A cycle of outbound callers can each hold its own ledger while
+            // every inbound worker waits on those same locks. Under contention,
+            // admit waiting edges only from lower to higher authenticated peer
+            // ids. Every finite cycle has a minimum id, so one connection is
+            // closed, its dialler releases the lock, and the remaining session
+            // proceeds. An idle node accepts either direction: asymmetric
+            // bootstrap still works. This is scheduling, never record ordering.
+            let mut guard = match inbound_guard(
+                &accept_state,
+                &accept_service.identity(),
+                &connection.remote(),
+            ) {
+                Some(guard) => guard,
+                None => {
+                    log::debug!("inbound sync deferred: node busy; peer may retry");
+                    return;
+                }
+            };
             let State {
                 node, population, ..
             } = &mut *guard;
@@ -1401,8 +1442,8 @@ pub fn run(config: Config) -> Result<(), String> {
                 Some(_) => {
                     let mut scorer = RoundScorer::new(accept_registry.clone());
                     accept_service
-                        .serve_inbound_and_population(
-                            inbound,
+                        .serve_authenticated_and_population(
+                            connection,
                             node,
                             population,
                             PopLimits::default(),
@@ -1410,7 +1451,7 @@ pub fn run(config: Config) -> Result<(), String> {
                         )
                         .map(|(remote, _)| remote)
                 }
-                None => accept_service.serve_inbound_once(inbound, node),
+                None => accept_service.serve_authenticated_once(connection, node),
             };
             match outcome {
                 Ok(remote) => {
@@ -1943,6 +1984,32 @@ fn describe_readiness(report: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn idle_inbound_accepts_either_direction_and_busy_waits_have_a_strict_order() {
+        use super::*;
+        let state = Arc::new(Mutex::new(()));
+        let low = [1; 32];
+        let high = [2; 32];
+        assert!(inbound_guard(&state, &low, &high).is_some());
+        assert!(inbound_guard(&state, &high, &low).is_some());
+        let held = state.lock().unwrap();
+        assert!(inbound_guard(&state, &low, &high).is_none());
+        assert!(inbound_guard(&state, &low, &low).is_none());
+        let waiting = Arc::clone(&state);
+        let (send, received) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let guard = inbound_guard(&waiting, &high, &low);
+            send.send(guard.is_some()).unwrap();
+        });
+        assert!(matches!(
+            received.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        drop(held);
+        assert!(received.recv_timeout(Duration::from_secs(5)).unwrap());
+        worker.join().unwrap();
+    }
 
     #[test]
     fn a_reveal_held_by_the_dealing_windows_is_retried_and_a_disqualified_one_is_not() {

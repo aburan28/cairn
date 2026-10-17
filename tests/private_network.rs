@@ -296,6 +296,55 @@ fn explicitly_bootstrapped_private_nodes_reach_each_other() {
 }
 
 #[test]
+fn a_private_bootstrap_ring_makes_progress_without_a_cross_node_lock_cycle() {
+    let dirs = [scratch(), scratch(), scratch()];
+    let addresses = [address(), address(), address()];
+    let bootstraps = [
+        identity(&dirs[0], addresses[0]),
+        identity(&dirs[1], addresses[1]),
+        identity(&dirs[2], addresses[2]),
+    ];
+    let peers: Vec<_> = bootstraps
+        .iter()
+        .map(|path| {
+            let value: Value = Value::from_json(&fs::read_to_string(path).unwrap()).unwrap();
+            let public = cairn::p2p::handshake::PeerPublic::from_bytes(
+                &cairn::hex::decode(value.get("public").unwrap().as_str().unwrap()).unwrap(),
+            )
+            .unwrap();
+            cairn::hex::encode(&public.id())
+        })
+        .collect();
+    let mut nodes = Vec::new();
+    for i in 0..3 {
+        // All three are named members; only the next member is bootstrapped.
+        // The predecessor must be authorized to complete its inbound session.
+        let allowed = peers
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, id)| id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        nodes.push(start(
+            dirs[i].clone(),
+            addresses[i],
+            address(),
+            Some(&bootstraps[(i + 1) % 3]),
+            |cmd| {
+                cmd.env("CAIRN_PEERS", allowed);
+            },
+        ));
+    }
+    for node in &mut nodes {
+        wait_for(node, "/sessions", |value| {
+            value["reached"].as_u64().is_some_and(|n| n > 0)
+        });
+        assert!(!node.dir.join("helper-invoked").exists());
+    }
+}
+
+#[test]
 fn incompatible_profiles_and_auth_fail_before_starting() {
     for (variable, value, expected) in [
         ("CAIRN_NETWORK", "privte", "expected public or private"),
