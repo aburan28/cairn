@@ -124,10 +124,18 @@ pub fn parse_peer_id(text: &str) -> Result<PeerId, DiscoveryError> {
     if text.len() != 64 {
         return Err(DiscoveryError::BadPeerId { value: text.into() });
     }
+    // Byte-wise, never by slicing `text`: a multi-byte character across a
+    // pair boundary would panic, and `from_str_radix` accepts a sign.
+    let digit = |byte: u8| char::from(byte).to_digit(16);
     let mut id = [0u8; 32];
-    for (i, byte) in id.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16)
-            .map_err(|_| DiscoveryError::BadPeerId { value: text.into() })?;
+    for (byte, pair) in id.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+        *byte = match pair {
+            [high, low] => digit(*high)
+                .zip(digit(*low))
+                .and_then(|(high, low)| u8::try_from(high << 4 | low).ok()),
+            _ => None,
+        }
+        .ok_or_else(|| DiscoveryError::BadPeerId { value: text.into() })?;
     }
     Ok(id)
 }
@@ -281,6 +289,18 @@ fn pick<R: RngCore>(bound: usize, rng: &mut R) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_peer_id_with_a_multibyte_character_is_refused_not_a_panic() {
+        let text = format!("a\u{e9}{}", "a".repeat(61));
+        assert_eq!(text.len(), 64);
+        assert!(super::parse_peer_id(&text).is_err());
+        assert!(super::parse_peer_id(&format!("+f{}", "0".repeat(62))).is_err());
+        assert_eq!(
+            super::parse_peer_id(&"0f".repeat(32)).ok(),
+            Some([0x0f; 32])
+        );
+    }
+
     #[test]
     fn a_literal_address_never_touches_the_resolver_and_a_name_does() {
         // The fast path: a literal parses byte for byte, so a node on a host

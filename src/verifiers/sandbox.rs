@@ -170,6 +170,24 @@ pub struct Unavailable(pub String);
 /// `program` must already be an absolute path: resolving a name through `PATH`
 /// inside the jail would pick a different binary than the one the caller
 /// checked, and under `bwrap` it would usually not resolve at all.
+/// The first path `plan` grants that contains the operator's `~/.cairn` or
+/// secrets directory, if any does.
+fn exposes_operator_secrets(plan: &Confinement<'_>) -> Option<PathBuf> {
+    let resolve = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let protected: Vec<PathBuf> = configured_home()
+        .map(|home| home.join(".cairn"))
+        .into_iter()
+        .chain(std::iter::once(crate::secrets::default_dir()))
+        .map(|path| resolve(&path))
+        .collect();
+    std::iter::once(plan.cwd)
+        .chain(std::iter::once(plan.workdir))
+        .chain(plan.readable.iter().map(PathBuf::as_path))
+        .chain(plan.writable.iter().map(PathBuf::as_path))
+        .map(resolve)
+        .find(|granted| protected.iter().any(|secret| secret.starts_with(granted)))
+}
+
 pub fn confine(
     program: &Path,
     args: &[OsString],
@@ -183,6 +201,20 @@ pub fn confine(
     // print those values into verdict evidence without using the network.
     // Requiring the sandbox therefore also requires a scrubbed environment.
     let scrub_env = effective_scrub_env(plan, required);
+
+    // A jail is only as narrow as what it is shown. A bundle root that holds
+    // the operator's own key and secrets (`--root ~` does) would show them to
+    // every objective's code, which can print a digest of what it read into
+    // public evidence; no jail, so no grant, is made for that.
+    if !matches!(mechanism, Mechanism::None(_)) {
+        if let Some(granted) = exposes_operator_secrets(plan) {
+            return Err(Unavailable(format!(
+                "this jail would be shown {}, which holds this node's key or secrets; \
+                 serve objectives from a directory that does not contain them",
+                granted.display()
+            )));
+        }
+    }
 
     match mechanism {
         Mechanism::None(why) if required => Err(Unavailable(format!(

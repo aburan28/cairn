@@ -1897,71 +1897,95 @@ impl VerifierRegistry {
         };
 
         let preamble = spec.get("preamble").and_then(Value::as_str).unwrap_or("");
-        let workdir = match TempDir::new("proofwork-lean") {
-            Ok(workdir) => workdir,
-            Err(error) => {
-                return Verdict::unavailable(format!("cannot create a working directory: {error}"))
-            }
-        };
-
-        let cwd = project_cwd.unwrap_or_else(|| workdir.path().to_path_buf());
 
         // Lean elaboration runs arbitrary code (macros, tactics, elaborators),
         // and half the input is submitter-controlled, so every spawn below is
         // jailed like any other. A declared project is read-only: verifier
         // execution must not persist generated files or modify code seen by
         // later claims. The scratch directory remains the only writable
-        // location, and the compiled modules and the replay live there.
-        let mut plan = Confinement::new(workdir.path(), &cwd, timeout.as_secs())
-            .reading(&binary)
-            .scrubbed();
-        if let Some(root) = &self.lean_root {
-            plan = plan.reading(root);
-        }
-        let claim_dir = workdir.path().join("claim");
-        let statement_dir = workdir.path().join("statement");
-        let driver = workdir.path().join("KernelReplay.lean");
-        let setup = fs::create_dir_all(&claim_dir)
-            .and_then(|()| fs::create_dir_all(&statement_dir))
-            .and_then(|()| fs::write(&driver, KERNEL_REPLAY.as_bytes()));
-        if let Err(error) = setup {
-            return Verdict::unavailable(format!("cannot prepare the Lean scratch: {error}"));
-        }
+        // location.
+        //
+        // Each spawn gets a scratch of its own, made for it and written only
+        // by this process before it starts. Sharing one would hand every run
+        // the files of the run before it: the claim's elaboration could
+        // rewrite the replay driver or the compiled statement the replay
+        // trusts, and any run could leave a symlink for this unjailed process
+        // to follow on its next write. What crosses from one run to the next
+        // is bytes this process read back with `read_scratch_file`.
         let source_name = format!("{LEAN_MODULE}.lean");
         let olean_name = format!("{LEAN_MODULE}.olean");
-        let statement_olean = statement_dir.join(&olean_name);
-        let compile = |dir: &Path| {
-            sandbox::argv([
-                OsStr::new("-R"),
-                dir.as_os_str(),
-                OsStr::new("-o"),
-                dir.join(&olean_name).as_os_str(),
-                dir.join(&source_name).as_os_str(),
-            ])
-        };
-        let replay = |claim: &Path, marker: &str| {
-            sandbox::argv([
-                OsStr::new("--run"),
-                driver.as_os_str(),
-                claim.as_os_str(),
-                statement_olean.as_os_str(),
-                OsStr::new(theorem_arg),
-                OsStr::new(marker),
-            ])
-        };
-        let run = |args: Vec<OsString>| -> Result<Completed, LeanRun> {
+        let run_in = |scratch: &Path, args: Vec<OsString>| -> Result<Completed, LeanRun> {
+            let cwd = project_cwd.as_deref().unwrap_or(scratch);
+            let mut plan = Confinement::new(scratch, cwd, timeout.as_secs())
+                .reading(&binary)
+                .scrubbed();
+            if let Some(root) = &self.lean_root {
+                plan = plan.reading(root);
+            }
             let jailed = sandbox::confine(&binary, &args, &plan)
                 .map_err(|sandbox::Unavailable(why)| LeanRun::Jail(why))?;
             let mut command = jailed.command;
-            run_bounded(&mut command, workdir.path(), None, timeout, plan.limits()).map_err(
-                |failure| match failure {
+            run_bounded(&mut command, scratch, None, timeout, plan.limits()).map_err(|failure| {
+                match failure {
                     RunFailure::TimedOut(throttled) => {
                         LeanRun::TimedOut(timeout.as_secs(), RunFailure::throttle_note(throttled))
                     }
                     RunFailure::Spawn(error) | RunFailure::Io(error) => {
                         LeanRun::Failed(error.to_string())
                     }
-                },
+                }
+            })
+        };
+        let scratch = |prefix: &str| {
+            TempDir::new(prefix)
+                .map_err(|error| LeanRun::Failed(format!("cannot create a scratch: {error}")))
+        };
+        // Compile `source` as the module, in `<fresh scratch>/<label>`, and
+        // hand back what Lean said with the compiled module, if it left one.
+        let compile =
+            |label: &str, source: &str| -> Result<(Completed, io::Result<Vec<u8>>), LeanRun> {
+                let work = scratch("proofwork-lean")?;
+                let dir = work.path().join(label);
+                let dir = dir.as_path();
+                fs::create_dir(dir)
+                    .and_then(|()| fs::write(dir.join(&source_name), source.as_bytes()))
+                    .map_err(|error| {
+                        LeanRun::Failed(format!("cannot write the Lean source: {error}"))
+                    })?;
+                let completed = run_in(
+                    work.path(),
+                    sandbox::argv([
+                        OsStr::new("-R"),
+                        dir.as_os_str(),
+                        OsStr::new("-o"),
+                        dir.join(&olean_name).as_os_str(),
+                        dir.join(&source_name).as_os_str(),
+                    ]),
+                )?;
+                Ok((completed, read_scratch_file(&dir.join(&olean_name))))
+            };
+        // The kernel replay of `claim` against `statement`, in a scratch no
+        // elaboration has ever run in.
+        let replay = |claim: &[u8], statement: &[u8], marker: &str| -> Result<Completed, LeanRun> {
+            let dir = scratch("proofwork-lean-replay")?;
+            let dir = dir.path();
+            let driver = dir.join("KernelReplay.lean");
+            let claim_olean = dir.join(format!("claim-{olean_name}"));
+            let statement_olean = dir.join(format!("statement-{olean_name}"));
+            fs::write(&driver, KERNEL_REPLAY.as_bytes())
+                .and_then(|()| fs::write(&claim_olean, claim))
+                .and_then(|()| fs::write(&statement_olean, statement))
+                .map_err(|error| LeanRun::Failed(format!("cannot prepare the replay: {error}")))?;
+            run_in(
+                dir,
+                sandbox::argv([
+                    OsStr::new("--run"),
+                    driver.as_os_str(),
+                    claim_olean.as_os_str(),
+                    statement_olean.as_os_str(),
+                    OsStr::new(theorem_arg),
+                    OsStr::new(marker),
+                ]),
             )
         };
 
@@ -1989,111 +2013,105 @@ impl VerifierRegistry {
             format!(
                 "{}\n{}\n{}\n{}\nkernel-replay {}",
                 binary.display(),
-                cwd.display(),
+                project_cwd
+                    .as_deref()
+                    .map_or_else(|| "-".into(), Path::to_string_lossy),
                 preamble,
                 statement,
                 blobs::address(KERNEL_REPLAY.as_bytes()),
             )
             .as_bytes(),
         );
-        if let Some(compiled) = lean_statement_olean(&control_key) {
-            if let Err(error) = fs::write(&statement_olean, compiled) {
-                return Verdict::unavailable(format!(
-                    "cannot write the compiled statement: {error}"
-                ));
-            }
-        } else {
-            if let Err(error) = fs::write(
-                statement_dir.join(&source_name),
-                format!("{preamble}\n{statement} := by sorry\n").as_bytes(),
-            ) {
-                return Verdict::unavailable(format!("cannot write the Lean source: {error}"));
-            }
-            let completed = match run(compile(&statement_dir)) {
-                Ok(completed) => completed,
-                Err(failure) => {
-                    return failure.unavailable("compiling the objective's statement alone")
-                }
-            };
-            match completed.code {
-                Some(0) => {}
-                Some(code) => {
-                    let output = format!("{}{}", completed.stdout, completed.stderr);
-                    return Verdict::new(
-                        Status::Unavailable,
-                        format!(
-                            "lean could not compile the objective's statement on its own \
+        let statement_olean =
+            if let Some(compiled) = lean_statement_olean(&control_key) {
+                compiled
+            } else {
+                let (completed, module) = match compile(
+                    "statement",
+                    &format!("{preamble}\n{statement} := by sorry\n"),
+                ) {
+                    Ok(compiled) => compiled,
+                    Err(failure) => {
+                        return failure.unavailable("compiling the objective's statement alone")
+                    }
+                };
+                match completed.code {
+                    Some(0) => {}
+                    Some(code) => {
+                        let output = format!("{}{}", completed.stdout, completed.stderr);
+                        return Verdict::new(
+                            Status::Unavailable,
+                            format!(
+                                "lean could not compile the objective's statement on its own \
                              (exit {code}), so no proof can be judged here: this node's Lean \
                              does not run under its jail, or the statement does not elaborate. \
                              That is a fact about this node or the objective, not the proof"
-                        ),
-                        Value::object([
-                            ("control_returncode", Value::Int(i128::from(code))),
-                            (
-                                "control_output_sha256",
-                                Value::string(blobs::address(output.trim().as_bytes())),
                             ),
-                            ("lean_binary", Value::string(binary.to_string_lossy())),
-                        ]),
-                    );
-                }
-                None => {
-                    return Verdict::unavailable(
+                            Value::object([
+                                ("control_returncode", Value::Int(i128::from(code))),
+                                (
+                                    "control_output_sha256",
+                                    Value::string(blobs::address(output.trim().as_bytes())),
+                                ),
+                                ("lean_binary", Value::string(binary.to_string_lossy())),
+                            ]),
+                        );
+                    }
+                    None => return Verdict::unavailable(
                         "lean was killed by a signal while compiling the objective's statement \
                          alone; that is a fact about this node, not the proof",
-                    )
+                    ),
                 }
-            }
-            let control_marker = audit_marker();
-            let completed = match run(replay(&statement_olean, &control_marker)) {
-                Ok(completed) => completed,
-                Err(failure) => {
-                    return failure.unavailable("replaying the objective's statement alone")
-                }
-            };
-            let output = format!("{}{}", completed.stdout, completed.stderr);
-            match read_kernel_replay(&output, &control_marker) {
-                KernelReplay::Passed { axioms, .. }
-                    if theorem.is_none() || axioms.iter().any(|a| a == "sorryAx") => {}
-                reading => {
-                    return Verdict::new(
-                        Status::Unavailable,
-                        "this node's Lean did not run the kernel replay on the objective's \
+                let control_marker = audit_marker();
+                // A Lean that left no module still gets the replay first: what it
+                // says about the replay is the more useful report.
+                let compiled = module.as_deref().unwrap_or_default();
+                let completed = match replay(compiled, compiled, &control_marker) {
+                    Ok(completed) => completed,
+                    Err(failure) => {
+                        return failure.unavailable("replaying the objective's statement alone")
+                    }
+                };
+                let output = format!("{}{}", completed.stdout, completed.stderr);
+                match read_kernel_replay(&output, &control_marker) {
+                    KernelReplay::Passed { axioms, .. }
+                        if theorem.is_none() || axioms.iter().any(|a| a == "sorryAx") => {}
+                    reading => {
+                        return Verdict::new(
+                            Status::Unavailable,
+                            "this node's Lean did not run the kernel replay on the objective's \
                          statement proved by `sorry`, or did not report it as resting on \
                          `sorryAx`, so no replay can be trusted here. That is a fact about this \
                          node's Lean, not the proof",
-                        Value::object([
-                            ("control_replay", Value::string(format!("{reading:?}"))),
-                            (
-                                "control_output_sha256",
-                                Value::string(blobs::address(output.trim().as_bytes())),
-                            ),
-                            ("lean_binary", Value::string(binary.to_string_lossy())),
-                        ]),
-                    );
+                            Value::object([
+                                ("control_replay", Value::string(format!("{reading:?}"))),
+                                (
+                                    "control_output_sha256",
+                                    Value::string(blobs::address(output.trim().as_bytes())),
+                                ),
+                                ("lean_binary", Value::string(binary.to_string_lossy())),
+                            ]),
+                        );
+                    }
                 }
-            }
-            match fs::read(&statement_olean) {
-                Ok(compiled) => remember_lean_statement(&control_key, compiled),
-                Err(error) => {
-                    return Verdict::unavailable(format!(
+                let module = match module {
+                    Ok(module) => module,
+                    Err(error) => {
+                        return Verdict::unavailable(format!(
                         "lean compiled the statement but left no module to replay against: {error}"
                     ))
-                }
-            }
-        }
+                    }
+                };
+                remember_lean_statement(&control_key, module.clone());
+                module
+            };
 
-        if let Err(error) = fs::write(
-            claim_dir.join(&source_name),
-            format!("{preamble}\n{statement} {proof}\n").as_bytes(),
-        ) {
-            return Verdict::unavailable(format!("cannot write the Lean source: {error}"));
-        }
-        let completed = match run(compile(&claim_dir)) {
-            Ok(completed) => completed,
-            // A timeout is not a refutation. The proof may be fine and slow.
-            Err(failure) => return failure.unavailable("compiling the claim"),
-        };
+        let (completed, claim_olean) =
+            match compile("claim", &format!("{preamble}\n{statement} {proof}\n")) {
+                Ok(compiled) => compiled,
+                // A timeout is not a refutation. The proof may be fine and slow.
+                Err(failure) => return failure.unavailable("compiling the claim"),
+            };
 
         let output = format!("{}{}", completed.stdout, completed.stderr)
             .trim()
@@ -2142,8 +2160,22 @@ impl VerifierRegistry {
                 // elaboration ran it, and it can leave a declaration in the
                 // environment the kernel never saw. The replay is a process
                 // that code never ran in, and its answer decides.
+                // Elaboration also wrote the module the replay reads, and may
+                // have written nothing.
+                let claim_olean = match claim_olean {
+                    Ok(module) => module,
+                    Err(error) => {
+                        return Verdict::new(
+                            Status::Unavailable,
+                            format!(
+                                "lean compiled the claim but left no module to replay: {error}"
+                            ),
+                            evidence,
+                        )
+                    }
+                };
                 let marker = audit_marker();
-                let completed = match run(replay(&claim_dir.join(&olean_name), &marker)) {
+                let completed = match replay(&claim_olean, &statement_olean, &marker) {
                     Ok(completed) => completed,
                     Err(failure) => return failure.unavailable("replaying the claim"),
                 };
@@ -3407,6 +3439,48 @@ impl RunFailure {
     }
 }
 
+/// Read a file a jailed child may have written, refusing anything but a
+/// regular file at that exact name.
+///
+/// The child owns its scratch and can leave a symlink where its output should
+/// be. This process is not jailed, so following it would read a host file on
+/// the child's behalf; the identity check closes the race between looking and
+/// opening, the same way `secret_file` does.
+fn read_scratch_file(path: &Path) -> io::Result<Vec<u8>> {
+    // The directory holding it was the child's too. The scratch root itself
+    // is not: its parent is outside every jail.
+    if let Some(parent) = path.parent() {
+        if !fs::symlink_metadata(parent)?.file_type().is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a directory", parent.display()),
+            ));
+        }
+    }
+    let before = fs::symlink_metadata(path)?;
+    if !before.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    let mut file = fs::File::open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let opened = file.metadata()?;
+        if before.dev() != opened.dev() || before.ino() != opened.ino() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} changed while it was being opened", path.display()),
+            ));
+        }
+    }
+    let mut bytes = Vec::new();
+    io::Read::read_to_end(&mut file, &mut bytes)?;
+    Ok(bytes)
+}
+
 /// Run a child under a wall-clock bound.
 ///
 /// `std` has no subprocess timeout, so this spawns the child and polls
@@ -3435,12 +3509,21 @@ fn run_bounded(
 ) -> Result<Completed, RunFailure> {
     let out_path = workdir.join("stdout");
     let err_path = workdir.join("stderr");
+    // Never opened through whatever is already at these names. A caller that
+    // runs twice in one `workdir` hands the second run a directory the first
+    // child could write, and a symlink it left at `stdout` would otherwise
+    // have this unjailed process truncate the file it points at. Unlinking
+    // removes the link itself; `create_new` refuses anything that reappears.
+    let fresh = |path: &Path| match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    };
     let capture = |path: &Path| {
+        fresh(path)?;
         fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .open(path)
     };
     let out_file = capture(&out_path).map_err(RunFailure::Io)?;
@@ -3455,8 +3538,15 @@ fn run_bounded(
     match stdin {
         Some(bytes) => {
             let in_path = workdir.join("stdin");
-            fs::write(&in_path, bytes).map_err(RunFailure::Io)?;
-            let in_file = fs::File::open(&in_path).map_err(RunFailure::Io)?;
+            fresh(&in_path).map_err(RunFailure::Io)?;
+            let mut in_file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&in_path)
+                .map_err(RunFailure::Io)?;
+            io::Write::write_all(&mut in_file, bytes).map_err(RunFailure::Io)?;
+            io::Seek::rewind(&mut in_file).map_err(RunFailure::Io)?;
             command.stdin(Stdio::from(in_file));
         }
         None => {
@@ -5747,6 +5837,51 @@ mod tests {
 
     /// A Lean on which the replay does not run is found by the control and
     /// reported Unavailable -- never a verdict about the proof.
+    /// The claim's elaboration runs the submitter's code with a writable
+    /// scratch. Whatever it leaves there -- a forged replay driver, a link
+    /// to a host file where the next run's output goes -- must reach neither
+    /// the replay nor this unjailed process: each run gets a scratch of its
+    /// own.
+    #[cfg(unix)]
+    #[test]
+    fn the_claims_elaboration_cannot_reach_the_replay_or_the_host() {
+        if !have("sh") || !have("cat") || !have("ln") {
+            return;
+        }
+        let root = tmpdir("proofwork-lean-forged");
+        let victim = root.path().join("victim");
+        fs::write(&victim, "operator data\n").expect("victim");
+        // On the claim's compile: overwrite where the replay driver used to
+        // sit, and plant links where a later run's capture files would go.
+        // A replay that runs the forged driver passes anything.
+        let lean = replaying_lean_after(
+            root.path(),
+            "forging-lean",
+            &format!(
+                "case \"$1 $2\" in -R*/claim) \
+                   printf FORGED > \"$2/../KernelReplay.lean\"; \
+                   for f in stdout stderr stdin; do rm -f \"$2/../$f\"; ln -s '{victim}' \"$2/../$f\"; done;; \
+                 esac\n\
+                 case \"$1\" in --run) if grep -q FORGED \"$2\"; then echo \"$6 replayed 1\"; echo \"$6 ok\"; exit 0; fi;; esac\n",
+                victim = victim.display()
+            ),
+        );
+        let registry = VerifierRegistry::new(root.path()).with_lean_binary(lean.to_string_lossy());
+        let spec = Value::object([
+            ("kind", Value::string("lean")),
+            ("statement", Value::string("theorem forged : True")),
+        ]);
+        let verdict = registry.run(
+            &spec,
+            &Value::object([("proof", Value::string(":= REPLAY_REFUSES"))]),
+        );
+        assert_eq!(verdict.status, Status::Reject, "{}", verdict.detail);
+        assert_eq!(
+            fs::read_to_string(&victim).expect("victim"),
+            "operator data\n"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_lean_the_replay_cannot_run_on_is_unavailable() {

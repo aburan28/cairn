@@ -454,15 +454,25 @@ fn parse_node_id(text: &str) -> Result<NodeId, DhtError> {
             detail: format!("{text:?} is not a 256-bit id"),
         });
     }
+    // Byte-wise, never by slicing `text`: a peer's string can put a
+    // multi-byte character across a pair boundary, and slicing there panics.
     let mut raw = [0u8; 32];
-    for (index, slot) in raw.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).map_err(|_| {
-            DhtError::Malformed {
-                detail: format!("{text:?} is not hexadecimal"),
-            }
+    for (slot, pair) in raw.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+        *slot = hex_pair(pair).ok_or_else(|| DhtError::Malformed {
+            detail: format!("{text:?} is not hexadecimal"),
         })?;
     }
     Ok(NodeId::from_bytes(raw))
+}
+
+/// One byte from two ASCII hex digits; `None` for anything else, a sign
+/// included, which `u8::from_str_radix` would accept.
+fn hex_pair(pair: &[u8]) -> Option<u8> {
+    let digit = |byte: u8| char::from(byte).to_digit(16);
+    match pair {
+        [high, low] => Some(u8::try_from(digit(*high)? << 4 | digit(*low)?).ok()?),
+        _ => None,
+    }
 }
 
 /// Hex-encode a public key for a [`DhtMessage::Keys`].
@@ -1333,6 +1343,17 @@ impl Directory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_node_id_with_a_multibyte_character_is_malformed_not_a_panic() {
+        // 64 bytes, with `é` straddling the first pair boundary.
+        let text = format!("a\u{e9}{}", "a".repeat(61));
+        assert_eq!(text.len(), 64);
+        assert!(parse_node_id(&text).is_err());
+        assert!(parse_node_id(&format!("+f{}", "0".repeat(62))).is_err());
+        let hex = "0f".repeat(32);
+        assert_eq!(parse_node_id(&hex).expect("hex").as_bytes(), &[0x0f; 32]);
+    }
 
     fn peer(n: u8) -> PeerId {
         let mut id = [0u8; 32];

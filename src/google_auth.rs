@@ -69,6 +69,12 @@ const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const USERINFO_URL: &str = "https://openidconnect.googleapis.com/v1/userinfo";
 const KEY_FILE: &str = "google_session_key";
 
+/// Whether `name` is a secret this module owns, which nothing but the module
+/// itself should write.
+pub fn is_reserved_secret(name: &str) -> bool {
+    name == KEY_FILE
+}
+
 /// The environment an operator sets. All of it is optional.
 pub const CLIENT_ID_ENV: &str = "CAIRN_GOOGLE_CLIENT_ID";
 pub const CLIENT_SECRET_ENV: &str = "CAIRN_GOOGLE_CLIENT_SECRET";
@@ -1112,6 +1118,10 @@ fn curl_https(url: &str, form: Option<&str>, bearer: Option<&str>) -> Result<Str
     if bearer.is_some_and(|token| token.bytes().any(|b| b.is_ascii_control())) {
         return Err("google returned an access token this node will not send on".to_string());
     }
+    // Both go over stdin, so a request carries one or the other.
+    if form.is_some() && bearer.is_some() {
+        return Err("a google request takes a form or a bearer token, not both".to_string());
+    }
     let mut command = Command::new("curl");
     command.args([
         "--silent",
@@ -1133,9 +1143,10 @@ fn curl_https(url: &str, form: Option<&str>, bearer: Option<&str>) -> Result<Str
             "@-",
         ]);
     }
-    if let Some(token) = bearer {
-        command.arg("--header");
-        command.arg(format!("authorization: Bearer {token}"));
+    // The token goes over stdin like the form does: an argument is readable
+    // by every user on the host in `/proc/<pid>/cmdline` while curl runs.
+    if bearer.is_some() {
+        command.args(["--header", "@-"]);
     }
     command.arg(url);
     command
@@ -1154,6 +1165,11 @@ fn curl_https(url: &str, form: Option<&str>, bearer: Option<&str>) -> Result<Str
             stdin
                 .write_all(form.as_bytes())
                 .map_err(|error| format!("could not write the token request: {error}"))?;
+        }
+        if let Some(token) = bearer {
+            stdin
+                .write_all(format!("authorization: Bearer {token}\n").as_bytes())
+                .map_err(|error| format!("could not write the userinfo request: {error}"))?;
         }
     }
     let output = child

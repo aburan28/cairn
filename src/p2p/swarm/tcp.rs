@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -111,7 +111,16 @@ impl From<io::Error> for TransferError {
 /// An [`Action`] may name a peer other than the one whose message produced it --
 /// a `have` goes to everybody, an endgame `cancel` goes to the loser -- so
 /// dispatch cannot be "write to the socket I am reading from".
-type Outbox = Arc<Mutex<BTreeMap<PeerId, Sender<Message>>>>;
+type Outbox = Arc<Mutex<BTreeMap<PeerId, SyncSender<Message>>>>;
+
+/// Messages queued for one peer's writer before that peer is disconnected.
+///
+/// Bounded because the peer decides how fast the queue drains: one that stops
+/// reading while it keeps sending `Request`s would otherwise have every piece
+/// it asked for -- a quarter-megabyte clone for a few bytes on the wire --
+/// held here until memory runs out. An honest peer has at most
+/// `max_in_flight` pieces outstanding, far below this.
+const OUTBOX_DEPTH: usize = 64;
 
 /// The node's address book, shared across every connection and every swarm.
 ///
@@ -947,7 +956,7 @@ fn run_peer(
     book: &Book,
     dht: &Dht,
 ) -> io::Result<()> {
-    let (tx, rx) = mpsc::channel::<Message>();
+    let (tx, rx) = mpsc::sync_channel::<Message>(OUTBOX_DEPTH);
     outbox
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1084,10 +1093,15 @@ fn dispatch(actions: &[Action], outbox: &Outbox) {
     for action in actions {
         match action {
             Action::Send(peer, message) => {
-                if let Some(sender) = table.get(peer) {
-                    // A closed queue is a peer that has already gone. Nothing to
-                    // do about it here, and the reader thread is what notices.
-                    let _ = sender.send(message.clone());
+                // A closed queue is a peer that has already gone. Nothing to
+                // do about it here, and the reader thread is what notices. A
+                // full one is a peer not reading what it asked for, and is
+                // disconnected the way a `Drop` is.
+                let full = table.get(peer).is_some_and(|sender| {
+                    matches!(sender.try_send(message.clone()), Err(TrySendError::Full(_)))
+                });
+                if full {
+                    table.remove(peer);
                 }
             }
             // Removing the queue *is* the disconnect: dropping the last `Sender`
