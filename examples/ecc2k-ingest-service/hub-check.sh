@@ -6,8 +6,9 @@ if [ "$#" -lt 1 ]; then
     echo "usage: $0 https://cairn-hub.<tailnet>.ts.net:8443/mcp [--allow-loopback-http]" >&2
     exit 2
 fi
-if [ -z "${CAIRN_MCP_USER:-}" ] || [ -z "${CAIRN_MCP_PASSWORD:-}" ]; then
-    echo "set CAIRN_MCP_USER and CAIRN_MCP_PASSWORD in the private environment" >&2
+if [ -z "${CAIRN_MCP_BEARER_TOKEN:-}" ] &&
+   { [ -z "${CAIRN_MCP_USER:-}" ] || [ -z "${CAIRN_MCP_PASSWORD:-}" ]; }; then
+    echo "set CAIRN_MCP_BEARER_TOKEN or CAIRN_MCP_USER and CAIRN_MCP_PASSWORD in the private environment" >&2
     exit 2
 fi
 

@@ -91,7 +91,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
@@ -99,8 +99,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use hmac::{Hmac, KeyInit, Mac};
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Map, Value as Json};
+use sha2::Sha256;
 
 use crate::canonical::Value;
 use crate::crypto::identity::Identity;
@@ -432,6 +434,7 @@ pub(crate) fn start_shared_http(
     spend: Arc<Mutex<SpendCeiling>>,
     addr: &str,
 ) -> Result<(), String> {
+    let access = Arc::new(HttpAccess::from_env()?);
     let identity = identity_path.map(load_identity).transpose()?;
     let cipher = pending_cipher(log, key_path)?;
     let server = Server::new_shared(state, identity, cipher).with_shared_spend_ceiling(&spend);
@@ -447,7 +450,7 @@ pub(crate) fn start_shared_http(
     let hub = Arc::new(Mutex::new(HttpHub::new(server)));
     thread::Builder::new()
         .name(String::from("cairn-mcp-http"))
-        .spawn(move || accept_loop(listener, hub))
+        .spawn(move || accept_loop(listener, hub, access))
         .map_err(|error| format!("cannot start HTTP thread: {error}"))?;
     Ok(())
 }
@@ -690,9 +693,115 @@ impl HttpHub {
     }
 }
 
+const MCP_HTTP_TOKEN_ENV: &str = "CAIRN_MCP_HTTP_TOKEN";
+const MCP_HTTP_PUBLIC_HOST_ENV: &str = "CAIRN_MCP_HTTP_PUBLIC_HOST";
+const MCP_HTTP_TOKEN_DOMAIN: &[u8] = b"cairn/mcp/http-token/v1";
+
+struct HttpAccess {
+    public_host: Option<String>,
+    token_digest: Option<[u8; 32]>,
+}
+
+impl HttpAccess {
+    fn from_env() -> Result<Self, String> {
+        let token = std::env::var(MCP_HTTP_TOKEN_ENV)
+            .map(Some)
+            .or_else(|error| match error {
+                std::env::VarError::NotPresent => Ok(None),
+                _ => Err(format!("{MCP_HTTP_TOKEN_ENV} must be UTF-8")),
+            })?;
+        let public_host = std::env::var(MCP_HTTP_PUBLIC_HOST_ENV)
+            .map(Some)
+            .or_else(|error| match error {
+                std::env::VarError::NotPresent => Ok(None),
+                _ => Err(format!("{MCP_HTTP_PUBLIC_HOST_ENV} must be UTF-8")),
+            })?;
+        Self::new(token.as_deref(), public_host.as_deref())
+    }
+
+    fn new(token: Option<&str>, public_host: Option<&str>) -> Result<Self, String> {
+        let token_digest = token
+            .map(|value| {
+                if value.len() != 64 {
+                    return Err(format!(
+                        "{MCP_HTTP_TOKEN_ENV} needs 64 lowercase hexadecimal characters"
+                    ));
+                }
+                let bytes = crate::hex::decode(value)
+                    .ok_or_else(|| format!("{MCP_HTTP_TOKEN_ENV} must be lowercase hexadecimal"))?;
+                Ok(Self::digest(&bytes))
+            })
+            .transpose()?;
+        if public_host.is_some() && token_digest.is_none() {
+            return Err(format!(
+                "{MCP_HTTP_PUBLIC_HOST_ENV} requires {MCP_HTTP_TOKEN_ENV}"
+            ));
+        }
+        if public_host.is_some_and(|value| !valid_mcp_public_host(value)) {
+            return Err(format!(
+                "{MCP_HTTP_PUBLIC_HOST_ENV} must be a DNS host with an optional port"
+            ));
+        }
+        Ok(Self {
+            public_host: public_host.map(str::to_string),
+            token_digest,
+        })
+    }
+
+    fn digest(value: &[u8]) -> [u8; 32] {
+        let mut mac = Hmac::<Sha256>::new_from_slice(MCP_HTTP_TOKEN_DOMAIN)
+            .expect("HMAC accepts any key length");
+        mac.update(value);
+        mac.finalize().into_bytes().into()
+    }
+
+    fn authorized(&self, header: Option<&str>) -> bool {
+        let Some(expected) = &self.token_digest else {
+            return true;
+        };
+        let Some(raw) = header.and_then(|value| value.strip_prefix("Bearer ")) else {
+            return false;
+        };
+        if raw.len() != 64 {
+            return false;
+        }
+        let Some(bytes) = crate::hex::decode(raw) else {
+            return false;
+        };
+        let mut mac = Hmac::<Sha256>::new_from_slice(MCP_HTTP_TOKEN_DOMAIN)
+            .expect("HMAC accepts any key length");
+        mac.update(&bytes);
+        mac.verify_slice(expected).is_ok()
+    }
+}
+
+fn valid_mcp_public_host(value: &str) -> bool {
+    let (host, port) = value.rsplit_once(':').unwrap_or((value, ""));
+    if value.contains(':') && !port.parse::<u16>().is_ok_and(|port| port > 0) {
+        return false;
+    }
+    if host.len() > 253
+        || !host.contains('.')
+        || host.parse::<IpAddr>().is_ok()
+        || host.eq_ignore_ascii_case("localhost")
+    {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label.as_bytes()[0].is_ascii_alphanumeric()
+            && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
+}
+
 /// Serve Streamable HTTP MCP instead of stdio. Returns only on a startup
 /// failure the operator has to fix.
 fn serve_http(server: Server, addr: &str) -> i32 {
+    let access = Arc::new(HttpAccess::from_env().unwrap_or_else(|why| fail(&why)));
     let listener = match bind_http(addr) {
         Ok(listener) => listener,
         Err(error) => fail(&error),
@@ -703,7 +812,7 @@ fn serve_http(server: Server, addr: &str) -> i32 {
             .local_addr()
             .map_or_else(|_| addr.to_string(), |bound| bound.to_string())
     );
-    accept_loop(listener, Arc::new(Mutex::new(HttpHub::new(server))));
+    accept_loop(listener, Arc::new(Mutex::new(HttpHub::new(server))), access);
     // The accept loop never returns; this is for the type, not the control flow.
     0
 }
@@ -723,7 +832,7 @@ fn bind_http(addr: &str) -> Result<TcpListener, String> {
     TcpListener::bind(socket).map_err(|error| format!("cannot listen on {addr}: {error}"))
 }
 
-fn accept_loop(listener: TcpListener, hub: Arc<Mutex<HttpHub>>) {
+fn accept_loop(listener: TcpListener, hub: Arc<Mutex<HttpHub>>, access: Arc<HttpAccess>) {
     let live = Arc::new(Mutex::new(0u64));
     for stream in listener.incoming() {
         let mut stream = match stream {
@@ -749,10 +858,11 @@ fn accept_loop(listener: TcpListener, hub: Arc<Mutex<HttpHub>>) {
             continue;
         }
         let hub = Arc::clone(&hub);
+        let access = Arc::clone(&access);
         let live = Arc::clone(&live);
         thread::spawn(move || {
             let _guard = ConnectionGuard { live };
-            let _ = handle_http_conn(&mut stream, &hub);
+            let _ = handle_http_conn(&mut stream, &hub, &access);
             http_linger(&mut stream);
         });
     }
@@ -780,9 +890,14 @@ struct HttpRequest {
     session: Option<String>,
     host: Option<String>,
     origin: Option<String>,
+    authorization: Option<String>,
 }
 
-fn handle_http_conn(stream: &mut TcpStream, hub: &Arc<Mutex<HttpHub>>) -> io::Result<()> {
+fn handle_http_conn(
+    stream: &mut TcpStream,
+    hub: &Arc<Mutex<HttpHub>>,
+    access: &HttpAccess,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(MCP_REQUEST_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let request = match read_http_request(&mut reader) {
@@ -801,10 +916,21 @@ fn handle_http_conn(stream: &mut TcpStream, hub: &Arc<Mutex<HttpHub>>) -> io::Re
         request.host.as_deref(),
         request.origin.as_deref(),
         local_port,
+        access.public_host.as_deref(),
     ) {
         let frame =
             error_response(Json::Null, code::INVALID_REQUEST, "untrusted HTTP origin").to_string();
         http_respond(stream, 403, "application/json", frame.as_bytes(), &[])?;
+        return Ok(());
+    }
+    if !access.authorized(request.authorization.as_deref()) {
+        http_respond(
+            stream,
+            401,
+            "application/json",
+            br#"{"error":"unauthorized"}"#,
+            &[],
+        )?;
         return Ok(());
     }
     // One request per connection: like `serve.rs`, this answers once and
@@ -955,6 +1081,7 @@ fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, S
     let mut session = None;
     let mut host = None;
     let mut origin = None;
+    let mut authorization = None;
     let mut headers = 0usize;
     let mut header_bytes = 0usize;
     let mut length_seen = false;
@@ -1032,6 +1159,11 @@ fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, S
                         return Err("multiple Origin headers are not supported".into());
                     }
                 }
+                "authorization" => {
+                    if authorization.replace(value.to_string()).is_some() {
+                        return Err("multiple Authorization headers are not supported".into());
+                    }
+                }
                 "transfer-encoding" => {
                     return Err(
                         "transfer encodings are not supported; send content-length".to_string()
@@ -1060,16 +1192,25 @@ fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, S
         session,
         host,
         origin,
+        authorization,
     })
 }
 
-fn http_authority_allowed(host: Option<&str>, origin: Option<&str>, port: u16) -> bool {
+fn http_authority_allowed(
+    host: Option<&str>,
+    origin: Option<&str>,
+    port: u16,
+    public_host: Option<&str>,
+) -> bool {
     if origin.is_some() {
         return false;
     }
     let Some(host) = host else {
         return false;
     };
+    if public_host.is_some_and(|expected| host.eq_ignore_ascii_case(expected)) {
+        return true;
+    }
     if host.eq_ignore_ascii_case(&format!("localhost:{port}")) {
         return true;
     }
@@ -1107,6 +1248,7 @@ fn http_respond(
         200 => "OK",
         202 => "Accepted",
         204 => "No Content",
+        401 => "Unauthorized",
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
@@ -4588,22 +4730,101 @@ mod tests {
 
     #[test]
     fn http_refuses_browser_origins_and_nonlocal_authorities() {
-        assert!(http_authority_allowed(Some("127.0.0.1:8001"), None, 8001));
-        assert!(http_authority_allowed(Some("localhost:8001"), None, 8001));
-        assert!(http_authority_allowed(Some("[::1]:8001"), None, 8001));
+        assert!(http_authority_allowed(
+            Some("127.0.0.1:8001"),
+            None,
+            8001,
+            None
+        ));
+        assert!(http_authority_allowed(
+            Some("localhost:8001"),
+            None,
+            8001,
+            None
+        ));
+        assert!(http_authority_allowed(Some("[::1]:8001"), None, 8001, None));
         assert!(!http_authority_allowed(
             Some("attacker.example:8001"),
             None,
-            8001
+            8001,
+            None
         ));
-        assert!(!http_authority_allowed(Some("127.0.0.1:8002"), None, 8001));
+        assert!(!http_authority_allowed(
+            Some("127.0.0.1:8002"),
+            None,
+            8001,
+            None
+        ));
         assert!(!http_authority_allowed(
             Some("127.0.0.1:8001"),
             Some("https://attacker.example"),
-            8001
+            8001,
+            None
         ));
-        assert!(!http_authority_allowed(None, None, 8001));
+        assert!(!http_authority_allowed(None, None, 8001, None));
         assert!(bind_http("0.0.0.0:0").is_err());
+    }
+
+    #[test]
+    fn http_public_host_requires_strong_token_and_authenticates_before_routes() {
+        let secret = "7a".repeat(32);
+        let host = "cairn-hub.tail9039f7.ts.net:10000";
+        assert!(HttpAccess::new(None, Some(host)).is_err());
+        for bad in ["", "x", "7g", "7a7a"] {
+            assert!(HttpAccess::new(Some(bad), Some(host)).is_err());
+        }
+        for bad in [
+            "localhost",
+            "127.0.0.1:10000",
+            "x..y:10000",
+            "x.y:0",
+            "x.y:",
+        ] {
+            assert!(HttpAccess::new(Some(&secret), Some(bad)).is_err());
+        }
+        let access = HttpAccess::new(Some(&secret), Some(host)).unwrap();
+        assert!(!access.authorized(None));
+        assert!(!access.authorized(Some("Basic abc")));
+        assert!(!access.authorized(Some(&format!("Bearer {}", "7b".repeat(32)))));
+        assert!(access.authorized(Some(&format!("Bearer {secret}"))));
+        assert!(http_authority_allowed(Some(host), None, 1234, Some(host)));
+        assert!(!http_authority_allowed(
+            Some("other.example:10000"),
+            None,
+            1234,
+            Some(host)
+        ));
+        assert!(!http_authority_allowed(
+            Some(host),
+            Some("https://cairn-hub.tail9039f7.ts.net"),
+            1234,
+            Some(host)
+        ));
+
+        let probe = |authorization: Option<&str>| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let hub = Arc::new(Mutex::new(HttpHub::new(server())));
+            let secret = secret.clone();
+            let worker = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let access = HttpAccess::new(Some(&secret), Some(host)).unwrap();
+                handle_http_conn(&mut stream, &hub, &access).unwrap();
+            });
+            let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let auth = authorization
+                .map_or_else(String::new, |value| format!("Authorization: {value}\r\n"));
+            client
+                .write_all(format!("GET / HTTP/1.1\r\nHost: {host}\r\n{auth}\r\n").as_bytes())
+                .unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            worker.join().unwrap();
+            response
+        };
+        assert!(probe(None).starts_with("HTTP/1.1 401"));
+        assert!(probe(Some(&format!("Bearer {secret}"))).starts_with("HTTP/1.1 200"));
     }
 
     #[test]
@@ -4630,6 +4851,7 @@ mod tests {
             "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Type: text/plain\r\n\r\n",
             "POST /mcp HTTP/1.1\r\nHost: localhost\r\nMCP-Session-Id: a\r\nMCP-Session-Id: b\r\n\r\n",
             "POST /mcp HTTP/1.1\r\nHost: localhost\r\nOrigin: a\r\nOrigin: b\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer a\r\nAuthorization: Bearer b\r\n\r\n",
             "POST /mcp HTTP/1.1\r\nHost: localhost\r\n folded: value\r\n\r\n",
             "POST /mcp HTTP/1.1\r\nHost: localhost\r\nNo-Colon\r\n\r\n",
             "POST /mcp HTTP/1.1\r\nHost: localhost\r\nX-Test: a\0b\r\n\r\n",

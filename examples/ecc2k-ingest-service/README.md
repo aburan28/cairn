@@ -83,6 +83,11 @@ from each enrolled agent location before the agent submits a claim. It is a
 read-only probe; a successful probe does not certify an ingester period.
 The gateway currently uses one Cairn signing identity for all its sessions,
 so every account at that address must be trusted to act for the operator.
+For a temporary direct Tailscale Serve route, Cairn can enforce a random
+`CAIRN_MCP_HTTP_TOKEN` and the exact `CAIRN_MCP_HTTP_PUBLIC_HOST` itself,
+without Caddy's password check. Keep both values private, require HTTPS at
+Serve, and retain the default zero MCP spend. This does not give separate
+signing identities to different agents.
 Run the local two-session payment and independent replay with
 `python3 scripts/mcp-http-ingest-smoke.py` after building the Cairn and
 reference binaries.

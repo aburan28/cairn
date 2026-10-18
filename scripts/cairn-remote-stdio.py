@@ -33,11 +33,20 @@ def rpc_error(identifier, message):
 
 def run(url, allow_loopback_http=False):
     address = endpoint(url, allow_loopback_http)
+    token = os.environ.get("CAIRN_MCP_BEARER_TOKEN")
     username = os.environ.get("CAIRN_MCP_USER")
     password = os.environ.get("CAIRN_MCP_PASSWORD")
-    if not username or not password or ":" in username:
-        raise ValueError("set CAIRN_MCP_USER and CAIRN_MCP_PASSWORD for this agent")
-    encoded = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+    if token:
+        if username or password:
+            raise ValueError("choose a bearer token or Basic credentials, not both")
+        if not re.fullmatch(r"[0-9a-f]{64}", token):
+            raise ValueError("CAIRN_MCP_BEARER_TOKEN must be 64 lowercase hexadecimal characters")
+        authorization = f"Bearer {token}"
+    else:
+        if not username or not password or ":" in username:
+            raise ValueError("set CAIRN_MCP_BEARER_TOKEN or CAIRN_MCP_USER and CAIRN_MCP_PASSWORD")
+        encoded = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+        authorization = f"Basic {encoded}"
     timeout = int(os.environ.get("CAIRN_MCP_TIMEOUT_SECONDS", "3600"))
     if timeout < 1:
         raise ValueError("CAIRN_MCP_TIMEOUT_SECONDS must be positive")
@@ -58,7 +67,7 @@ def run(url, allow_loopback_http=False):
         if method == "initialize":
             session = None
         headers = {
-            "Authorization": f"Basic {encoded}",
+            "Authorization": authorization,
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
         }

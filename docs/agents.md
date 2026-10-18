@@ -305,7 +305,18 @@ Plain HTTP, always: this binary terminates no TLS (see `cipher_policy`), so it
 refuses a bind outside loopback. Remote clients must use an SSH tunnel or a
 trusted proxy to the loopback address. The endpoint acts as the operator's
 identity and may hold secrets, so it rejects browser `Origin` headers and
-non-loopback `Host` authorities; browser clients cannot call it directly.
+non-loopback `Host` authorities by default; browser clients cannot call it
+directly.
+For a trusted HTTPS proxy that preserves the public `Host`, set both
+`CAIRN_MCP_HTTP_PUBLIC_HOST` to that exact DNS authority (including a port if
+the URL has one) and `CAIRN_MCP_HTTP_TOKEN` to a random 32-byte token encoded
+as 64 hexadecimal characters. Cairn then requires `Authorization: Bearer
+<token>` on every MCP HTTP request, including loopback requests. An invalid
+token or a public host without a token refuses startup; duplicate
+Authorization headers and browser origins are refused. The token is a shared
+operator capability: give it only to agents trusted with the hub's signing
+identity, and keep it in a private service environment rather than a URL or
+repository file. TLS still terminates at the trusted proxy.
 
 ### One global address for trusted ingester agents
 
@@ -339,7 +350,21 @@ rewrites `Host` for Cairn, and strips Basic credentials before forwarding.
 Tailscale [documents the persistent Serve mode](https://tailscale.com/docs/reference/tailscale-cli/serve)
 and [MagicDNS names](https://tailscale.com/docs/features/magicdns).
 The actual `<tailnet>` value comes from that tailnet's DNS settings after
-enrollment. This is a proposed deployment, not a URL currently running.
+enrollment. The dedicated Linux hub is proposed. A single-operator Mac trial
+currently serves `https://adams-macbook-pro.tail9039f7.ts.net:10000/mcp`
+to enrolled tailnet devices.
+For a temporary single-operator hub, Tailscale Serve can forward directly to
+Cairn's loopback MCP port. Configure the exact MagicDNS `Host` and the bearer
+token above, then point Serve at `http://127.0.0.1:8001`. This removes Caddy's
+password verification from each request while retaining exact-host checks and
+the mandatory bearer credential. It does not change the proposed persistent
+Linux hub or its separate agent accounts. Each trusted agent sets
+`CAIRN_MCP_BEARER_TOKEN` in its private environment before running
+`hub-check.sh` or `scripts/cairn-remote-stdio.py`; the adapter refuses a
+configuration that also supplies Basic credentials. Some Python.org macOS
+installations have an empty OpenSSL CA store; set
+`SSL_CERT_FILE=/etc/ssl/cert.pem` for the adapter on those hosts, and keep
+certificate verification enabled.
 
 `examples/ecc2k-ingest-service/cairn-ingest-hub.service` is the persistent
 systemd unit for this arrangement. Install a Cairn binary built with embedded
