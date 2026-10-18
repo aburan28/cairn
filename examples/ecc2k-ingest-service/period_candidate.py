@@ -35,7 +35,8 @@ def utc_second(value):
     stamp = datetime.fromisoformat(value[:-1] + "+00:00")
     if stamp.tzinfo != timezone.utc or stamp.microsecond:
         raise ValueError("status timestamp must be UTC seconds")
-    return int(stamp.timestamp())
+    delta = stamp - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return delta.days * 86400 + delta.seconds
 
 
 def check_status_bracket(before, after, start, end, seconds):
@@ -267,7 +268,7 @@ def main(argv=None):
     period = args.period if not watching else args.watch_from
     last_missing = None
     while True:
-        current = int(time.time()) // args.period_seconds
+        current = (time.time_ns() // 1_000_000_000) // args.period_seconds
         if period >= current:
             if not watching:
                 parser.error("period has not closed")
