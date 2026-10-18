@@ -2,11 +2,14 @@
 //! leave a marker if invoked, so an offline-looking startup cannot hide a curl
 //! or Tailscale invocation that merely failed.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use cairn::canonical::Value;
@@ -33,23 +36,38 @@ impl Node {
 }
 
 fn scratch() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "cairn-private-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&dir).unwrap();
-    dir
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let dir = std::env::temp_dir().join(format!(
+            "cairn-private-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&dir) {
+            Ok(()) => return dir,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("cannot create {}: {error}", dir.display()),
+        }
+    }
 }
 
 fn address() -> SocketAddr {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
+    static USED: OnceLock<Mutex<BTreeSet<u16>>> = OnceLock::new();
+    let used = USED.get_or_init(|| Mutex::new(BTreeSet::new()));
+    loop {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // The listener must close before the child binds. Under parallel CI,
+        // the OS sometimes reassigns that just-freed port to another test's
+        // child. Never hand out the same port twice within this test process.
+        if used.lock().unwrap().insert(address.port()) {
+            return address;
+        }
+    }
 }
 
 fn command(dir: &Path) -> Command {
