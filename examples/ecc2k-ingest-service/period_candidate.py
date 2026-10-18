@@ -161,13 +161,43 @@ def assemble(args, s3=None):
         raise ValueError(f"{key}: evidence bucket must return an immutable version id")
     journal = json.loads(raw)
     snapshots = check_journal(journal, args.period, args.period_seconds, args.replica_id)
+    start = args.period * args.period_seconds
+    end = start + args.period_seconds
+    before = next((item for item in snapshots
+                   if start - args.period_seconds <= utc_second(item["generated_at"]) <= start), None)
+    if before is None:
+        raise MissingEvidence(f"{key}: no status generated before the period boundary")
+    after = next((item for item in snapshots if end <= utc_second(item["generated_at"])), None)
+    after_journal = None
+    if after is None:
+        next_key = args.evidence_prefix + f"period-{args.period + 1}.json"
+        next_raw, next_version = fetch(s3, args.bucket, next_key, 900_000)
+        if not next_version:
+            raise ValueError(f"{next_key}: evidence bucket must return an immutable version id")
+        next_journal = json.loads(next_raw)
+        if (type(next_journal) is not dict or next_journal.get("schema") != journal["schema"]
+                or next_journal.get("replica_id") != args.replica_id
+                or next_journal.get("period") != args.period + 1
+                or type(next_journal.get("snapshots")) is not list):
+            raise ValueError(f"{next_key}: next period journal is malformed")
+        after = next((item for item in next_journal["snapshots"]
+                      if type(item) is dict and type(item.get("generated_at")) is str
+                      and end <= utc_second(item["generated_at"]) <= end + args.period_seconds), None)
+        if after is None:
+            raise MissingEvidence(f"{next_key}: no status generated after the period boundary")
+        if (not re.fullmatch(r"[0-9a-f]{64}", after.get("sha256", ""))
+                or after.get("file") != "status-" + after["sha256"] + ".json"):
+            raise ValueError(f"{next_key}: after status reference is malformed")
+        after_journal = (next_key, next_raw, next_version)
     with tempfile.TemporaryDirectory(prefix="candidate-", dir=root) as temporary:
         work = Path(temporary)
         (work / "journal.json").write_bytes(raw)
+        if after_journal:
+            (work / "after-journal.json").write_bytes(after_journal[1])
         status_versions = {}
         status_generated = {}
         status_parsed = {}
-        for item in snapshots:
+        for item in snapshots + [after]:
             name = item["file"]
             if name not in status_versions:
                 value, version = fetch(s3, args.bucket, args.evidence_prefix + name, 1_000_000)
@@ -182,10 +212,8 @@ def assemble(args, s3=None):
                 status_versions[name] = version
             if status_generated[name] != item["generated_at"]:
                 raise ValueError(f"{name}: generated_at differs from journal")
-        start = args.period * args.period_seconds
-        end = start + args.period_seconds
-        check_status_bracket(status_parsed[snapshots[0]["file"]],
-                             status_parsed[snapshots[-1]["file"]],
+        check_status_bracket(status_parsed[before["file"]],
+                             status_parsed[after["file"]],
                              start, end, args.period_seconds)
         service.collect(SimpleNamespace(
             bucket=args.bucket, replica_id=args.replica_id, campaign="ecc2k-130",
@@ -199,7 +227,7 @@ def assemble(args, s3=None):
             operator=args.operator, nonce=os.urandom(32).hex(),
             polls_file=work / "polls.json", journal_file=work / "journal.json",
             objects=work / "objects.json", progress=work / "progress.json",
-            before=work / snapshots[0]["file"], after=work / snapshots[-1]["file"],
+            before=work / before["file"], after=work / after["file"],
             out=work / "body.json"))
         body_hash = hashlib.sha256(service.canonical(service.load_json(work / "body.json"))).hexdigest()
         service.write_json(work / "candidate.json", {
@@ -207,6 +235,9 @@ def assemble(args, s3=None):
             "replica_id": args.replica_id, "body_sha256": body_hash,
             "journal_sha256": hashlib.sha256(raw).hexdigest(),
             "journal_s3_key": key, "journal_version_id": journal_version,
+            "after_journal_s3_key": after_journal[0] if after_journal else key,
+            "after_journal_version_id": after_journal[2] if after_journal else journal_version,
+            "after_journal_sha256": hashlib.sha256(after_journal[1] if after_journal else raw).hexdigest(),
             "status_version_ids": status_versions,
             "decision": "unsigned; independent auditor review required"})
         os.rename(work, destination)

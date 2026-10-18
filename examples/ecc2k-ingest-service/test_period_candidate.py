@@ -51,11 +51,14 @@ class CandidateTests(unittest.TestCase):
                         "ended_at": end + 1, "healthy_at_end": True,
                         "events": [{"at": start + 1, "continued_pid": 123}],
                         "snapshots": [
-                            {"observed_at": at, "sha256": digest, "file": name,
-                             "generated_at": stamp}
-                            for at, digest, name, stamp in (
-                                (start + 1, before_digest, before_name, before["generated_at"]),
-                                (end + 1, after_digest, after_name, after["generated_at"]))]}
+                            {"observed_at": at, "sha256": before_digest, "file": before_name,
+                             "generated_at": before["generated_at"]}
+                            for at in (start + 1, end + 1)]}
+        self.next_journal = {
+            "schema": self.journal["schema"], "replica_id": "ingest-a",
+            "period": self.period + 1,
+            "snapshots": [{"observed_at": end + 2, "sha256": after_digest,
+                           "file": after_name, "generated_at": after["generated_at"]}]}
         self.prefix = "logs/rho-ingest-a/evidence/"
         self.objects = {self.prefix + before_name: self.before_raw,
                         self.prefix + after_name: self.after_raw}
@@ -66,8 +69,9 @@ class CandidateTests(unittest.TestCase):
                                     out_dir=self.root / "candidates")
 
     def s3(self):
-        objects = self.objects | {self.prefix + f"period-{self.period}.json":
-                                  service.canonical(self.journal) + b"\n"}
+        objects = self.objects | {
+            self.prefix + f"period-{self.period}.json": service.canonical(self.journal) + b"\n",
+            self.prefix + f"period-{self.period + 1}.json": service.canonical(self.next_journal) + b"\n"}
         return FakeS3(objects)
 
     def test_assembles_private_unsigned_candidate_with_exact_status_bytes(self):
@@ -87,6 +91,8 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(body["before_status"]["raw"], self.before_raw.decode())
         self.assertEqual(body["after_status"]["raw"], self.after_raw.decode())
         self.assertEqual(candidate["journal_version_id"], "v1")
+        self.assertEqual(candidate["after_journal_s3_key"],
+                         self.prefix + f"period-{self.period + 1}.json")
         self.assertEqual(candidate["decision"], "unsigned; independent auditor review required")
         self.assertEqual(candidate["body_sha256"], hashlib.sha256(service.canonical(body)).hexdigest())
         self.assertFalse((destination / "receipt.json").exists())

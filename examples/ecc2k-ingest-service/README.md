@@ -314,7 +314,9 @@ shipped S3 evidence prefix, checks their hashes, the status boundary times, and
 a continuous healthy trace,
 then runs `collect` and `prepare` against the committed source versions. It
 stores the exact evidence files, unsigned body, and an evidence-version manifest
-in a private directory. S3 must return version ids for the journal and status
+in a private directory. When the period's last observation predates its end,
+the assembler waits for the next completed journal's first status generated
+after that boundary. S3 must return version ids for the journal and status
 objects; an unversioned evidence copy is refused. `--watch-from` catches up
 after downtime and waits for later completed periods without assuming an end
 date:
