@@ -23,7 +23,11 @@ id, auditor key, and period length; a receipt from a different source cannot
 be substituted. The ingester records source SHA-256, size, S3 version id where
 available, and replica id in the same transaction as each progress row. It
 also writes a timestamped database row after every completed S3 pass. The
-auditor exports those poll rows and refuses an empty period. Empty
+auditor exports those poll rows. If no pass completes inside a period, the
+receipt instead carries the supervisor's complete operating journal. The
+checker requires a live process at both boundaries, regular status snapshots,
+and no recorded restart or status error; the auditor must still corroborate
+the journal against independent host and private-store evidence. Empty
 `input_objects` is valid: polling and maintaining an available replica
 still cost operator time when the walkers have uploaded nothing. The buyer
 should use health telemetry and fresh before/after status snapshots to decide
@@ -39,7 +43,7 @@ separate so each point is not paid twice for the same activity.
 | Invented private input or RDS progress | The collector hashes S3 bytes and compares their digest, size, and version with ingestion-time values in committed progress rows. | Other nodes need source access or publication of raw point records to repeat this check. Retain object versions or enforce immutable keys so a later audit can reread the same bytes. |
 | Duplicate replica-period | `piecework.key = "unit"` pays `replica_id:period` once for matching checker and piecework terms. | A different checker is a different contract; the funder must not double fund overlapping contracts. |
 | Receipt copied before commitment | The auditor gives the receipt to the operator privately. | The certificate verifier cannot bind its named operator to the outer Cairn submitter; a leaked receipt can be raced. |
-| Silent service outage | Boundary snapshots and exported completed-poll rows are required. | A process with database write access could forge poll rows; the auditor must check independent health logs, replica inventory, and gaps between polls. |
+| Silent service outage | Boundary snapshots plus completed-poll rows, or a complete signed supervisor journal when no pass finished, are required. | A process with database write access could forge poll rows, and a host operator could forge its journal. The auditor must check independent health logs, replica inventory, and gaps in private-store work before signing. |
 
 To remove the auditor dependence, the source bytes and enough output data to
 reconstruct the database transition would have to be published or made

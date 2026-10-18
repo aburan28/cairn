@@ -73,6 +73,8 @@ def objective(args):
             "operator; the auditor must deliver it privately until that operator commits, "
             "because the current checker cannot bind the outer submitter. A receipt includes S3 input-object "
             "digests, the matching RDS progress rows, and exact before/after public status JSON. "
+            "A period with no completed S3 pass also includes the complete supervisor journal; "
+            "the auditor checks that long-running pass before signing. "
             "The checker replays the auditor signature and receipt consistency. Private S3/RDS "
             "contents are checked by that auditor, so acceptance means auditor approval, not "
             "public verification of those private stores. The unit is a replica and period, including one "
@@ -125,7 +127,7 @@ def prepare(args):
     if (type(poll_export) is not dict or set(poll_export) != {"replica_id", "start", "end", "events"}
             or poll_export["replica_id"] != args.replica_id
             or poll_export["start"] != start or poll_export["end"] != end
-            or type(poll_export["events"]) is not list or not poll_export["events"]):
+            or type(poll_export["events"]) is not list):
         raise ValueError("poll export does not match the replica and period")
     body = {
         "service": args.service,
@@ -141,6 +143,16 @@ def prepare(args):
         "before_status": snapshot(args.before),
         "after_status": snapshot(args.after),
     }
+    if not poll_export["events"]:
+        journal_file = getattr(args, "journal_file", None)
+        if not journal_file:
+            raise ValueError("a period without a completed poll needs the supervisor journal")
+        journal = load_json(journal_file)
+        if (type(journal) is not dict or journal.get("replica_id") != args.replica_id
+                or journal.get("period") != args.period
+                or journal.get("period_seconds") != args.period_seconds):
+            raise ValueError("supervisor journal does not match the replica and period")
+        body["operation_journal"] = journal
     if len(canonical(body)) > MAX_RECEIPT_BODY_BYTES:
         raise ValueError("receipt exceeds 900 kB; use shorter service periods before posting the objective")
     write_json(args.out, body)
@@ -219,7 +231,7 @@ def collect(args):
             poll_rows = cursor.fetchall()
     if len(rows) > args.max_objects:
         raise ValueError(f"{len(rows)} input objects exceeds --max-objects")
-    if not poll_rows or len(poll_rows) > args.max_polls:
+    if len(poll_rows) > args.max_polls or (not poll_rows and not getattr(args, "allow_empty_polls", False)):
         raise ValueError(f"{len(poll_rows)} completed polls outside allowed range")
     poll_events = []
     for completed_at, objects_done, rows_added in poll_rows:
@@ -304,6 +316,7 @@ def main():
     p.add_argument("--nonce", required=True)
     p.add_argument("--period-seconds", type=int, default=3600)
     p.add_argument("--polls-file", required=True)
+    p.add_argument("--journal-file", help="required when no S3 pass completed in the period")
     p.add_argument("--objects", required=True)
     p.add_argument("--progress", required=True)
     p.add_argument("--before", required=True)
@@ -324,6 +337,8 @@ def main():
     p.add_argument("--end", required=True, help="UTC exclusive ISO timestamp")
     p.add_argument("--max-objects", type=int, default=10000)
     p.add_argument("--max-polls", type=int, default=10000)
+    p.add_argument("--allow-empty-polls", action="store_true",
+                   help="export an operating period with no completed S3 pass for journal-backed audit")
     p.add_argument("--objects-out", required=True)
     p.add_argument("--progress-out", required=True)
     p.add_argument("--polls-out", required=True)

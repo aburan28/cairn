@@ -49,6 +49,11 @@ ships again when the service stops. This is retained source evidence for the
 auditor; no unfinished `current-period.json` is uploaded. The launcher does
 not post an objective or sign a receipt.
 
+The current Mac publisher uses `scripts/ship-ecc2k-evidence.zsh` through a
+ten-minute LaunchAgent while EC2 provisioning is blocked. It copies the same
+archived evidence to the versioned private source bucket and excludes the live
+period and lock. It is a temporary publisher, not an additional replica.
+
 ```sh
 python3 examples/ecc2k-ingest-service/cairn_ingest_operator.py \
   --replica-id ingest-a --evidence-dir /srv/cairn/evidence/ingest-a \
@@ -97,7 +102,7 @@ input/output replay. A hash-only manifest does not establish that proof.
 The claim includes a receipt with:
 
 - the service id, pinned private S3 bucket name, UTC period number, stable replica id, operator name, random nonce, and auditor
-  exported completed-poll rows;
+  exported completed-poll rows, or a complete supervisor journal if the S3 pass spans the period;
 - for every S3 object whose RDS progress row was committed in the period:
   object key, byte length, S3 version id if available, SHA-256 of its bytes,
   record count, duplicate count, and ingestion timestamp from that committed row;
@@ -116,9 +121,9 @@ themselves are public in the claim even after the mutable feed is overwritten.
 
 The auditor should sign only after independently checking:
 
-1. the exported completed-poll rows match RDS and represent the ingester's
-   operation throughout the period; check process logs or a separately retained
-   health trace for gaps and unexpected replica ids;
+1. the exported completed-poll rows match RDS. If none completed during a long
+   S3 pass, check the complete supervisor journal against host logs and private
+   S3/RDS activity. A journal by itself cannot prove that useful work occurred;
 2. the RDS progress rows are committed and match the S3 objects it rehashed;
 3. the input inventory is complete for the period, including unreadable or
    outstanding objects, and the published status reflects the RDS state; and
@@ -197,6 +202,15 @@ python3 examples/ecc2k-ingest-service/service.py collect \
   --objects-out objects.json --progress-out progress.json \
   --polls-out polls.json
 ```
+
+For a pass that crosses the entire period without completing, use
+`--allow-empty-polls` on `collect` after confirming the private inventory and
+host activity. Pass the archived `period-N.json` to `prepare` with
+`--journal-file period-N.json`. The pinned checker then requires boundary
+coverage, regular exact-status observations, a live child at the end, and no
+recorded restart or status error. The auditor still must corroborate the
+operator-controlled journal before signing. A partial or missing journal is
+not an eligible operating period.
 
 Then the auditor checks the other conditions above and prepares the signed
 receipt. `NONCE` is 32 random bytes encoded as lowercase hex. The auditor

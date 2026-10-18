@@ -108,6 +108,51 @@ def timestamp(value):
     return delta.days * 86400 + delta.seconds
 
 
+def valid_operation_journal(journal, period, replica_id, start, end):
+    """A signed supervisor trace can cover a pass that spans a pay boundary."""
+    required = {"schema", "period", "period_seconds", "replica_id", "started_at",
+                "ended_at", "healthy_at_end", "events", "snapshots"}
+    if (type(journal) is not dict or set(journal) != required
+            or journal["schema"] != "cairn-dp-operator-period-v2"
+            or journal["period"] != period or journal["period_seconds"] != PERIOD_SECONDS
+            or journal["replica_id"] != replica_id or journal["healthy_at_end"] is not True
+            or type(journal["started_at"]) is not int
+            or type(journal["ended_at"]) is not int
+            or not start <= journal["started_at"] <= start + 60
+            or not end <= journal["ended_at"] <= end + 60):
+        return False
+    events = journal["events"]
+    if type(events) is not list or len(events) != 1 or type(events[0]) is not dict:
+        return False
+    event = events[0]
+    if (set(event) not in ({"at", "started_pid"}, {"at", "continued_pid"})
+            or type(event["at"]) is not int or not start <= event["at"] <= start + 60
+            or type(event.get("started_pid", event.get("continued_pid"))) is not int
+            or event.get("started_pid", event.get("continued_pid")) <= 0):
+        return False
+    snapshots = journal["snapshots"]
+    if type(snapshots) is not list or not (2 <= len(snapshots) <= 10000):
+        return False
+    previous = None
+    for item in snapshots:
+        if (type(item) is not dict
+                or set(item) != {"observed_at", "sha256", "file", "generated_at"}
+                or type(item["observed_at"]) is not int
+                or not start <= item["observed_at"] <= end + 60
+                or (previous is not None and not previous <= item["observed_at"] <= previous + 120)
+                or type(item["sha256"]) is not str or len(item["sha256"]) != 64
+                or item["file"] != "status-" + item["sha256"] + ".json"):
+            return False
+        try:
+            if bytes.fromhex(item["sha256"]).hex() != item["sha256"]:
+                return False
+            timestamp(item["generated_at"])
+        except ValueError:
+            return False
+        previous = item["observed_at"]
+    return snapshots[0]["observed_at"] <= start + 60 and snapshots[-1]["observed_at"] >= end - 60
+
+
 def check(artifact):
     if type(artifact) is not dict or set(artifact) != {"body", "unit", "signature"}:
         return False, "receipt shape"
@@ -123,7 +168,8 @@ def check(artifact):
     if not verify_signature(signature, message):
         return False, "auditor signature"
     required = {"service", "input_bucket", "period", "replica_id", "operator", "nonce", "input_objects", "progress", "before_status", "after_status", "polls", "poll_events"}
-    if set(body) != required or body["service"] != SERVICE or body["input_bucket"] != INPUT_BUCKET:
+    if (set(body) not in (required, required | {"operation_journal"})
+            or body["service"] != SERVICE or body["input_bucket"] != INPUT_BUCKET):
         return False, "service receipt shape"
     period = body["period"]
     replica_id = body["replica_id"]
@@ -140,8 +186,13 @@ def check(artifact):
         return False, "receipt nonce"
     events = body["poll_events"]
     if (not nonnegative(body["polls"]) or type(events) is not list
-            or not events or len(events) > 10000 or len(events) != body["polls"]):
-        return False, "no observed poll"
+            or len(events) > 10000 or len(events) != body["polls"]):
+        return False, "poll count"
+    if events and "operation_journal" in body:
+        return False, "unexpected operation journal"
+    if not events and not valid_operation_journal(
+            body.get("operation_journal"), period, replica_id, start, end):
+        return False, "no poll or complete operation journal"
     previous_poll = None
     for event in events:
         if (type(event) is not dict or set(event) != {"completed_at", "objects", "rows_added"}

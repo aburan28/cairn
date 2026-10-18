@@ -83,6 +83,61 @@ class ServiceReceiptTests(unittest.TestCase):
             service.DOMAIN + service.canonical(receipt["body"])).hex()
         self.assertTrue(self.checker.check(receipt)[0])
 
+    def test_long_pass_can_be_paid_from_complete_signed_journal(self):
+        receipt = self.receipt()
+        body = receipt["body"]
+        start = body["period"] * 3600
+        end = start + 3600
+        body["polls"] = 0
+        body["poll_events"] = []
+        body["input_objects"] = []
+        body["progress"] = []
+        digest = body["before_status"]["sha256"]
+        stamp = datetime.fromtimestamp(start, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body["operation_journal"] = {
+            "schema": "cairn-dp-operator-period-v2", "period": body["period"],
+            "period_seconds": 3600, "replica_id": "ingest-a",
+            "started_at": start, "ended_at": end, "healthy_at_end": True,
+            "events": [{"at": start, "continued_pid": 123}],
+            "snapshots": [{"observed_at": start + offset, "sha256": digest,
+                           "file": f"status-{digest}.json", "generated_at": stamp}
+                          for offset in range(0, 3601, 120)],
+        }
+        def resign():
+            receipt["signature"] = self.key.sign(
+                service.DOMAIN + service.canonical(body)).hex()
+        resign()
+        self.assertTrue(self.checker.check(receipt)[0])
+        for name, value in (("objects.json", []), ("progress.json", []),
+                            ("polls.json", {"replica_id": "ingest-a", "start": start,
+                                            "end": end, "events": []}),
+                            ("journal.json", body["operation_journal"])):
+            (self.root / name).write_text(json.dumps(value))
+        (self.root / "before.json").write_text(body["before_status"]["raw"])
+        (self.root / "after.json").write_text(body["after_status"]["raw"])
+        args = SimpleNamespace(replica_id="ingest-a", period=body["period"], period_seconds=3600,
+                               service=body["service"], input_bucket=body["input_bucket"],
+                               operator=body["operator"], nonce=body["nonce"],
+                               objects=self.root / "objects.json", progress=self.root / "progress.json",
+                               polls_file=self.root / "polls.json", journal_file=self.root / "journal.json",
+                               before=self.root / "before.json", after=self.root / "after.json",
+                               out=self.root / "body.json")
+        service.prepare(args)
+        self.assertEqual(json.loads(args.out.read_text()), body)
+        args.journal_file = None
+        with self.assertRaisesRegex(ValueError, "needs the supervisor journal"):
+            service.prepare(args)
+        body["operation_journal"]["events"].append({"at": start + 30, "exit_code": 7})
+        resign()
+        self.assertFalse(self.checker.check(receipt)[0])
+        body["operation_journal"]["events"].pop()
+        body["operation_journal"]["snapshots"].pop()
+        resign()
+        self.assertFalse(self.checker.check(receipt)[0])
+        body.pop("operation_journal")
+        resign()
+        self.assertFalse(self.checker.check(receipt)[0])
+
     def test_tampering_and_invalid_period(self):
         receipt = self.receipt()
         receipt["body"]["polls"] = 6
@@ -186,6 +241,8 @@ class ServiceReceiptTests(unittest.TestCase):
 
             def fetchall(self):
                 if "dp_ingest_polls" in self.query:
+                    if self_outer.empty_polls:
+                        return []
                     return [(datetime(2026, 10, 10, 0, 20, tzinfo=timezone.utc), 1, 2)]
                 import hashlib
                 return [("dp/example.bin", 2, 1, hashlib.sha256(payload).hexdigest(),
@@ -203,6 +260,7 @@ class ServiceReceiptTests(unittest.TestCase):
                 return Cursor()
 
         self_outer = self
+        self.empty_polls = False
         def get_object(**kw):
             self.assertEqual(kw["VersionId"], "fixture-v1")
             return {"Body": io.BytesIO(payload)}
@@ -228,6 +286,14 @@ class ServiceReceiptTests(unittest.TestCase):
                                      "ingested_at": "2026-10-10T00:30:00Z"}])
         self.assertEqual(polls["events"], [
             {"completed_at": "2026-10-10T00:20:00Z", "objects": 1, "rows_added": 2}])
+        self.empty_polls = True
+        with patch.dict(sys.modules, {"boto3": boto3, "psycopg": psycopg}), \
+             patch.dict(os.environ, {"DATABASE_URL": "postgresql://private"}):
+            with self.assertRaisesRegex(ValueError, "0 completed polls"):
+                service.collect(args)
+            args.allow_empty_polls = True
+            service.collect(args)
+        self.assertEqual(json.loads(args.polls_out.read_text())["events"], [])
 
     def test_capture_preserves_exact_public_status_bytes(self):
         raw = self.receipt()["body"]["after_status"]["raw"].encode()
