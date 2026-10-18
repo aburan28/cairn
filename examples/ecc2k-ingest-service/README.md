@@ -80,8 +80,9 @@ Distributed agents reach the common Cairn MCP endpoint described in
 `docs/agents.md`. The private ingester does not accept network tool calls;
 agents can observe the public status and signed receipts, and a credentialed
 operator can score and submit a period receipt through the endpoint.
-`cairn-ingest-hub.service` keeps that endpoint's one ledger writer alive on a
-durable Linux host. `hub-check.sh` verifies the authenticated HTTPS MCP path
+The current hub runs as `com.adamburan.cairn-ingest-hub` on the Mac; move its
+single ledger and private keys to an always-on tailnet host before treating it
+as highly available. `hub-check.sh` verifies the authenticated HTTPS MCP path
 from each enrolled agent location before the agent submits a claim. It is a
 read-only probe; a successful probe does not certify an ingester period.
 Enroll each remote agent with its own bearer and signing identity. Set
@@ -110,6 +111,35 @@ For a temporary direct Tailscale Serve route, Cairn can enforce a random
 `CAIRN_MCP_HTTP_TOKEN` and the exact `CAIRN_MCP_HTTP_PUBLIC_HOST` itself,
 without Caddy's password check. Keep both values private, require HTTPS at
 Serve, and retain the default zero MCP spend.
+
+### EC2 agent route while the hub runs on the Mac
+
+The EC2 worker host has no Tailscale client. A Mac LaunchAgent keeps an SSH
+reverse forward from an EC2 **loopback-only** port to the hub's Tailscale Serve
+HTTPS address. The dedicated Ed25519 SSH key stays on the Mac. Its EC2
+`authorized_keys` entry uses `command="/bin/false",restrict,port-forwarding`,
+pins the one permitted listen address and port with `permitlisten`, and denies
+useful local forwarding with `permitopen`. The Mac SSH client pins the EC2 host
+key, uses `ExitOnForwardFailure` and keepalives, and launchd restarts it after
+a disconnect. Do not put the tunnel key or an agent bearer in this repository.
+
+On that EC2 host, one `/etc/hosts` entry maps the hub's tailnet DNS name to
+`127.0.0.1`. A normal HTTPS MCP client then connects through the reverse
+forward using the real DNS name for TLS certificate verification, SNI, and the
+HTTP Host header. The agent's separate bearer is in a mode-0600 file under
+the agent account. Its `cairn-ingest-mcp` wrapper reads that file and runs
+`scripts/cairn-remote-stdio.py` against the HTTPS `/mcp` URL. A live probe
+initialized a session, listed all 15 tools, restarted the tunnel LaunchAgent,
+and repeated the authenticated probe successfully. A stolen bearer still
+grants that profile's full MCP tool access; the restricted SSH key is only a
+transport credential.
+
+This route depends on the Mac staying awake and the EC2 instance retaining
+its current public SSH address. The host-key pin fails closed if EC2 is
+replaced. Move the hub and agents onto an always-on private network for
+resilience; remove the EC2 `/etc/hosts` override when direct tailnet routing
+replaces the tunnel. The Mac hub currently remains the one Cairn ledger writer.
+
 Run the local two-session payment and independent replay with
 `python3 scripts/mcp-http-ingest-smoke.py` after building the Cairn and
 reference binaries.
