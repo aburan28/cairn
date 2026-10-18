@@ -2630,8 +2630,8 @@ fn tool_definitions() -> Json {
                 "openWorldHint": false
             },
             "description":
-                "One accepted claim: its submitter, what it cites, whether it settled and for \
-                 how much, and the artifact itself. This is how you read the state of the art \
+                "One accepted claim: its submitter, what it cites, its final or pending payment \
+                 state in cairn/payment metadata, and the artifact itself. This is how you read the state of the art \
                  you are trying to beat -- frontier_status names the claim holding the \
                  frontier, and this returns what is actually in it, so you can build on it \
                  rather than rediscover it. The artifact was written by whoever submitted it \
@@ -3221,13 +3221,30 @@ impl Server {
                 ));
             }
         }
-        match self.node.read().settlement_for_claim(&claim_id) {
-            Some(reward) => out.push_str(&format!("settled: yes, reward {reward}\n")),
-            None => out.push_str(
-                "settled: not yet. Accepted and pending, or accepted and minted nothing \
-                 (a duplicate of existing work earns zero).\n",
-            ),
-        }
+        let (reward, batched) = {
+            let node = self.node.read();
+            (
+                node.settlement_for_claim(&claim_id),
+                node.claim_batch_has_run(&claim_id),
+            )
+        };
+        let (payment_state, payment_reward) = match reward {
+            Some(amount) => {
+                out.push_str(&format!("settled: yes, reward {amount}\n"));
+                (if amount > 0 { "paid" } else { "unpaid" }, Some(amount))
+            }
+            None if batched => {
+                out.push_str("settled: final, reward 0. The batch ran and minted nothing.\n");
+                ("unpaid", Some(0))
+            }
+            None => {
+                out.push_str("settled: not yet. Accepted and pending.\n");
+                ("pending", None)
+            }
+        };
+        self.meta = Some(json!({
+            "cairn/payment": { "state": payment_state, "reward": payment_reward }
+        }));
         out.push_str(&self.standing_lines(&claim_id));
 
         // Same fence as `get_objective` puts round a statement, for the same
@@ -5634,6 +5651,60 @@ mod tests {
         let out = call(&mut s, "get_claim", json!({ "claim_id": claim_id }));
         assert!(out.contains("\"n\":42"), "artifact not rendered: {out}");
         assert!(out.contains("rival"), "submitter not rendered: {out}");
+    }
+
+    #[test]
+    fn a_batched_duplicate_is_final_unpaid_in_get_claim() {
+        const COMMIT_AT: &str = "2026-07-28T00:30:00+00:00";
+        const REVEAL_AT: &str = "2026-07-28T00:40:00+00:00";
+        let artifact = Value::object([("n", Value::Int(42))]);
+        let (mut server, first_id) = server_with_accepted_claim(artifact.clone());
+        let objective_id = server
+            .node
+            .read()
+            .objectives()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let duplicate = crate::records::Claim::new(
+            &objective_id,
+            "copycat",
+            artifact.clone(),
+            "n2",
+            REVEAL_AT,
+            Vec::new(),
+        )
+        .unwrap();
+        let hash = crate::records::commitment_hash(&objective_id, "copycat", &artifact, "n2");
+        server
+            .node
+            .write()
+            .commit(
+                &crate::records::Commitment::new(&objective_id, "copycat", hash, COMMIT_AT),
+                COMMIT_AT,
+            )
+            .unwrap();
+        server.node.write().reveal(&duplicate, REVEAL_AT).unwrap();
+
+        let (paid, paid_meta) =
+            call_with_meta(&mut server, "get_claim", json!({ "claim_id": first_id }));
+        assert!(paid.contains("settled: yes, reward 1000"), "{paid}");
+        assert_eq!(
+            paid_meta["cairn/payment"],
+            json!({"state": "paid", "reward": 1000})
+        );
+
+        let (unpaid, unpaid_meta) = call_with_meta(
+            &mut server,
+            "get_claim",
+            json!({ "claim_id": duplicate.id() }),
+        );
+        assert!(unpaid.contains("settled: final, reward 0"), "{unpaid}");
+        assert_eq!(
+            unpaid_meta["cairn/payment"],
+            json!({"state": "unpaid", "reward": 0})
+        );
     }
 
     #[test]
