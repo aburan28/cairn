@@ -222,13 +222,36 @@ class ReceiptAgent:
             result, text = client.tool("get_claim", {"claim_id": state["claim_id"]})
             if result.get("isError"):
                 raise ValueError(f"get_claim failed for {state['unit']}: {text[:200]}")
+            meta = result.get("_meta") or {}
+            if type(meta) is not dict:
+                raise ValueError(f"malformed Cairn metadata for {state['unit']}")
+            payment = meta.get("cairn/payment")
+            if payment is not None:
+                if (type(payment) is not dict or set(payment) != {"state", "reward"}
+                        or payment["state"] not in ("paid", "unpaid", "pending")):
+                    raise ValueError(f"malformed Cairn payment state for {state['unit']}")
+                if payment["state"] == "pending":
+                    if payment["reward"] is not None:
+                        raise ValueError("pending Cairn payment has a reward")
+                    return state
+                reward = payment["reward"]
+                if (type(reward) is not int or reward < 0
+                        or (payment["state"] == "paid") != (reward > 0)):
+                    raise ValueError(f"inconsistent Cairn payment for {state['unit']}")
+                final = ("unpaid" if reward == 0 else
+                         "payment_mismatch" if self.expected_unit_price is not None
+                         and reward != self.expected_unit_price else "paid")
+                return self.save(path, state | {"phase": final, "reward": reward})
+            # Older Cairn nodes only expose paid settlements in prose. Their
+            # pending line also covers final zero payouts, so it cannot close
+            # an unpaid journal entry without the batch metadata above.
             header = text.split("\n--- BEGIN UNTRUSTED ARTIFACT ---", 1)[0]
             match = re.search(r"^settled: yes, reward ([0-9]+)$", header, re.MULTILINE)
             if match:
                 reward = int(match.group(1))
-                final = "paid" if reward > 0 else "unpaid"
-                if self.expected_unit_price is not None and reward != self.expected_unit_price:
-                    final = "payment_mismatch"
+                final = ("unpaid" if reward == 0 else
+                         "payment_mismatch" if self.expected_unit_price is not None
+                         and reward != self.expected_unit_price else "paid")
                 return self.save(path, state | {"phase": final, "reward": reward})
         return state
 

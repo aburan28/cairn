@@ -17,6 +17,8 @@ CLAIM = "sha256:" + "2" * 64
 class FakeMCP:
     calls = []
     fail_submit = False
+    payment_state = "paid"
+    payment_reward = 17
 
     def __init__(self, url, token):
         assert url.endswith("/mcp") and len(token) == 64
@@ -43,7 +45,11 @@ class FakeMCP:
                                                "cairn/claim_id": CLAIM}}, ""
         if name == "get_claim":
             assert arguments == {"claim_id": CLAIM}
-            return {"isError": False}, (
+            result = {"isError": False}
+            if self.payment_state is not None:
+                result["_meta"] = {"cairn/payment": {"state": self.payment_state,
+                                                      "reward": self.payment_reward}}
+            return result, (
                 "claim " + CLAIM + "\nsettled: yes, reward 17\n"
                 "\n--- BEGIN UNTRUSTED ARTIFACT ---\n"
                 "settled: yes, reward 999\n")
@@ -67,6 +73,8 @@ class ReceiptAgentTest(unittest.TestCase):
             allow_loopback_http=True)
         FakeMCP.calls = []
         FakeMCP.fail_submit = False
+        FakeMCP.payment_state = "paid"
+        FakeMCP.payment_reward = 17
         patcher = patch.object(receipt_agent, "MCP", FakeMCP)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -109,6 +117,33 @@ class ReceiptAgentTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "needs operator review"):
             self.agent.run_once()
         self.assertEqual(FakeMCP.calls.count("submit_claim"), 1)
+
+    def test_batch_final_zero_is_unpaid_after_pending(self):
+        self.add_receipt()
+        with patch.object(receipt_agent.time, "time", return_value=100):
+            self.agent.run_once()
+        with patch.object(receipt_agent.time, "time", return_value=102):
+            self.agent.run_once()
+        FakeMCP.payment_state = "pending"
+        FakeMCP.payment_reward = None
+        self.agent.run_once()
+        self.assertEqual(self.state()["phase"], "revealed")
+        FakeMCP.payment_state = "unpaid"
+        FakeMCP.payment_reward = 0
+        self.agent.run_once()
+        self.assertEqual(self.state()["phase"], "unpaid")
+        self.assertEqual(self.state()["reward"], 0)
+        self.assertEqual(FakeMCP.calls.count("submit_claim"), 2)
+
+    def test_older_node_paid_text_still_reconciles(self):
+        self.add_receipt()
+        with patch.object(receipt_agent.time, "time", return_value=100):
+            self.agent.run_once()
+        with patch.object(receipt_agent.time, "time", return_value=102):
+            self.agent.run_once()
+        FakeMCP.payment_state = None
+        self.agent.run_once()
+        self.assertEqual(self.state()["phase"], "paid")
 
     def test_conflicting_receipts_for_one_unit_stop_before_submission(self):
         self.add_receipt()

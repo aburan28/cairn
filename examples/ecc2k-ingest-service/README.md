@@ -332,11 +332,13 @@ the claim id and actual settled reward. An unavailable score is retried; a
 rejection is recorded without submission. A lost response to a commit or
 reveal leaves `commit_inflight` or `reveal_inflight` in the journal and stops
 automatic retries for that receipt. Inspect the Cairn pending commitments
-and log before resolving that uncertainty. A mismatched settlement is
-reported separately from a paid period. Cairn currently shows an accepted
-claim with no settlement entry as `settled: not yet`; this can also mean the
-period earned zero, so the agent leaves it in `revealed` for operator review
-instead of calling it paid. Omit `--watch` for one bounded pass. Deliver each
+and log before resolving that uncertainty. Cairn's `cairn/payment` metadata
+distinguishes a pending batch from a final zero reward. The agent records that
+result as `unpaid`, a positive reward at the configured price as `paid`, and a
+different positive reward as `payment_mismatch`. With an older Cairn node
+that has no payment metadata, a claim without a settlement entry remains
+`revealed` because the node cannot distinguish pending from final zero.
+Omit `--watch` for one bounded pass. Deliver each
 receipt to the inbox by atomic rename after the auditor finishes writing it.
 
 The local HTTP integration probe exercised this agent against a real Cairn
