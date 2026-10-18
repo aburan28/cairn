@@ -304,3 +304,42 @@ root, score the receipt with the pinned checker, then commit, reveal in a later
 epoch, and settle after the reveal epoch closes. A top-up must retain the same
 checker bytes and `piecework` block to retain once-only period accounting.
 Changing the key or period length creates a different service contract.
+
+## Submit audited periods over MCP
+
+After the funder posts the objective, the independent auditor can place each
+signed `*.receipt.json` file in a private inbox for that replica's agent. The
+agent does not hold the auditor key or sign receipts. It scores every new
+artifact with the pinned verifier, commits it through its own Cairn bearer,
+returns after the epoch changes to reveal the exact saved artifact, and polls
+the accepted claim until the log shows a settled reward. Run one agent per
+replica under the host service manager; `--watch` keeps it running without an
+assumed campaign finish date:
+
+```sh
+python3 examples/ecc2k-ingest-service/receipt_agent.py \
+  --endpoint "$CAIRN_MCP_URL" --token-file "$PRIVATE_AGENT_TOKEN_FILE" \
+  --objective-id "$FUNDED_OBJECTIVE_ID" \
+  --inbox "$PRIVATE_SIGNED_RECEIPTS" --state-dir "$PRIVATE_AGENT_JOURNAL" \
+  --expected-unit-price "$PRICE" --watch --interval 30
+```
+
+The bearer file and journal directory must be readable only by the agent
+account. The agent copies each signed artifact into its journal before its
+first submission. It retains that copy for reveal even if the inbox file is
+removed, refuses two different receipts for one replica-period, and records
+the claim id and actual settled reward. An unavailable score is retried; a
+rejection is recorded without submission. A lost response to a commit or
+reveal leaves `commit_inflight` or `reveal_inflight` in the journal and stops
+automatic retries for that receipt. Inspect the Cairn pending commitments
+and log before resolving that uncertainty. A mismatched settlement is
+reported separately from a paid period. Cairn currently shows an accepted
+claim with no settlement entry as `settled: not yet`; this can also mean the
+period earned zero, so the agent leaves it in `revealed` for operator review
+instead of calling it paid. Omit `--watch` for one bounded pass. Deliver each
+receipt to the inbox by atomic rename after the auditor finishes writing it.
+
+The local HTTP integration probe exercised this agent against a real Cairn
+node through score, commit, later reveal, 17-unit settlement, and independent
+reference replay. The live objective cannot be posted until the buyer selects
+its exact price, funded period count, funder, and auditor public key.
