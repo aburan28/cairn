@@ -37,6 +37,18 @@ progress row. See `ecc2k130/aws/README.md` in the crypto repository for the
 database coordination rule. Each completed S3 pass also writes a timestamped
 `dp_ingest_polls` row, including a pass that found no new objects.
 
+The crypto repository's `ingest_host.sh` can deploy this supervisor with
+`INGEST_CAIRN_SERVICE=1`, `INGEST_OPERATOR_PATH` pointing at this file, and
+`INGEST_PERIOD_SECONDS` matching the funded objective. Its paid-service
+preflight requires source-bucket versioning and refuses an active older
+ingester. On each EC2 replica, systemd starts `operator.py`, which in turn
+starts the ingester with the same hostname replica id. A two-minute shipper
+copies completed period journals and exact public status snapshots into the
+private source bucket's `logs/rho-ingest-<instance>/evidence/` prefix, and
+ships again when the service stops. This is retained source evidence for the
+auditor; no unfinished `current-period.json` is uploaded. The launcher does
+not post an objective or sign a receipt.
+
 ```sh
 python3 examples/ecc2k-ingest-service/operator.py \
   --replica-id ingest-a --evidence-dir /srv/cairn/evidence/ingest-a \
