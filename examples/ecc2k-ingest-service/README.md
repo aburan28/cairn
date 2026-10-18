@@ -307,6 +307,36 @@ Changing the key or period length creates a different service contract.
 
 ## Submit audited periods over MCP
 
+An auditor host with read-only access to the private source bucket and RDS can
+assemble candidates as periods close. It fetches the completed supervisor
+journal and every distinct status snapshot named by that journal from the
+shipped S3 evidence prefix, checks their hashes, the status boundary times, and
+a continuous healthy trace,
+then runs `collect` and `prepare` against the committed source versions. It
+stores the exact evidence files, unsigned body, and an evidence-version manifest
+in a private directory. S3 must return version ids for the journal and status
+objects; an unversioned evidence copy is refused. `--watch-from` catches up
+after downtime and waits for later completed periods without assuming an end
+date:
+
+```sh
+python3 examples/ecc2k-ingest-service/period_candidate.py \
+  --bucket "$PRIVATE_DP_BUCKET" \
+  --evidence-prefix "logs/rho-ingest-$REPLICA_HOST/evidence/" \
+  --replica-id "$REPLICA_HOST" --operator "$OPERATOR_PUBLIC_ID" \
+  --period-seconds "$PERIOD_SECONDS" --watch-from "$FIRST_CLOSED_PERIOD" \
+  --out-dir "$PRIVATE_AUDITOR_CANDIDATES"
+```
+
+This process holds no auditor signing key and never calls Cairn. A missing
+shipped period is retried in watch mode; an unhealthy or inconsistent journal
+stops the assembler for investigation. The independent auditor must still
+review source inventory, RDS output, and public status provenance before
+running `service.py sign` on `body.json`. For a period with completed polls,
+the supervisor journal remains review evidence in `candidate.json` and is not
+inside the signed Cairn artifact. Until the contract binds that journal, the
+auditor's approval is the public claim about continuous operation.
+
 After the funder posts the objective, the independent auditor can place each
 signed `*.receipt.json` file in a private inbox for that replica's agent. The
 agent does not hold the auditor key or sign receipts. It scores every new
