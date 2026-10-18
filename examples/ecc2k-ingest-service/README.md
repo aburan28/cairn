@@ -21,7 +21,7 @@ it cannot silently omit committed objects to fit Cairn's HTTP claim limit.
 
 ## Run the service continuously
 
-On each host with approved S3 and RDS access, `operator.py` supervises one
+On each host with approved S3 and RDS access, `cairn_ingest_operator.py` supervises one
 replica of the existing ingester. It keeps one local process under a host lock, restarts a
 failed process after a delay, and archives exact public status bytes and a
 timestamped operating journal. It neither funds an objective nor signs its
@@ -41,7 +41,7 @@ The crypto repository's `ingest_host.sh` can deploy this supervisor with
 `INGEST_CAIRN_SERVICE=1`, `INGEST_OPERATOR_PATH` pointing at this file, and
 `INGEST_PERIOD_SECONDS` matching the funded objective. Its paid-service
 preflight requires source-bucket versioning and refuses an active older
-ingester. On each EC2 replica, systemd starts `operator.py`, which in turn
+ingester. On each EC2 replica, systemd starts `cairn_ingest_operator.py`, which in turn
 starts the ingester with the same hostname replica id. A two-minute shipper
 copies completed period journals and exact public status snapshots into the
 private source bucket's `logs/rho-ingest-<instance>/evidence/` prefix, and
@@ -50,7 +50,7 @@ auditor; no unfinished `current-period.json` is uploaded. The launcher does
 not post an objective or sign a receipt.
 
 ```sh
-python3 examples/ecc2k-ingest-service/operator.py \
+python3 examples/ecc2k-ingest-service/cairn_ingest_operator.py \
   --replica-id ingest-a --evidence-dir /srv/cairn/evidence/ingest-a \
   --status-url "$PUBLIC_STATUS_URL" \
   --period-seconds 3600 -- \

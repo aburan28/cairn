@@ -21,7 +21,7 @@ class OperatorTests(unittest.TestCase):
                                           "published_at": "2026-10-17T10:00:00Z"}))
             evidence = root / "evidence"
             result = subprocess.run(
-                [sys.executable, str(HERE / "operator.py"),
+                [sys.executable, str(HERE / "cairn_ingest_operator.py"),
                  "--replica-id", "ingest-a",
                  "--evidence-dir", str(evidence),
                  "--status-url", status.as_uri(),
@@ -47,7 +47,7 @@ class OperatorTests(unittest.TestCase):
             status.write_text('{"campaign_id":"ecc2k-130","dps":0}')
             evidence = root / "evidence"
             result = subprocess.run(
-                [sys.executable, str(HERE / "operator.py"),
+                [sys.executable, str(HERE / "cairn_ingest_operator.py"),
                  "--replica-id", "ingest-b",
                  "--evidence-dir", str(evidence), "--status-url", status.as_uri(),
                  "--period-seconds", "3", "--poll-seconds", "0.1",
