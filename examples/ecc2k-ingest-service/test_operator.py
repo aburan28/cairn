@@ -26,17 +26,21 @@ class OperatorTests(unittest.TestCase):
                  "--evidence-dir", str(evidence),
                  "--status-url", status.as_uri(),
                  "--period-seconds", "2", "--poll-seconds", "0.1",
-                 "--max-periods", "1", "--", sys.executable,
+                 "--max-periods", "2", "--", sys.executable,
                  "-c", "import time; time.sleep(20)"],
-                capture_output=True, text=True, timeout=8)
+                capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
-            periods = list(evidence.glob("period-*.json"))
-            self.assertEqual(len(periods), 1)
+            periods = sorted(evidence.glob("period-*.json"))
+            self.assertEqual(len(periods), 2)
             journal = json.loads(periods[0].read_text())
             self.assertEqual(journal["replica_id"], "ingest-a")
             self.assertTrue(any("started_pid" in event for event in journal["events"]))
             self.assertTrue(journal["healthy_at_end"])
             self.assertTrue(journal["snapshots"])
+            continued = json.loads(periods[1].read_text())
+            self.assertTrue(any("continued_pid" in event for event in continued["events"]))
+            self.assertTrue(continued["healthy_at_end"])
+            self.assertTrue(continued["snapshots"])
             self.assertEqual(len(list(evidence.glob("status-*.json"))), 1,
                              "repeated polls should not copy unchanged status bytes")
 

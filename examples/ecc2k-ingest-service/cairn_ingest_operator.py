@@ -107,9 +107,12 @@ def run(args):
             if current < period:
                 raise RuntimeError("wall clock moved backward; preserve journal for audit")
             if current != period:
-                if not any("started_pid" in event for event in journal["events"]):
+                if not any("started_pid" in event or "continued_pid" in event
+                           for event in journal["events"]):
                     period = current
                     journal = new_journal(period, int(now))
+                    if child is not None and child.poll() is None:
+                        journal["events"].append({"at": int(now), "continued_pid": child.pid})
                     continue
                 journal["ended_at"] = int(now)
                 journal["healthy_at_end"] = child is not None and child.poll() is None
@@ -124,6 +127,10 @@ def run(args):
                     break
                 period = current
                 journal = new_journal(period, int(now))
+                # A child crossing the boundary is service in the new period,
+                # even though it did not start a new process there.
+                if child is not None and child.poll() is None:
+                    journal["events"].append({"at": int(now), "continued_pid": child.pid})
             if child is not None and child.poll() is not None:
                 journal["events"].append({"at": int(now), "exit_code": child.returncode})
                 child = None
