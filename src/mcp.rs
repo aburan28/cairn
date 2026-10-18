@@ -434,10 +434,11 @@ pub(crate) fn start_shared_http(
     spend: Arc<Mutex<SpendCeiling>>,
     addr: &str,
 ) -> Result<(), String> {
-    let access = Arc::new(HttpAccess::from_env()?);
+    let mut access = HttpAccess::from_env()?;
     let identity = identity_path.map(load_identity).transpose()?;
     let cipher = pending_cipher(log, key_path)?;
-    let server = Server::new_shared(state, identity, cipher).with_shared_spend_ceiling(&spend);
+    let server =
+        Server::new_shared(Arc::clone(&state), identity, cipher).with_shared_spend_ceiling(&spend);
     let listener = bind_http(addr)?;
     eprintln!(
         "cairn mcp {SERVER_VERSION}: sharing daemon ledger {}, Streamable HTTP on {}",
@@ -447,10 +448,13 @@ pub(crate) fn start_shared_http(
             .map_or_else(|_| addr.to_string(), |bound| bound.to_string())
     );
     report_identity(&server, "--mcp-identity");
-    let hub = Arc::new(Mutex::new(HttpHub::new(server)));
+    let mut hubs = vec![Arc::new(Mutex::new(HttpHub::new(server)))];
+    load_http_agent_profiles(&mut access, &mut hubs, &state, &spend, log, key_path)?;
+    let access = Arc::new(access);
+    let hubs = Arc::new(hubs);
     thread::Builder::new()
         .name(String::from("cairn-mcp-http"))
-        .spawn(move || accept_loop(listener, hub, access))
+        .spawn(move || accept_loop(listener, hubs, access))
         .map_err(|error| format!("cannot start HTTP thread: {error}"))?;
     Ok(())
 }
@@ -695,11 +699,12 @@ impl HttpHub {
 
 const MCP_HTTP_TOKEN_ENV: &str = "CAIRN_MCP_HTTP_TOKEN";
 const MCP_HTTP_PUBLIC_HOST_ENV: &str = "CAIRN_MCP_HTTP_PUBLIC_HOST";
+const MCP_HTTP_AGENTS_FILE_ENV: &str = "CAIRN_MCP_HTTP_AGENTS_FILE";
 const MCP_HTTP_TOKEN_DOMAIN: &[u8] = b"cairn/mcp/http-token/v1";
 
 struct HttpAccess {
     public_host: Option<String>,
-    token_digest: Option<[u8; 32]>,
+    token_digests: Vec<[u8; 32]>,
 }
 
 impl HttpAccess {
@@ -720,19 +725,11 @@ impl HttpAccess {
     }
 
     fn new(token: Option<&str>, public_host: Option<&str>) -> Result<Self, String> {
-        let token_digest = token
-            .map(|value| {
-                if value.len() != 64 {
-                    return Err(format!(
-                        "{MCP_HTTP_TOKEN_ENV} needs 64 lowercase hexadecimal characters"
-                    ));
-                }
-                let bytes = crate::hex::decode(value)
-                    .ok_or_else(|| format!("{MCP_HTTP_TOKEN_ENV} must be lowercase hexadecimal"))?;
-                Ok(Self::digest(&bytes))
-            })
-            .transpose()?;
-        if public_host.is_some() && token_digest.is_none() {
+        let token_digests = token
+            .map(|value| Self::parse_token(value, MCP_HTTP_TOKEN_ENV).map(|digest| vec![digest]))
+            .transpose()?
+            .unwrap_or_default();
+        if public_host.is_some() && token_digests.is_empty() {
             return Err(format!(
                 "{MCP_HTTP_PUBLIC_HOST_ENV} requires {MCP_HTTP_TOKEN_ENV}"
             ));
@@ -744,8 +741,35 @@ impl HttpAccess {
         }
         Ok(Self {
             public_host: public_host.map(str::to_string),
-            token_digest,
+            token_digests,
         })
+    }
+
+    fn parse_token(value: &str, label: &str) -> Result<[u8; 32], String> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(format!("{label} needs 64 lowercase hexadecimal characters"));
+        }
+        let bytes = crate::hex::decode(value)
+            .ok_or_else(|| format!("{label} needs 64 lowercase hexadecimal characters"))?;
+        Ok(Self::digest(&bytes))
+    }
+
+    fn add_token(&mut self, token: &str) -> Result<(), String> {
+        if self.token_digests.is_empty() {
+            return Err(format!(
+                "{MCP_HTTP_AGENTS_FILE_ENV} requires {MCP_HTTP_TOKEN_ENV}"
+            ));
+        }
+        let digest = Self::parse_token(token, MCP_HTTP_AGENTS_FILE_ENV)?;
+        if self.token_digests.contains(&digest) {
+            return Err("duplicate MCP HTTP agent token".to_string());
+        }
+        self.token_digests.push(digest);
+        Ok(())
     }
 
     fn digest(value: &[u8]) -> [u8; 32] {
@@ -755,24 +779,114 @@ impl HttpAccess {
         mac.finalize().into_bytes().into()
     }
 
+    #[cfg(test)]
     fn authorized(&self, header: Option<&str>) -> bool {
-        let Some(expected) = &self.token_digest else {
-            return true;
-        };
-        let Some(raw) = header.and_then(|value| value.strip_prefix("Bearer ")) else {
-            return false;
-        };
-        if raw.len() != 64 {
-            return false;
+        self.profile(header).is_some()
+    }
+
+    fn profile(&self, header: Option<&str>) -> Option<usize> {
+        if self.token_digests.is_empty() {
+            return Some(0);
         }
-        let Some(bytes) = crate::hex::decode(raw) else {
-            return false;
-        };
+        let raw = header.and_then(|value| value.strip_prefix("Bearer "))?;
+        if raw.len() != 64 {
+            return None;
+        }
+        let bytes = crate::hex::decode(raw)?;
         let mut mac = Hmac::<Sha256>::new_from_slice(MCP_HTTP_TOKEN_DOMAIN)
             .expect("HMAC accepts any key length");
         mac.update(&bytes);
-        mac.verify_slice(expected).is_ok()
+        self.token_digests
+            .iter()
+            .position(|expected| mac.clone().verify_slice(expected).is_ok())
     }
+}
+
+/// Each bearer selects its own signing server and session table, while all
+/// servers use the daemon's single ledger and spend ceiling.
+fn load_http_agent_profiles(
+    access: &mut HttpAccess,
+    hubs: &mut Vec<Arc<Mutex<HttpHub>>>,
+    state: &Arc<Mutex<crate::daemon::State>>,
+    spend: &Arc<Mutex<SpendCeiling>>,
+    log: &Path,
+    key_path: &Path,
+) -> Result<(), String> {
+    let path = match std::env::var(MCP_HTTP_AGENTS_FILE_ENV) {
+        Ok(path) => path,
+        Err(std::env::VarError::NotPresent) => return Ok(()),
+        Err(_) => return Err(format!("{MCP_HTTP_AGENTS_FILE_ENV} must be UTF-8")),
+    };
+    let path = Path::new(&path);
+    let contents = crate::secret_file::read_to_string(path)
+        .map_err(|error| format!("cannot read {MCP_HTTP_AGENTS_FILE_ENV}: {error}"))?;
+    let config: Json = serde_json::from_str(&contents)
+        .map_err(|_| format!("{MCP_HTTP_AGENTS_FILE_ENV} must be JSON"))?;
+    if config.get("schema").and_then(Json::as_str) != Some("cairn-mcp-agent-profiles-v1") {
+        return Err(format!("{MCP_HTTP_AGENTS_FILE_ENV}: unknown schema"));
+    }
+    let agents = config
+        .get("agents")
+        .and_then(Json::as_array)
+        .ok_or_else(|| format!("{MCP_HTTP_AGENTS_FILE_ENV}: agents must be an array"))?;
+    if agents.len() > 32 {
+        return Err(format!("{MCP_HTTP_AGENTS_FILE_ENV}: too many agents"));
+    }
+    let mut names = BTreeSet::new();
+    let mut identities = BTreeSet::new();
+    if let Some(identity) = hubs[0]
+        .lock()
+        .map_err(|_| "MCP hub lock poisoned")?
+        .server
+        .identity
+        .as_ref()
+    {
+        identities.insert(identity.submitter_id());
+    }
+    for agent in agents {
+        let name = agent
+            .get("name")
+            .and_then(Json::as_str)
+            .filter(|name| {
+                !name.is_empty()
+                    && name.len() <= 64
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            })
+            .ok_or_else(|| format!("{MCP_HTTP_AGENTS_FILE_ENV}: invalid agent name"))?;
+        if !names.insert(name.to_string()) {
+            return Err(format!("{MCP_HTTP_AGENTS_FILE_ENV}: duplicate agent name"));
+        }
+        let token = agent
+            .get("token")
+            .and_then(Json::as_str)
+            .ok_or_else(|| format!("{MCP_HTTP_AGENTS_FILE_ENV}: agent needs token"))?;
+        let identity_path = agent
+            .get("identity")
+            .and_then(Json::as_str)
+            .map(Path::new)
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| {
+                format!("{MCP_HTTP_AGENTS_FILE_ENV}: agent needs absolute identity path")
+            })?;
+        let identity = load_identity(identity_path)?;
+        if !identities.insert(identity.submitter_id()) {
+            return Err(format!(
+                "{MCP_HTTP_AGENTS_FILE_ENV}: duplicate signing identity"
+            ));
+        }
+        access.add_token(token)?;
+        let cipher = pending_cipher(log, key_path)?;
+        // One sidecar per signer: otherwise the next agent to save its
+        // commitments would erase the first agent's unrevealed nonces.
+        let pending_path = log.with_extension(format!("pending-agent-{name}.json"));
+        let server = Server::new_shared_profile(Arc::clone(state), identity, cipher, pending_path)
+            .with_shared_spend_ceiling(spend);
+        hubs.push(Arc::new(Mutex::new(HttpHub::new(server))));
+        eprintln!("cairn mcp: enrolled agent {name}");
+    }
+    Ok(())
 }
 
 fn valid_mcp_public_host(value: &str) -> bool {
@@ -812,7 +926,11 @@ fn serve_http(server: Server, addr: &str) -> i32 {
             .local_addr()
             .map_or_else(|_| addr.to_string(), |bound| bound.to_string())
     );
-    accept_loop(listener, Arc::new(Mutex::new(HttpHub::new(server))), access);
+    accept_loop(
+        listener,
+        Arc::new(vec![Arc::new(Mutex::new(HttpHub::new(server)))]),
+        access,
+    );
     // The accept loop never returns; this is for the type, not the control flow.
     0
 }
@@ -832,7 +950,11 @@ fn bind_http(addr: &str) -> Result<TcpListener, String> {
     TcpListener::bind(socket).map_err(|error| format!("cannot listen on {addr}: {error}"))
 }
 
-fn accept_loop(listener: TcpListener, hub: Arc<Mutex<HttpHub>>, access: Arc<HttpAccess>) {
+fn accept_loop(
+    listener: TcpListener,
+    hubs: Arc<Vec<Arc<Mutex<HttpHub>>>>,
+    access: Arc<HttpAccess>,
+) {
     let live = Arc::new(Mutex::new(0u64));
     for stream in listener.incoming() {
         let mut stream = match stream {
@@ -857,12 +979,12 @@ fn accept_loop(listener: TcpListener, hub: Arc<Mutex<HttpHub>>, access: Arc<Http
             );
             continue;
         }
-        let hub = Arc::clone(&hub);
+        let hubs = Arc::clone(&hubs);
         let access = Arc::clone(&access);
         let live = Arc::clone(&live);
         thread::spawn(move || {
             let _guard = ConnectionGuard { live };
-            let _ = handle_http_conn(&mut stream, &hub, &access);
+            let _ = handle_http_conn(&mut stream, &hubs, &access);
             http_linger(&mut stream);
         });
     }
@@ -895,7 +1017,7 @@ struct HttpRequest {
 
 fn handle_http_conn(
     stream: &mut TcpStream,
-    hub: &Arc<Mutex<HttpHub>>,
+    hubs: &[Arc<Mutex<HttpHub>>],
     access: &HttpAccess,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(MCP_REQUEST_TIMEOUT))?;
@@ -923,7 +1045,7 @@ fn handle_http_conn(
         http_respond(stream, 403, "application/json", frame.as_bytes(), &[])?;
         return Ok(());
     }
-    if !access.authorized(request.authorization.as_deref()) {
+    let Some(profile) = access.profile(request.authorization.as_deref()) else {
         http_respond(
             stream,
             401,
@@ -932,7 +1054,8 @@ fn handle_http_conn(
             &[],
         )?;
         return Ok(());
-    }
+    };
+    let hub = &hubs[profile];
     // One request per connection: like `serve.rs`, this answers once and
     // closes, so there is no keep-alive state to get wrong.
     match (request.method.as_str(), request.path.as_str()) {
@@ -1479,7 +1602,10 @@ struct PendingStore {
 
 impl PendingStore {
     fn load(log: &std::path::Path, cipher: Option<crate::store::atrest::Cipher>) -> PendingStore {
-        let path = log.with_extension("pending.json");
+        Self::load_at(log.with_extension("pending.json"), cipher)
+    }
+
+    fn load_at(path: PathBuf, cipher: Option<crate::store::atrest::Cipher>) -> PendingStore {
         // Loud on anything but a missing file. The entries here are the only
         // copies of live nonces -- the agent deliberately has none -- so a
         // sidecar that cannot be read means every open commitment is stranded,
@@ -1811,13 +1937,39 @@ impl Server {
         Self::new_with_source(NodeSource::Shared(node), identity, pending_cipher)
     }
 
+    fn new_shared_profile(
+        node: Arc<Mutex<crate::daemon::State>>,
+        identity: Identity,
+        pending_cipher: Option<crate::store::atrest::Cipher>,
+        pending_path: PathBuf,
+    ) -> Server {
+        Self::new_with_source_and_pending(
+            NodeSource::Shared(node),
+            Some(identity),
+            pending_cipher,
+            Some(pending_path),
+        )
+    }
+
     fn new_with_source(
         node: NodeSource,
         identity: Option<Identity>,
         pending_cipher: Option<crate::store::atrest::Cipher>,
     ) -> Server {
+        Self::new_with_source_and_pending(node, identity, pending_cipher, None)
+    }
+
+    fn new_with_source_and_pending(
+        node: NodeSource,
+        identity: Option<Identity>,
+        pending_cipher: Option<crate::store::atrest::Cipher>,
+        pending_path: Option<PathBuf>,
+    ) -> Server {
         let ledger_path = node.read().ledger().path().to_path_buf();
-        let pending = PendingStore::load(&ledger_path, pending_cipher);
+        let pending = match pending_path {
+            Some(path) => PendingStore::load_at(path, pending_cipher),
+            None => PendingStore::load(&ledger_path, pending_cipher),
+        };
         Server {
             node,
             offered: BTreeSet::new(),
@@ -4809,7 +4961,7 @@ mod tests {
             let worker = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
                 let access = HttpAccess::new(Some(&secret), Some(host)).unwrap();
-                handle_http_conn(&mut stream, &hub, &access).unwrap();
+                handle_http_conn(&mut stream, &[hub], &access).unwrap();
             });
             let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
             let auth = authorization
@@ -4825,6 +4977,68 @@ mod tests {
         };
         assert!(probe(None).starts_with("HTTP/1.1 401"));
         assert!(probe(Some(&format!("Bearer {secret}"))).starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn http_agent_tokens_select_distinct_signers_and_sessions() {
+        let operator_token = "31".repeat(32);
+        let agent_token = "42".repeat(32);
+        let mut access = HttpAccess::new(Some(&operator_token), None).unwrap();
+        access.add_token(&agent_token).unwrap();
+        assert!(access.add_token(&agent_token).is_err());
+        assert!(access.add_token(&operator_token).is_err());
+        assert_eq!(
+            access.profile(Some(&format!("Bearer {operator_token}"))),
+            Some(0)
+        );
+        assert_eq!(
+            access.profile(Some(&format!("Bearer {agent_token}"))),
+            Some(1)
+        );
+        assert_eq!(access.profile(None), None);
+
+        let mut operator = server();
+        operator.identity = Some(Identity::from_secret_bytes([1; 32]));
+        let mut agent = server();
+        agent.identity = Some(Identity::from_secret_bytes([2; 32]));
+        assert_ne!(
+            operator.identity.as_ref().unwrap().submitter_id(),
+            agent.identity.as_ref().unwrap().submitter_id()
+        );
+        let mut hubs = [HttpHub::new(operator), HttpHub::new(agent)];
+        let session = http_open(&mut hubs[0]);
+        let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}).to_string();
+        assert_eq!(hubs[0].handle(Some(&session), &list).status, 200);
+        assert_eq!(hubs[1].handle(Some(&session), &list).status, 404);
+    }
+
+    #[test]
+    fn http_agent_pending_nonces_survive_other_agent_writes() {
+        let dir = std::env::temp_dir().join(format!("cairn-mcp-pending-{}", fresh_nonce()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a_path = dir.join("log.pending-agent-a.json");
+        let b_path = dir.join("log.pending-agent-b.json");
+        let mut a = PendingStore::load_at(a_path.clone(), None);
+        let mut b = PendingStore::load_at(b_path.clone(), None);
+        let entry = |submitter: &str| Pending {
+            objective_id: "objective".to_string(),
+            submitter: submitter.to_string(),
+            artifact_digest: "sha256:artifact".to_string(),
+            nonce: format!("nonce-{submitter}"),
+            epoch: 1,
+        };
+        a.remember(entry("a"));
+        a.save();
+        b.remember(entry("b"));
+        b.save();
+        assert_eq!(
+            PendingStore::load_at(a_path, None).entries[0].nonce,
+            "nonce-a"
+        );
+        assert_eq!(
+            PendingStore::load_at(b_path, None).entries[0].nonce,
+            "nonce-b"
+        );
     }
 
     #[test]

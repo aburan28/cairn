@@ -306,6 +306,15 @@ still allows an objective with reward 0. A refused post spends nothing, and the
 server prints its ceiling at startup. What remains: the ceiling is per process,
 so a restart resets it, and inside it the agent still chooses what to fund.
 
+**Partial: a remote agent bearer is stolen.** The HTTP hub accepts an optional
+private agent-profile file: each bearer selects a separate signing key and
+session table, with one shared ledger and spend ceiling. A stolen bearer can
+invoke that profile's MCP tools and sign as that agent until the hub rotates
+the bearer and restarts. The hub host holds every enrolled signing key, so host
+compromise reaches every profile. The endpoint must remain behind authenticated
+TLS and be limited to enrolled agents; bearer routing alone does not make a
+public internet endpoint safe.
+
 **Handled: an agent takes the network.** `lab_exec` with `network: true` gives
 the job the host's network namespace (loopback services, cloud metadata). The
 operator's `CAIRN_LAB_SANDBOX` chose the backend; now `CAIRN_LAB_NETWORK=1`

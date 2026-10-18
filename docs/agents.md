@@ -314,9 +314,16 @@ as 64 hexadecimal characters. Cairn then requires `Authorization: Bearer
 <token>` on every MCP HTTP request, including loopback requests. An invalid
 token or a public host without a token refuses startup; duplicate
 Authorization headers and browser origins are refused. The token is a shared
-operator capability: give it only to agents trusted with the hub's signing
-identity, and keep it in a private service environment rather than a URL or
-repository file. TLS still terminates at the trusted proxy.
+operator capability: keep it in a private service environment rather than a
+URL or repository file. TLS still terminates at the trusted proxy. For agents
+that need distinct signing identities, set `CAIRN_MCP_HTTP_AGENTS_FILE` to a
+private JSON file with schema `cairn-mcp-agent-profiles-v1` and an `agents`
+array of `{ "name": "region", "token": "64 lowercase hex", "identity":
+"/absolute/private/identity.json" }` entries. Each token routes to a separate
+signer and MCP session table; the operator token remains profile zero. All
+profiles share the daemon's ledger and spend ceiling. An agent bearer grants
+that agent's full MCP tool access, so give each one only to its intended agent
+and rotate it on suspected disclosure.
 
 ### One global address for trusted ingester agents
 

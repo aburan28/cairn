@@ -81,13 +81,32 @@ operator can score and submit a period receipt through the endpoint.
 durable Linux host. `hub-check.sh` verifies the authenticated HTTPS MCP path
 from each enrolled agent location before the agent submits a claim. It is a
 read-only probe; a successful probe does not certify an ingester period.
-The gateway currently uses one Cairn signing identity for all its sessions,
-so every account at that address must be trusted to act for the operator.
+Enroll each remote agent with its own bearer and signing identity. Set
+`CAIRN_MCP_HTTP_AGENTS_FILE` to a private mode-0600 JSON file on the hub:
+
+```json
+{
+  "schema": "cairn-mcp-agent-profiles-v1",
+  "agents": [
+    {"name": "americas", "token": "<64 lowercase hex characters>", "identity": "/srv/cairn/americas.identity.json"},
+    {"name": "europe", "token": "<different 64 lowercase hex characters>", "identity": "/srv/cairn/europe.identity.json"}
+  ]
+}
+```
+
+Create each identity with `cairn identity --out` and keep its file private.
+The existing `CAIRN_MCP_HTTP_TOKEN` remains the operator profile. Each bearer
+selects one signing identity and a separate MCP session table, while all
+profiles share the daemon ledger and one spend ceiling. A leaked bearer lets
+its holder act as that agent, including invoking the hub's other MCP tools;
+revoke it by replacing the token in the private file and restarting the hub.
+Keep each `name` stable across restarts: its private pending sidecar holds the
+nonce needed to reveal commitments that agent already made.
+The hub still holds all signing keys, so its host is trusted for every profile.
 For a temporary direct Tailscale Serve route, Cairn can enforce a random
 `CAIRN_MCP_HTTP_TOKEN` and the exact `CAIRN_MCP_HTTP_PUBLIC_HOST` itself,
 without Caddy's password check. Keep both values private, require HTTPS at
-Serve, and retain the default zero MCP spend. This does not give separate
-signing identities to different agents.
+Serve, and retain the default zero MCP spend.
 Run the local two-session payment and independent replay with
 `python3 scripts/mcp-http-ingest-smoke.py` after building the Cairn and
 reference binaries.
