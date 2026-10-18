@@ -1,0 +1,33 @@
+name: reasoning-contract
+
+on:
+  pull_request:
+    paths:
+      - research/reasoning-contract/**
+      - .github/workflows/reasoning-contract.yml
+  push:
+    branches: [main]
+    paths:
+      - research/reasoning-contract/**
+      - .github/workflows/reasoning-contract.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reasoning-contract-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  experiment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s research/reasoning-contract -p 'test_*.py' -v
+      - name: Reproduce the committed experiment receipt
+        run: |
+          python3 research/reasoning-contract/experiment.py --output "$RUNNER_TEMP/information-report.json"
+          diff -u research/reasoning-contract/experiment.json "$RUNNER_TEMP/information-report.json"

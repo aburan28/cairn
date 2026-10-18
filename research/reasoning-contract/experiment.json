@@ -1,0 +1,199 @@
+{
+  "attack_controls": {
+    "positive_only_cycle": {
+      "clipped_total": 12500,
+      "outcome": 1,
+      "path": [
+        50,
+        100,
+        0,
+        100
+      ],
+      "signed_deltas": [
+        2500,
+        -10000,
+        10000
+      ],
+      "signed_total": 2500
+    },
+    "unfunded_default_option": {
+      "actual_bond": 0,
+      "belief": {
+        "denominator": 2,
+        "numerator": 1
+      },
+      "best_default_expected": {
+        "denominator": 1,
+        "numerator": 1250
+      },
+      "honest_signed_expected": {
+        "denominator": 1,
+        "numerator": 0
+      }
+    },
+    "worker_chosen_baseline": {
+      "final_report": 100,
+      "fixed_baseline_50_gain": 2500,
+      "outcome": 1,
+      "sandbagged_baseline_0_gain": 10000
+    },
+    "worker_controlled_outcome": {
+      "belief_before_action": {
+        "denominator": 2,
+        "numerator": 1
+      },
+      "chosen_outcome": 1,
+      "gain_after_selecting_outcome": 2500,
+      "report": 100
+    }
+  },
+  "bandwidth_committee_sensitivity": {
+    "population": 1000,
+    "scope": "Probability that a stated corruption bound fails; not probability of a successful attack.",
+    "sybil_admitted_sixty_percent_n10_f2": {
+      "denominator": 16545826662184058595,
+      "numerator": 16348348935629889347
+    },
+    "ten_percent_corrupt_n10_f2": {
+      "denominator": 1495965245694969405,
+      "numerator": 103576369254956213
+    },
+    "ten_percent_corrupt_n31_f10": {
+      "denominator": 33491389776125761042403842651048637728615232865,
+      "numerator": 3015736905435860319359519645469624722355829
+    }
+  },
+  "effort_choice": [
+    {
+      "gross": {
+        "denominator": 1,
+        "numerator": 0
+      },
+      "net": {
+        "denominator": 1,
+        "numerator": 0
+      },
+      "posterior_units": [
+        50,
+        50
+      ],
+      "private_cost": 0,
+      "strategy": "no_signal"
+    },
+    {
+      "gross": {
+        "denominator": 1,
+        "numerator": 100
+      },
+      "net": {
+        "denominator": 1,
+        "numerator": 50
+      },
+      "posterior_units": [
+        40,
+        60
+      ],
+      "private_cost": 50,
+      "strategy": "cheap_signal"
+    },
+    {
+      "gross": {
+        "denominator": 1,
+        "numerator": 900
+      },
+      "net": {
+        "denominator": 1,
+        "numerator": 600
+      },
+      "posterior_units": [
+        20,
+        80
+      ],
+      "private_cost": 300,
+      "strategy": "deeper_signal"
+    },
+    {
+      "gross": {
+        "denominator": 1,
+        "numerator": 900
+      },
+      "net": {
+        "denominator": 1,
+        "numerator": -300
+      },
+      "posterior_units": [
+        20,
+        80
+      ],
+      "private_cost": 1200,
+      "strategy": "overpriced_deeper_signal"
+    }
+  ],
+  "exhaustive_checks": {
+    "properness_cases": 30603,
+    "properness_scale": 100,
+    "telescoping_scale": 10,
+    "three_update_paths_and_outcomes": 29282
+  },
+  "funded_state_machine": {
+    "one_owner": {
+      "deltas": [
+        2500,
+        -10000,
+        10000
+      ],
+      "sponsor": 7500,
+      "total": 40000,
+      "worker_total": 32500
+    },
+    "three_owners": {
+      "deltas": [
+        2500,
+        -10000,
+        10000
+      ],
+      "sponsor": 7500,
+      "total": 40000,
+      "worker_total": 32500
+    }
+  },
+  "kind": "cairn/research/information-contract-experiment/v1",
+  "scope": "Local credits, exogenous binary outcome, risk-neutral players; no ledger or provider calls.",
+  "source_sha256": {
+    "contract.py": "44edc8b8e9a563b4abf8918ec3d0dc8a7c51d437406a05a9dcb604c2963f78d7",
+    "experiment.py": "7112cd6be8a0e4a71e829fe4f109fde94ebf2eed88992587caee5f856273cbc2",
+    "test_contract.py": "0883a30b6e616135b3ca5fa988bbf78612e5ad208b7a3b8ee3f424d0a139bfea"
+  },
+  "truthful_reporting": {
+    "baseline_units": 50,
+    "belief": {
+      "denominator": 5,
+      "numerator": 3
+    },
+    "positive_only_best_reports": [
+      100
+    ],
+    "positive_only_optimal_expected": {
+      "denominator": 1,
+      "numerator": 1500
+    },
+    "positive_only_truthful_expected": {
+      "denominator": 1,
+      "numerator": 540
+    },
+    "signed_best_reports": [
+      60
+    ],
+    "signed_truthful_expected": {
+      "denominator": 1,
+      "numerator": 100
+    }
+  },
+  "unresolved_assumptions": [
+    "A publicly verifiable outcome is independent of the worker's later actions.",
+    "Reports close before the outcome or checker answer leaks; live clocks and oracle are absent.",
+    "Sponsor purchases a fixed report capacity; identities cannot create additional paid rights.",
+    "Risk preferences, private costs, collusion and task selection are not identified by the score.",
+    "Bandwidth sampling requires a defensible admitted population and live measurement assumptions."
+  ]
+}
