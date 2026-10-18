@@ -1,0 +1,36 @@
+# Persistent Cairn writer behind Caddy and Tailscale Serve.
+# Install as /etc/systemd/system/cairn-ingest-hub.service after creating the
+# durable state directory, pinned verifier bundle, and operator identity.
+[Unit]
+Description=Cairn ingester service ledger and MCP hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cairn
+Group=cairn
+WorkingDirectory=/var/lib/cairn-ingest-hub
+Environment=CAIRN_DATA=/var/lib/cairn-ingest-hub
+Environment=CAIRN_LOG_LEVEL=info
+Environment=CAIRN_BEACON_PORT=off
+Environment=CAIRN_PORTMAP=off
+Environment=CAIRN_REQUIRE_SANDBOX=1
+# Remote agents may submit and score, but cannot fund a new objective by
+# accident. Set a reviewed spend budget only when the operator funds a tranche.
+Environment=CAIRN_MCP_MAX_SPEND=0
+ExecStartPre=/usr/bin/test -r /var/lib/cairn-ingest-hub/operator.identity.json
+ExecStartPre=/usr/bin/test -d /var/lib/cairn-ingest-hub/bundle
+# One process owns the log and every HTTP MCP session. Both HTTP listeners
+# stay on loopback; the reverse proxy admits only /mcp over the tailnet.
+ExecStart=/usr/local/bin/cairn --log /var/lib/cairn-ingest-hub/ledger.jsonl --root /var/lib/cairn-ingest-hub/bundle run --no-mcp --listen 127.0.0.1:9000 --serve 127.0.0.1:8080 --mcp-http 127.0.0.1:8001 --mcp-identity /var/lib/cairn-ingest-hub/operator.identity.json
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cairn-ingest-hub
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

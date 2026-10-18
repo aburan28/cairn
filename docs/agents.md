@@ -341,6 +341,33 @@ and [MagicDNS names](https://tailscale.com/docs/features/magicdns).
 The actual `<tailnet>` value comes from that tailnet's DNS settings after
 enrollment. This is a proposed deployment, not a URL currently running.
 
+`examples/ecc2k-ingest-service/cairn-ingest-hub.service` is the persistent
+systemd unit for this arrangement. Install a Cairn binary built with embedded
+UI assets at `/usr/local/bin/cairn`, install `python3` and `bubblewrap`, and
+put the approved operator identity plus a writable verifier bundle under
+`/var/lib/cairn-ingest-hub` on durable storage owned by the `cairn` user.
+The unit refuses to start without the identity or bundle, keeps the log on
+that volume, binds its reader, peer listener, and MCP listener to loopback,
+and requires the verifier sandbox. Its MCP funding budget is zero until an
+operator explicitly configures a reviewed tranche. Install the unit as
+`/etc/systemd/system/cairn-ingest-hub.service`, then run `systemctl
+daemon-reload` and `systemctl enable --now cairn-ingest-hub`.
+
+Install `Caddyfile.tailnet.example` as `/etc/caddy/Caddyfile` and supply
+distinct agent password **hashes** to Caddy's systemd service as
+`CAIRN_MCP_AGENT_AMERICAS_HASH` and `CAIRN_MCP_AGENT_EUROPE_HASH`. Keep the
+hash environment file readable only by the service manager; passwords stay
+in each agent's private environment. After validating and starting Caddy,
+configure Tailscale Serve as above. From a different enrolled machine with
+`CAIRN_MCP_USER` and `CAIRN_MCP_PASSWORD` already set in its private
+environment, run `examples/ecc2k-ingest-service/hub-check.sh
+https://cairn-hub.<tailnet>.ts.net:8443/mcp`. It uses the real remote adapter
+to check TLS, authentication, MCP session creation, and the expected tool
+names without posting or spending. Run it once from each agent location.
+Also inspect the hub journal for `sandbox bwrap` and for zero unmet pinned
+verifiers before relying on a payment verdict. Local checkout tests cannot
+establish these properties on the future host.
+
 If independently operated agents must connect without tailnet enrollment,
 use `Caddyfile.example` on the **same host** as the loopback listener instead.
 Set `CAIRN_MCP_DOMAIN` to an owned DNS name pointing to that host, configure

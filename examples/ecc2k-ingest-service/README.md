@@ -72,6 +72,10 @@ Distributed agents reach the common Cairn MCP endpoint described in
 `docs/agents.md`. The private ingester does not accept network tool calls;
 agents can observe the public status and signed receipts, and a credentialed
 operator can score and submit a period receipt through the endpoint.
+`cairn-ingest-hub.service` keeps that endpoint's one ledger writer alive on a
+durable Linux host. `hub-check.sh` verifies the authenticated HTTPS MCP path
+from each enrolled agent location before the agent submits a claim. It is a
+read-only probe; a successful probe does not certify an ingester period.
 The gateway currently uses one Cairn signing identity for all its sessions,
 so every account at that address must be trusted to act for the operator.
 Run the local two-session payment and independent replay with
