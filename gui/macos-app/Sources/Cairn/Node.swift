@@ -61,6 +61,7 @@ final class Node: ObservableObject {
     private(set) var workObjective: String?
     /// The one `cairn work` this app runs, against this node or another.
     let worker = Worker()
+    lazy var coordination = CoordinationComposer(node: self)
     /// What New Challenge… opens with: the description the reader's Post a
     /// challenge page handed over, or nil from the Node menu.
     private(set) var challengeBrief: String?

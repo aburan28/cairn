@@ -32,10 +32,12 @@ import {
 } from "@/lib/progress";
 import { type Objective, fetchObjectives } from "@/lib/objectives";
 import { type NetworkResponse, fetchNetwork } from "@/lib/network";
-import { type McpPresence, PromptRefused, renderPrompt, slashCommand } from "@/lib/agents";
-import { type Bridge, appBridge } from "@/lib/draft";
+import { type Bridge, appBridge, briefProblem, BRIEF_MAX } from "@/lib/draft";
+import {
+  type CoordinationStatus, cancelCoordination, coordinationBudget, coordinationBusy,
+  coordinationStatus, generateCoordination, launchCoordination,
+} from "@/lib/coordination-draft";
 import { objectiveTitle } from "@/lib/title";
-import { AgentConnect } from "@/components/agents";
 import { useEvery, useNode, useNodeRead } from "@/components/hooks";
 import {
   Badge,
@@ -49,7 +51,6 @@ import {
   Note,
   PageHeader,
   Progress,
-  Sheet,
   Skeleton,
   Stat,
   StatusPill,
@@ -77,9 +78,9 @@ const EXAMPLES = [
  * A coordinated task is an objective with a `piecework` block -- a search the
  * network divides by arithmetic, each worker taking its own slice per epoch,
  * every novel finished unit paid from the pool. Turning a description into one
- * needs a checker written and pinned, which no page may do for a node (see
- * `lib/draft.ts`): so the page asks the node for its `coordinate_task` prompt,
- * hands it to the operator's agent, and watches for the objective to appear.
+ * needs a checker written and pinned. Cairn.app asks the configured AI provider
+ * in the background, checks its spec with the node's verifier, and returns a
+ * preview the person can launch. Credentials and generated code stay native.
  *
  * `?id=` rather than a path segment: this is a static export embedded in the
  * node binary.
@@ -111,7 +112,7 @@ function Coordination() {
 // -- the overview: launch, and what is running ------------------------------------
 
 function Overview() {
-  const { base, value, error, readAt, refresh: load } = useNodeRead(async (base) => {
+  const { value, error, readAt } = useNodeRead(async (base) => {
     const [objectives, network] = await Promise.all([fetchObjectives(base), fetchNetwork(base).catch(() => null)]);
     return { objectives, network };
   }, { seconds: REFRESH_SECONDS });
@@ -133,7 +134,7 @@ function Overview() {
     <>
       <PageHeader title="Coordination" subtitle={SUBTITLE} actions={<><LiveStamp at={readAt} error={objectives ? error : null} /><Link className="btn btn-sm" href="/workspace">Workspaces</Link></>} />
 
-      <Launch base={base} objectives={objectives} mcp={network?.node.mcp} onPosted={() => void load()} />
+      <Launch />
 
       <h2 className="mt-7 mb-3 text-[13px] font-semibold tracking-[0.06em] text-ink-2 uppercase">
         Running <span className="mono ml-1 text-ink-3">{running.length}</span>
@@ -151,7 +152,7 @@ function Overview() {
       )}
       {objectives && running.length === 0 && (
         <EmptyState title="No coordinated task yet">
-          Describe one above and your agent will set it up. Any challenge with a{" "}
+          Describe one above and Cairn will prepare its challenge spec. Any challenge with a{" "}
           <span className="mono">piecework</span> block appears here once it is posted.
         </EmptyState>
       )}
@@ -196,208 +197,147 @@ function TaskCard({ objective, live }: { objective: Objective; live: number }) {
   );
 }
 
-/**
- * Describe → prompt → the agent posts it → the page sees it.
- *
- * The prompt is the node's (`POST /prompts/coordinate_task`), the same text
- * Claude Code gets from `/mcp__cairn__coordinate_task`, so the page and the
- * slash command teach one format. The page then watches `/objectives` for a
- * divided search it had not seen when the prompt was written: that is the
- * agent's post arriving, whichever agent made it.
- */
-function Launch({
-  base,
-  objectives,
-  mcp,
-  onPosted,
-}: {
-  base: string | null;
-  objectives: Objective[] | null;
-  mcp: McpPresence | undefined;
-  onPosted: () => void;
-}) {
+/** Drafting belongs to the app, so it survives a reader reload during launch. */
+function Launch() {
   const [description, setDescription] = useState("");
   const [budget, setBudget] = useState("");
-  const [prompt, setPrompt] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [connect, setConnect] = useState(false);
   const [bridge, setBridge] = useState<Bridge | null>(null);
-  /** Divided searches that existed when the prompt was written. */
-  const known = useRef<Set<string> | null>(null);
-  const [posted, setPosted] = useState<Objective | null>(null);
-
-  useEffect(() => setBridge(appBridge()), []);
+  const [available, setAvailable] = useState(false);
+  const [state, setState] = useState<CoordinationStatus | null>(null);
+  const [pending, setPending] = useState(false);
+  const version = useRef(0);
 
   useEffect(() => {
-    if (!prompt || !objectives || !known.current) return;
-    const fresh = objectives.find((o) => o.piecework && !known.current!.has(o.id));
-    if (fresh) setPosted(fresh);
-  }, [objectives, prompt]);
+    let live = true;
+    const native = appBridge();
+    setBridge(native);
+    if (native) {
+      void coordinationStatus(native).then((next) => {
+        if (!live) return;
+        setState(next);
+        setDescription(next.brief);
+        setBudget(next.budget);
+        setAvailable(true);
+      }).catch((cause: Error) => { if (live) setProblem(cause.message); });
+    }
+    return () => { live = false; version.current += 1; };
+  }, []);
 
-  // Ask more often while waiting for the agent's post: it is the one moment
-  // somebody is staring at this box.
-  useEvery(onPosted, 8, prompt !== null && posted === null);
+  useEvery(async () => {
+    if (!bridge || pending) return;
+    const asked = version.current;
+    try {
+      const next = await coordinationStatus(bridge);
+      if (asked === version.current) setState(next);
+    } catch (cause) {
+      if (asked === version.current) setProblem(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, 1, available && coordinationBusy(state?.phase));
 
-  async function write() {
-    if (base === null) return;
-    setBusy(true);
+  async function act(action: (bridge: Bridge) => Promise<CoordinationStatus>) {
+    if (!bridge || pending) return;
+    const asked = ++version.current;
+    setPending(true);
     setProblem(null);
     try {
-      const args: Record<string, string> = { description: description.trim() };
-      if (budget.trim()) args.budget = budget.trim();
-      const text = await renderPrompt(base, "coordinate_task", args);
-      known.current = new Set((objectives ?? []).filter((o) => o.piecework).map((o) => o.id));
-      setPosted(null);
-      setPrompt(text);
+      const next = await action(bridge);
+      if (asked === version.current) setState(next);
     } catch (cause) {
-      setProblem(
-        cause instanceof PromptRefused
-          ? cause.message
-          : cause instanceof Error
-            ? cause.message
-            : String(cause),
-      );
+      if (asked === version.current) setProblem(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setBusy(false);
+      if (asked === version.current) setPending(false);
     }
   }
 
-  const attached = mcp?.serving && mcp.client ? mcp.client : null;
-  const ready = description.trim().length >= 20;
+  const busy = pending || coordinationBusy(state?.phase);
+  let budgetError: string | null = null;
+  let amount = "";
+  try { amount = coordinationBudget(budget); }
+  catch (cause) { budgetError = cause instanceof Error ? cause.message : String(cause); }
+  const current = state?.brief === description.trim() && state?.budget === amount && !budgetError;
+  const preview = current && state?.spec ? state : null;
 
   return (
-    <section id="launch" className="card card-pad scroll-mt-6">
+    <section id="launch" className="card card-pad scroll-mt-6" aria-busy={busy}>
       <div className="flex flex-wrap items-baseline gap-2">
         <h2 className="text-[15px] font-semibold text-ink">Launch a coordinated task</h2>
         <span className="text-[12.5px] text-ink-3">
-          Say what to search and what one finished piece is. Your agent turns it into a challenge.
+          Describe the task. Cairn prepares and checks a challenge spec using your AI provider.
         </span>
       </div>
-
       <textarea
         className="field mt-3 min-h-28 resize-y leading-relaxed"
         value={description}
-        onChange={(event) => {
-          setDescription(event.target.value);
-          setPrompt(null);
-        }}
+        onChange={(event) => { setDescription(event.target.value); setProblem(null); }}
+        disabled={busy}
         placeholder="e.g. Search every 32-bit seed of this generator for one whose first output is 0xdeadbeef. One piece is a block of 65,536 seeds."
         aria-label="Describe the task"
-        maxLength={8000}
+        maxLength={BRIEF_MAX}
       />
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <span className="text-[11.5px] text-ink-3">Try:</span>
         {EXAMPLES.map((example, n) => (
-          <button
-            key={n}
-            type="button"
-            className="btn btn-sm btn-ghost text-ink-2"
-            onClick={() => {
-              setDescription(example);
-              setPrompt(null);
-            }}
-            title={example}
-          >
+          <button key={n} type="button" className="btn btn-sm btn-ghost text-ink-2" disabled={busy}
+            onClick={() => { setDescription(example); setProblem(null); }} title={example}>
             {["Seed search", "Collatz ranges", "Rho points"][n]}
           </button>
         ))}
       </div>
-
       <div className="mt-3 flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-[12px] text-ink-3">
           Budget (optional)
-          <input
-            className="field field-mono w-40"
-            inputMode="numeric"
-            placeholder="units in all"
-            value={budget}
-            onChange={(event) => {
-              setBudget(event.target.value);
-              setPrompt(null);
-            }}
-          />
+          <input className="field field-mono w-40" inputMode="numeric" placeholder="units in all"
+            value={budget} disabled={busy} onChange={(event) => { setBudget(event.target.value); setProblem(null); }} />
         </label>
-        <button type="button" className="btn btn-primary" disabled={!ready || busy || base === null} onClick={() => void write()}>
-          {busy ? "Writing…" : "Write the agent prompt"}
+        <button type="button" className="btn btn-primary"
+          disabled={!!briefProblem(description) || !!budgetError || busy || !available}
+          onClick={() => void act((native) => generateCoordination(native, description, budget))}>
+          {state?.phase === "drafting" ? "Generating spec…" : state?.phase === "checking" ? "Checking spec…" : "Generate challenge spec"}
         </button>
-        {!ready && description.trim().length > 0 && (
-          <span className="text-[12px] text-ink-3">A sentence or two more: what is searched, and what one piece is.</span>
+        {(state?.phase === "drafting" || state?.phase === "checking") && (
+          <button type="button" className="btn" disabled={pending} onClick={() => void act(cancelCoordination)}>Cancel</button>
+        )}
+        {bridge && (
+          <button type="button" className="btn btn-ghost text-ink-2" disabled={busy}
+            onClick={() => { void bridge.postMessage({ kind: "open", sheet: "settings" })
+              .catch((cause) => setProblem(cause instanceof Error ? cause.message : String(cause))); }}>AI settings</button>
         )}
       </div>
-      {problem && <p className="mt-2 text-[12.5px] text-bad">{problem}</p>}
-
-      {prompt && (
-        <ol className="mt-5 flex flex-col gap-4 border-t border-edge pt-4">
-          <li>
-            <Step n={1} title="Give this to your agent">
-              {attached ? (
-                <>
-                  <span className="text-accent">{attached.name}</span> is attached to this node now. In Claude Code you
-                  can also type <span className="mono">{slashCommand("coordinate_task")}</span> and paste your description.
-                </>
-              ) : (
-                <>
-                  Paste it into Claude Code, Codex or OpenCode with the cairn tools.{" "}
-                  <button type="button" className="text-accent hover:underline" onClick={() => setConnect(true)}>
-                    No agent connected yet?
-                  </button>
-                </>
-              )}
-            </Step>
-            <div className="relative mt-2">
-              <pre className="code max-h-72 overflow-y-auto pr-9 text-[11.5px]">{prompt}</pre>
-              <div className="absolute top-2 right-2">
-                <CopyButton value={prompt} />
-              </div>
-            </div>
-          </li>
-          <li>
-            <Step n={2} title="It writes the checker, tests it, and asks you">
-              The agent writes a checker that accepts only a correctly finished piece, runs it on a good and a bad
-              example, and shows you the challenge — pieces, price per piece, budget — before posting anything.
-            </Step>
-          </li>
-          <li>
-            <Step n={3} title={posted ? "Posted" : "Waiting for it to appear"}>
-              {posted ? (
-                <>
-                  <Link href={`/coordination?id=${encodeURIComponent(posted.id)}`} className="text-accent hover:underline">
-                    {objectiveTitle(posted)} →
-                  </Link>{" "}
-                  Machines join it from <Link href="/contribute#compute" className="text-accent hover:underline">Contribute</Link>.
-                </>
-              ) : (
-                <span className="inline-flex items-center gap-2">
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" aria-hidden />
-                  Watching this node for a new coordinated task.
-                </span>
-              )}
-            </Step>
-          </li>
-        </ol>
-      )}
-
-      {connect && (
-        <Sheet title="Connect an agent" onClose={() => setConnect(false)}>
-          <AgentConnect bridge={bridge} />
-        </Sheet>
+      {!bridge && <p className="mt-3 text-[12.5px] text-ink-2">Open this node in Cairn for Mac to generate and launch a challenge with your configured AI provider.</p>}
+      {(problem || budgetError) && <p role="alert" className="mt-3 text-[12.5px] text-bad">{problem || budgetError}</p>}
+      <div aria-live="polite" className="mt-3 text-[12.5px] text-ink-2">
+        {state?.phase === "drafting" && <p>{state.message || `Preparing the challenge${state.provider ? ` with ${state.provider}` : ""}…`}</p>}
+        {state?.phase === "checking" && <p>Checking the spec and testing valid and invalid examples…</p>}
+        {current && state?.phase === "error" && <p className="text-bad" role="alert">{state.message}</p>}
+      </div>
+      {preview && (
+        <div className="mt-5 flex flex-col gap-3 border-t border-edge pt-4">
+          <h3 className="text-[14px] font-semibold text-ink">{preview.phase === "posted" ? "Challenge launched" : "Your challenge spec"}</h3>
+          <p className="text-[13px] leading-relaxed whitespace-pre-wrap text-ink">{preview.statement}</p>
+          <p className="text-[12.5px] text-ink-2">{preview.unit}</p>
+          <dl className="grid grid-cols-1 gap-3 text-[13px] sm:grid-cols-3">
+            <div><dt className="text-ink-3">Pieces</dt><dd className="mono break-all text-ink">{preview.units}</dd></div>
+            <div><dt className="text-ink-3">Units per piece</dt><dd className="mono break-all text-ink">{preview.unitPrice}</dd></div>
+            <div><dt className="text-ink-3">Total budget</dt><dd className="mono break-all text-ink">{preview.reward}</dd></div>
+          </dl>
+          {preview.notes && <p className="text-[12.5px] text-ink-2">{preview.notes}</p>}
+          <p role="status" className="text-[12.5px] text-ink-2">{preview.message}</p>
+          <details className="text-[12.5px]">
+            <summary className="cursor-pointer text-ink-2">View challenge JSON</summary>
+            <pre className="code mt-2 max-h-80 overflow-auto text-[11.5px]">{preview.spec}</pre>
+          </details>
+          {preview.phase === "posted" ? (
+            <Link href={`/coordination?id=${encodeURIComponent(preview.objectiveId!)}`} className="btn btn-primary self-start">View running challenge →</Link>
+          ) : (
+            <button type="button" className="btn btn-primary self-start" disabled={busy || preview.phase !== "ready"}
+              onClick={() => void act((native) => launchCoordination(native, preview.draftId!))}>
+              {preview.phase === "launching" ? "Launching…" : "Launch challenge"}
+            </button>
+          )}
+        </div>
       )}
     </section>
-  );
-}
-
-function Step({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
-  return (
-    <div className="flex gap-3">
-      <span className="mono flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[11px] text-accent">
-        {n}
-      </span>
-      <div className="min-w-0">
-        <div className="text-[13px] font-medium text-ink">{title}</div>
-        <div className="mt-0.5 text-[12.5px] leading-relaxed text-ink-2">{children}</div>
-      </div>
-    </div>
   );
 }
 
