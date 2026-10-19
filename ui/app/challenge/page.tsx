@@ -760,7 +760,7 @@ function WorkOnThis({
             ? "Different machines can work different slices at the same time."
             : "The checker decides whether an answer moves the result forward."}
         </p>
-        <WorkPanel objective={id} base={base ?? ""} onChooseSolver={bridge ? configureWorker : undefined} />
+        <WorkPanel objective={id} base={base ?? ""} onConfigureWorker={bridge ? configureWorker : undefined} />
         {appError && <p className="text-[12px] text-warn" role="alert">{appError}</p>}
         <div className="border-t border-edge pt-4">
           <h3 className="text-[13px] font-semibold text-ink">Solve with an agent</h3>
