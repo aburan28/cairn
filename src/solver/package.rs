@@ -60,6 +60,7 @@ pub fn verify_file(dir: &Path, path: &str, entry: &FileEntry) -> Result<(), Inva
     if !manifest::valid_path(path) {
         return Err(Invalid(format!("{path:?} is not a package path")));
     }
+    verify_parent_directories(dir, path)?;
     let full = dir.join(path);
     let meta = fs::symlink_metadata(&full).map_err(|e| Invalid(format!("{path}: {e}")))?;
     if !meta.file_type().is_file() {
@@ -79,6 +80,32 @@ pub fn verify_file(dir: &Path, path: &str, entry: &FileEntry) -> Result<(), Inva
             "{path} hashes to {actual}; solver.json pins {}",
             entry.hex()
         )));
+    }
+    Ok(())
+}
+
+/// Refuse symlinked package roots and parent components. Checking only the
+/// final file with `symlink_metadata` still follows a symlink in `subdir` for
+/// a path such as `subdir/solver.py`.
+fn verify_parent_directories(dir: &Path, path: &str) -> Result<(), Invalid> {
+    let root = fs::symlink_metadata(dir).map_err(|e| Invalid(format!("{}: {e}", dir.display())))?;
+    if !root.file_type().is_dir() {
+        return Err(Invalid(format!(
+            "{} is not a package directory",
+            dir.display()
+        )));
+    }
+
+    let parts: Vec<_> = path.split('/').collect();
+    let mut parent = dir.to_path_buf();
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        parent.push(part);
+        let meta = fs::symlink_metadata(&parent).map_err(|e| Invalid(format!("{path}: {e}")))?;
+        if !meta.file_type().is_dir() {
+            return Err(Invalid(format!(
+                "{path} has a non-directory or symlink parent"
+            )));
+        }
     }
     Ok(())
 }
@@ -123,9 +150,9 @@ pub fn pack(dir: &Path) -> Result<Manifest, Invalid> {
 fn walk(root: &Path, dir: &Path, files: &mut BTreeMap<String, Value>) -> Result<(), Invalid> {
     let entries = fs::read_dir(dir).map_err(|e| Invalid(format!("{}: {e}", dir.display())))?;
     let mut names: Vec<_> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .collect();
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<_>>()
+        .map_err(|e| Invalid(format!("{}: {e}", dir.display())))?;
     names.sort();
     for path in names {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -179,6 +206,8 @@ pub fn install(package: &Package, into: &Path) -> Result<(), Invalid> {
     let io = |e: std::io::Error| Invalid(format!("{}: {e}", into.display()));
     fs::create_dir(into).map_err(io)?;
     for (path, entry) in &package.manifest.files {
+        // The source tree may have changed since `Package::at` checked it.
+        verify_file(&package.dir, path, entry)?;
         let to = into.join(path);
         if let Some(parent) = to.parent() {
             fs::create_dir_all(parent).map_err(io)?;
