@@ -36,16 +36,30 @@ def main(argv=None):
     spec = importlib.util.spec_from_file_location("auditor_installed_dp_ingest", source)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    os.environ["DATABASE_URL"] = module.databaseUrl()
-    try:
-        with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=10) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute("SHOW transaction_read_only")
-                if cursor.fetchone()[0] != "on":
-                    raise RuntimeError("auditor database connection is not read-only")
-        return period_candidate.main(candidate_args)
-    finally:
-        os.environ.pop("DATABASE_URL", None)
+    database_url = module.databaseUrl()
+    with psycopg.connect(database_url, connect_timeout=10) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SHOW transaction_read_only")
+            if cursor.fetchone()[0] != "on":
+                raise RuntimeError("auditor database connection is not read-only")
+
+    collect = period_candidate.service.collect
+
+    def collect_with_private_url(args):
+        # The existing collector reads this name. Keep it out of the long-lived
+        # watcher's environment between short, bounded collection calls.
+        previous = os.environ.get("DATABASE_URL")
+        os.environ["DATABASE_URL"] = database_url
+        try:
+            return collect(args)
+        finally:
+            if previous is None:
+                os.environ.pop("DATABASE_URL", None)
+            else:
+                os.environ["DATABASE_URL"] = previous
+
+    period_candidate.service.collect = collect_with_private_url
+    return period_candidate.main(candidate_args)
 
 
 if __name__ == "__main__":
