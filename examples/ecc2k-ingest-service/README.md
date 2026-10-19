@@ -209,9 +209,15 @@ version retention for durable audits.
 From the Cairn repository root:
 
 ```sh
-python3 -m unittest discover -s examples/ecc2k-ingest-service -p 'test_*.py'
+python3 -m venv .scratch/ci-ecc2k-venv
+.scratch/ci-ecc2k-venv/bin/python -m pip install --disable-pip-version-check --no-input 'cryptography==48.0.0'
+.scratch/ci-ecc2k-venv/bin/python -m unittest discover -s examples/ecc2k-ingest-service -p 'test_*.py'
 ./scripts/ecc2k-ingest-service-demo.sh
 ```
+
+The CI `examples` job runs the same isolated test command before validating
+the pinned example objectives. The Python suite uses fake AWS/PostgreSQL
+clients; it does not access live service credentials or infrastructure.
 
 The demo creates an ephemeral auditor key, two status snapshots, an input
 manifest and a matching progress export; it builds the pinned objective,
