@@ -818,13 +818,52 @@ impl Lab {
 
     /// Write a new op authored by `identity`, depending on every current head.
     pub fn append(&mut self, identity: &Identity, body: Body) -> Result<Op, LabError> {
+        self.append_generated(identity, &[], |_| Ok(Some(body)))?
+            .ok_or_else(|| LabError::Corrupt("append unexpectedly produced no op".into()))
+    }
+
+    /// Preserve explicit observations even when the space has more heads than
+    /// fit in an op. Otherwise a positional collaboration edit could be signed
+    /// without the history its character anchors require.
+    pub(super) fn append_generated(
+        &mut self,
+        identity: &Identity,
+        observed: &[String],
+        prepare: impl FnOnce(&Lab) -> Result<Option<Body>, LabError>,
+    ) -> Result<Option<Op>, LabError> {
         let _lock = self.lock()?;
         self.refresh()?;
+        // Read/decide/append share one process lock. Concurrent local retries
+        // cannot create two meanings for a request or duplicate checkpoints.
+        let Some(body) = prepare(self)? else {
+            return Ok(None);
+        };
         let space = self
             .space
             .clone()
             .ok_or_else(|| LabError::Corrupt("lab has no space id".into()))?;
-        let deps = self.chosen_deps();
+        let mut deps = Vec::new();
+        for id in observed {
+            if self.get(id).is_none() {
+                return Err(LabError::Unavailable(format!("missing observed op {id}")));
+            }
+            if !deps.contains(id) {
+                deps.push(id.clone());
+            }
+        }
+        if deps.len() > MAX_DEPS {
+            return Err(LabError::Refused(format!(
+                "an edit can observe at most {MAX_DEPS} independent heads"
+            )));
+        }
+        for id in self.chosen_deps() {
+            if deps.len() == MAX_DEPS {
+                break;
+            }
+            if !deps.contains(&id) {
+                deps.push(id);
+            }
+        }
         let lamport = self
             .max_lamport
             .checked_add(1)
@@ -840,7 +879,7 @@ impl Lab {
         self.check(&op)?;
         self.write_lines(std::slice::from_ref(&op))?;
         self.admit_checked(op.clone());
-        Ok(op)
+        Ok(Some(op))
     }
 
     /// The heads a new op depends on. All of them, up to [`MAX_DEPS`]; past

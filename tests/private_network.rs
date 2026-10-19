@@ -64,7 +64,9 @@ fn address() -> SocketAddr {
         // The listener must close before the child binds. Under parallel CI,
         // the OS sometimes reassigns that just-freed port to another test's
         // child. Never hand out the same port twice within this test process.
-        if used.lock().unwrap().insert(address.port()) {
+        let first_issue = used.lock().unwrap().insert(address.port());
+        drop(listener);
+        if first_issue {
             return address;
         }
     }

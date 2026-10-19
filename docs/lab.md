@@ -4,6 +4,10 @@
 `tests/lab.rs`, `scripts/lab-demo.sh`, and the environment recipes in
 `examples/lab/`. What is *not* built is listed at the end, not implied.
 
+For character-level live source editing, task lanes and explicit integration,
+see [Live collaboration](live-collaboration.md). Ordinary lab file registers
+keep their existing conflict semantics; the new text protocol is opt-in.
+
 The ledger (`src/ledger.rs`) is where results are **settled**: one sequencer,
 a hash chain, verifiers anyone can re-run, money. The lab is where research
 **happens before that**: goals, hypotheses, protocols, run outputs, reviews,

@@ -79,8 +79,10 @@ whose subcommands (`run`, `mcp`, `p2p`, `serve`, `gen-bootstrap`, `seeds`,
 replace what used to ship as separate executables — to `~/.local/bin`.
 `--version` pins a release, `--bin-dir` picks somewhere else, and on Linux
 `--libc gnu` takes the dynamically-linked build instead of the static musl one.
-Linux amd64/arm64 and macOS Intel/Apple Silicon; no Windows, because the
-verifier sandbox is seatbelt and bubblewrap.
+Linux amd64/arm64 and macOS Intel/Apple Silicon. There is no native Windows
+build, because the verifier sandbox is seatbelt and bubblewrap; on Windows,
+`irm https://github.com/aburan28/cairn/releases/latest/download/install.ps1 | iex`
+installs the Linux release inside WSL 2 (see [docs/install.md](docs/install.md)).
 
 Or a native package, from the
 [releases page](https://github.com/aburan28/cairn/releases/latest):
@@ -627,6 +629,11 @@ a visible conflict instead of a merge-time surprise, immutable records that
 cannot be replaced — and runs experiments in content-addressed root filesystems
 (SageMath, PARI/GP, msolve) under gVisor, recording each run's receipt and
 outputs as one op. It settles nothing; see [docs/lab.md](docs/lab.md).
+
+For live source editing, [collaboration workspaces](docs/live-collaboration.md)
+add Unicode text CRDTs, isolated task lanes, explicit causal integration and
+immutable experiment checkpoints. CLI and MCP agents use the same protocol;
+continuous encrypted sync carries edits between replicas without Git.
 
 What all of this looks like while it runs is the reader's **Network** and
 **Coordination** pages (`/ui/network`, `/ui/coordination?id=…`): whom this

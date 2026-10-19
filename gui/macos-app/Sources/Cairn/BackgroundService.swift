@@ -19,9 +19,10 @@ import Foundation
 /// bootstrap files, limits, fleet settings and environment as the node this
 /// app would spawn, from the same `NodeSettings`, so switching modes changes
 /// who starts the node and nothing about it. The ports are the documented
-/// defaults, 9000 and 8080, and while the service runs the window attaches to
-/// `http://127.0.0.1:8080/ui/` -- the existing attach mode, which is why
-/// quitting the app then stops nothing.
+/// defaults, 9000 and 8080 -- and 8001 for agents when Settings serves them,
+/// since `--no-mcp` turns off stdio and not `--mcp-http` -- and while the
+/// service runs the window attaches to `http://127.0.0.1:8080/ui/` -- the
+/// existing attach mode, which is why quitting the app then stops nothing.
 ///
 /// On macOS 15 and later a process that is not an app cannot ask for the
 /// Local Network permission itself. The node under launchd therefore may be
@@ -71,6 +72,7 @@ enum BackgroundService {
         ]
         arguments += settings.runArguments
         arguments += settings.fleetArguments
+        arguments += settings.agentArguments(port: NodeSettings.agentsPort, signedBy: settings.existingAgentIdentity)
         return [
             "Label": label,
             "ProgramArguments": arguments,

@@ -65,6 +65,9 @@ FILES
     commit DIR --identity FILE [--include GLOB]... [--exclude GLOB]...
     changes DIR [--include GLOB]... [--exclude GLOB]...
 
+LIVE COLLABORATION (no Git repository required)
+    collab help                     workspaces, causal text edits, feeds and checkpoints
+
 DOCS, LEASES, MESSAGES
     doc DOC [--json]                fields of a doc
     doc set DOC KEY JSON --identity FILE
@@ -93,6 +96,7 @@ ENVIRONMENTS AND RUNS
 SYNC
     sync --dir PATH                 reconcile with another lab directory
     sync --peer ID@HOST:PORT --peer-identity FILE
+         [--watch --interval-ms 250] continuously reconcile, reconnecting if interrupted
     serve --listen ADDR --peer-identity FILE [--allow PEERID]... [--open]
     peer-id --peer-identity FILE    this machine's transport id (created if absent)
     bundle --out FILE [--have FILE] write ops (and their blobs) to one file
@@ -314,6 +318,7 @@ fn run(args: Vec<String>, out: &mut dyn io::Write) -> Result<i32, CliError> {
         "checkout" => cmd_checkout(&dir, &mut args, out),
         "commit" => cmd_commit(&dir, &mut args, out),
         "changes" => cmd_changes(&dir, &mut args, out),
+        "collab" => cmd_collab(&dir, &mut args, out),
         "doc" => cmd_doc(&dir, &mut args, out),
         "claim" => cmd_claim(&dir, &mut args, out),
         "release" => cmd_release(&dir, &mut args, out),
@@ -1716,6 +1721,209 @@ fn cmd_sandbox(out: &mut dyn io::Write) -> Result<i32, CliError> {
 
 // -- sync -------------------------------------------------------------------------------
 
+fn read_collab_json(path: &str) -> Result<serde_json::Value, CliError> {
+    let mut data = String::new();
+    fs::File::open(path)?
+        .take(8 * 1024 * 1024 + 1)
+        .read_to_string(&mut data)?;
+    if data.len() > 8 * 1024 * 1024 {
+        return usage("collaboration JSON exceeds 8 MiB");
+    }
+    serde_json::from_str(&data).map_err(|e| CliError::Usage(format!("{path}: {e}")))
+}
+
+fn collab_heads(path: &str, field: &str) -> Result<serde_json::Value, CliError> {
+    let json = read_collab_json(path)?;
+    let heads = if json.is_array() {
+        json
+    } else {
+        json.get(field)
+            .cloned()
+            .ok_or_else(|| CliError::Usage(format!("{path} needs a {field} array")))?
+    };
+    if !heads.is_array() {
+        return usage(format!("{path}: {field} must be an array"));
+    }
+    Ok(heads)
+}
+
+fn cmd_collab(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32, CliError> {
+    use serde_json::{json, Value as Json};
+    let command = args.next().unwrap_or_else(|| "help".into());
+    if matches!(command.as_str(), "help" | "--help" | "-h") {
+        say(out, "Live text workspaces, independent of Git. JSON output; positions count Unicode scalars.\n\
+list\ncreate TITLE [--base SNAPSHOT.json] --request ID --identity FILE\n\
+read WORKSPACE [--base SNAPSHOT.json] [--metadata]\n\
+edit WORKSPACE --base SNAPSHOT.json --edits EDITS.json --request ID --identity FILE\n\
+integrate WORKSPACE --base TARGET.json --source SOURCE.json --request ID --identity FILE\n\
+feed WORKSPACE [--cursor FEED.json] [--limit 128] [--watch --interval-ms 250]\n\
+checkpoint WORKSPACE --base SNAPSHOT.json --identity FILE\n\
+checkout WORKSPACE NEW_DIRECTORY [--base SNAPSHOT.json]\n\
+request-id\n\
+Keep the same request ID through retries. Editing uses exactly the supplied base.\n\
+Run lab sync --watch for encrypted continuous replication between machines.");
+        return Ok(0);
+    }
+    let parsed = args.rest(&[
+        "base",
+        "source",
+        "cursor",
+        "edits",
+        "request",
+        "identity",
+        "limit",
+        "interval-ms",
+        "rounds",
+    ])?;
+    let (flags, switches, positions): (&[&str], &[&str], usize) = match command.as_str() {
+        "request-id" | "list" => (&[], &[], 0),
+        "create" => (&["base", "request", "identity"], &[], 1),
+        "read" => (&["base"], &["metadata"], 1),
+        "checkout" => (&["base"], &[], 2),
+        "edit" => (&["base", "edits", "request", "identity"], &[], 1),
+        "integrate" => (&["base", "source", "request", "identity"], &[], 1),
+        "checkpoint" => (&["base", "identity"], &[], 1),
+        "feed" => (&["cursor", "limit", "interval-ms", "rounds"], &["watch"], 1),
+        _ => {
+            return usage(format!(
+                "unknown collaboration command {command:?}; see lab collab help"
+            ))
+        }
+    };
+    parsed.reject_unknown(switches)?;
+    for key in parsed.values.keys() {
+        if !flags.contains(&key.as_str()) {
+            return usage(format!("--{key} is not valid for collab {command}"));
+        }
+    }
+    if parsed.positional.len() != positions || !parsed.trailing.is_empty() {
+        return usage(format!(
+            "collab {command} expects {positions} positional argument(s); see lab collab help"
+        ));
+    }
+    if !parsed.has("watch")
+        && (parsed.one("rounds").is_some() || parsed.one("interval-ms").is_some())
+    {
+        return usage("--rounds and --interval-ms require --watch");
+    }
+    if command == "request-id" {
+        say(out, super::collab::request_id()?);
+        return Ok(0);
+    }
+    let mut lab = Lab::open(dir)?;
+    let mut params = json!({});
+    if !matches!(command.as_str(), "list" | "create") {
+        params["workspace"] = json!(parsed.positional(0, "WORKSPACE")?);
+    }
+    match command.as_str() {
+        "list" => {}
+        "create" => {
+            params["title"] = json!(parsed.positional(0, "TITLE")?);
+            params["request"] = json!(parsed.need("request")?);
+            if let Some(path) = parsed.one("base") {
+                params["base"] = collab_heads(path, "heads")?;
+            }
+        }
+        "read" | "checkout" => {
+            if let Some(path) = parsed.one("base") {
+                params["heads"] = collab_heads(path, "heads")?;
+            }
+            params["contents"] = json!(!parsed.has("metadata"));
+        }
+        "edit" => {
+            params["heads"] = collab_heads(parsed.need("base")?, "heads")?;
+            params["edits"] = read_collab_json(parsed.need("edits")?)?;
+            params["request"] = json!(parsed.need("request")?);
+        }
+        "checkpoint" => {
+            params["heads"] = collab_heads(parsed.need("base")?, "heads")?;
+        }
+        "integrate" => {
+            params["heads"] = collab_heads(parsed.need("base")?, "heads")?;
+            params["source"] = collab_heads(parsed.need("source")?, "heads")?;
+            params["request"] = json!(parsed.need("request")?);
+        }
+        "feed" => {
+            if let Some(path) = parsed.one("cursor") {
+                params["cursor"] = collab_heads(path, "cursor")?;
+            }
+            params["limit"] = json!(parsed.u64_flag("limit", 128)?);
+        }
+        _ => {
+            return usage(format!(
+                "unknown collaboration command {command:?}; see lab collab help"
+            ))
+        }
+    }
+    let identity = if matches!(
+        command.as_str(),
+        "create" | "edit" | "integrate" | "checkpoint"
+    ) {
+        Some(load_identity(parsed.one("identity"))?)
+    } else {
+        None
+    };
+    if command == "checkout" {
+        let graph = super::collab::Graph::load(&lab)?;
+        let base = parsed
+            .one("base")
+            .map(|path| collab_heads(path, "heads"))
+            .transpose()?;
+        let heads = base
+            .as_ref()
+            .map(|v| {
+                v.as_array()
+                    .expect("checked array")
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::to_string)
+                            .ok_or_else(|| CliError::Usage("heads must be strings".into()))
+                    })
+                    .collect::<Result<BTreeSet<_>, _>>()
+            })
+            .transpose()?;
+        let snapshot = graph.snapshot(parsed.positional(0, "WORKSPACE")?, heads.as_ref())?;
+        let target = Path::new(parsed.positional(1, "NEW_DIRECTORY")?);
+        super::collab::checkout(&snapshot, target)?;
+        say(
+            out,
+            json!({"directory":target,"revision":snapshot.revision}).to_string(),
+        );
+        return Ok(0);
+    }
+    if parsed.has("watch") && command != "feed" {
+        return usage("--watch is only valid for collab feed");
+    }
+    let interval = parsed.u64_flag("interval-ms", 250)?;
+    if !(50..=60_000).contains(&interval) {
+        return usage("--interval-ms must be 50..=60000");
+    }
+    let rounds = parsed.u64_flag("rounds", u64::MAX)?;
+    if rounds == 0 {
+        return usage("--rounds must be positive");
+    }
+    let mut previous_issues = Json::Null;
+    for round in 0..rounds {
+        let result = super::collab::call(&mut lab, identity.as_ref(), &command, &params)?;
+        let changed = result["changes"].as_array().is_some_and(|v| !v.is_empty());
+        if (round == 0 || !parsed.has("watch") || changed || result["issues"] != previous_issues)
+            && (writeln!(out, "{result}").is_err() || out.flush().is_err())
+        {
+            return Ok(0);
+        }
+        previous_issues = result["issues"].clone();
+        if !parsed.has("watch") || round + 1 == rounds {
+            break;
+        }
+        params["cursor"] = result["cursor"].clone();
+        if !result["more"].as_bool().unwrap_or(false) {
+            std::thread::sleep(Duration::from_millis(interval));
+        }
+    }
+    Ok(0)
+}
+
 fn sync_with(lab: &mut Lab, parsed: &Parsed) -> Result<sync::SyncReport, CliError> {
     match (parsed.one("dir"), parsed.one("peer")) {
         (Some(other), None) => {
@@ -1765,11 +1973,114 @@ fn print_sync(out: &mut dyn io::Write, report: &sync::SyncReport) {
 }
 
 fn cmd_sync(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32, CliError> {
-    let parsed = args.rest(&["dir", "peer", "peer-identity"])?;
+    let parsed = args.rest(&["dir", "peer", "peer-identity", "interval-ms", "rounds"])?;
+    parsed.reject_unknown(&["watch"])?;
     let mut lab = Lab::open(dir)?;
+    if parsed.has("watch") {
+        return watch_sync(&mut lab, &parsed, out);
+    }
+    if parsed.one("interval-ms").is_some() || parsed.one("rounds").is_some() {
+        return usage("--interval-ms and --rounds require --watch");
+    }
     let report = sync_with(&mut lab, &parsed)?;
     print_sync(out, &report);
     Ok(if report.ops_refused.is_empty() { 0 } else { 1 })
+}
+
+fn watch_sync(lab: &mut Lab, parsed: &Parsed, out: &mut dyn io::Write) -> Result<i32, CliError> {
+    let interval = parsed.u64_flag("interval-ms", 250)?;
+    if !(50..=60_000).contains(&interval) {
+        return usage("--interval-ms must be 50..=60000");
+    }
+    let rounds = parsed.u64_flag("rounds", u64::MAX)?;
+    if rounds == 0 {
+        return usage("--rounds must be positive");
+    }
+    let mut directory = match (parsed.one("dir"), parsed.one("peer")) {
+        (Some(path), None) => Some(Lab::open(Path::new(path))?),
+        (None, Some(_)) => None,
+        _ => return usage("give exactly one of --dir PATH and --peer ID@HOST:PORT"),
+    };
+    let network = if let Some(peer) = parsed.one("peer") {
+        let (id, address) = peer
+            .split_once('@')
+            .ok_or_else(|| CliError::Usage("--peer must be ID@HOST:PORT".into()))?;
+        // Reject bad pins before entering a reconnect loop.
+        let id = op::key_hex(id).map_err(|e| CliError::Usage(e.0))?;
+        Some((
+            id,
+            resolve_addr(address)?,
+            load_peer_identity(Path::new(parsed.need("peer-identity")?))?,
+        ))
+    } else {
+        None
+    };
+    let mut connection = None;
+    let mut last_error = None;
+    let mut backoff = interval;
+    let mut failed = false;
+    for round in 0..rounds {
+        let result = if let Some(other) = &mut directory {
+            sync::sync(lab, other)
+        } else {
+            let (id, address, identity) = network.as_ref().expect("validated target");
+            if connection.is_none() {
+                match RemotePeer::connect(*address, id, identity) {
+                    Ok(peer) => connection = Some(peer),
+                    Err(error) => {
+                        if last_error.as_ref() != Some(&error.to_string()) {
+                            say(out, format!("sync disconnected: {error}; retrying"));
+                        }
+                        last_error = Some(error.to_string());
+                        failed = true;
+                        if round + 1 < rounds {
+                            std::thread::sleep(Duration::from_millis(backoff));
+                        }
+                        backoff = backoff.saturating_mul(2).min(30_000);
+                        continue;
+                    }
+                }
+            }
+            sync::sync(lab, connection.as_mut().expect("connected"))
+        };
+        match result {
+            Ok(report) => {
+                if last_error.take().is_some() {
+                    say(out, "sync reconnected");
+                }
+                failed = !report.ops_refused.is_empty();
+                backoff = interval;
+                if round == 0
+                    || report.ops_received > 0
+                    || report.ops_sent > 0
+                    || report.blobs_received > 0
+                    || report.blobs_sent > 0
+                    || failed
+                {
+                    print_sync(out, &report);
+                }
+            }
+            Err(error) => {
+                if directory.is_some() {
+                    return Err(error.into());
+                }
+                connection = None;
+                failed = true;
+                if last_error.as_ref() != Some(&error.to_string()) {
+                    say(out, format!("sync disconnected: {error}; retrying"));
+                }
+                last_error = Some(error.to_string());
+                backoff = backoff.saturating_mul(2).min(30_000);
+            }
+        }
+        if out.flush().is_err() {
+            return Ok(0);
+        }
+        if round + 1 < rounds {
+            std::thread::sleep(Duration::from_millis(backoff));
+        }
+    }
+    Ok(i32::from(failed))
 }
 
 fn cmd_serve(dir: &Path, args: &mut Args) -> Result<i32, CliError> {

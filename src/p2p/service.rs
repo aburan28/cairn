@@ -1149,7 +1149,32 @@ impl Service {
         inbound: transport::Inbound,
         node: &mut Node,
     ) -> Result<PeerId, ServiceError> {
-        let mut connection = inbound.complete(&self.identity)?;
+        let connection = self.authenticate_inbound(inbound)?;
+        self.serve_authenticated_once(connection, node)
+    }
+
+    /// Complete authentication and the peer allowlist check without a ledger
+    /// lock. A daemon can then arbitrate a busy node using the verified peer
+    /// identity, rather than blocking or trusting a claimed hello identity.
+    pub fn authenticate_inbound(
+        &self,
+        inbound: transport::Inbound,
+    ) -> Result<transport::Connection, ServiceError> {
+        let connection = inbound.complete(&self.identity)?;
+        let remote = connection.remote();
+        if !self.allows(&remote) {
+            return Err(ServiceError::NotAllowed(remote));
+        }
+        Ok(connection)
+    }
+
+    /// Serve a connection authenticated before acquiring the caller's node.
+    /// The allowlist is still checked here for callers using this entry point.
+    pub fn serve_authenticated_once(
+        &self,
+        mut connection: transport::Connection,
+        node: &mut Node,
+    ) -> Result<PeerId, ServiceError> {
         let remote = connection.remote();
         if !self.allows(&remote) {
             return Err(ServiceError::NotAllowed(remote));
@@ -1186,12 +1211,27 @@ impl Service {
         node: &mut Node,
         population: &mut Population,
         limits: PopLimits,
+        rescore: F,
+    ) -> Result<(PeerId, PopReport), ServiceError>
+    where
+        F: FnMut(&Node, &Candidate) -> Option<i64>,
+    {
+        let connection = self.authenticate_inbound(inbound)?;
+        self.serve_authenticated_and_population(connection, node, population, limits, rescore)
+    }
+
+    /// Population rounds on a connection authenticated before the node lock.
+    pub fn serve_authenticated_and_population<F>(
+        &self,
+        mut connection: transport::Connection,
+        node: &mut Node,
+        population: &mut Population,
+        limits: PopLimits,
         mut rescore: F,
     ) -> Result<(PeerId, PopReport), ServiceError>
     where
         F: FnMut(&Node, &Candidate) -> Option<i64>,
     {
-        let mut connection = inbound.complete(&self.identity)?;
         let remote = connection.remote();
         if !self.allows(&remote) {
             return Err(ServiceError::NotAllowed(remote));
