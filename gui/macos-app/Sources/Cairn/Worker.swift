@@ -7,6 +7,12 @@ import Foundation
 /// work" was a shell line to copy into a terminal, in a window whose whole
 /// point is that there is no terminal. The line is the same; the app now
 /// runs it.
+///
+/// There is no program in it. The solver is the one the objective's author
+/// published (`--package auto`): `cairn work` fetches it from the node,
+/// checks every file against its pin, runs its tests on this Mac and runs
+/// each round in the sandbox. A person sharing their Mac chooses resources,
+/// never an executable.
 struct WorkPlan: Equatable {
     /// The node's HTTP address, `http://host:port`. This node's own by
     /// default; another node's when this Mac works for a node elsewhere.
@@ -19,9 +25,9 @@ struct WorkPlan: Equatable {
     /// A key this Mac holds, so the pay lands on it rather than on a bare
     /// name anyone could use. Nil signs nothing and is paid to `worker`.
     var identity: String?
-    /// The solver's path and its own arguments.
-    var solver: String
-    var solverArguments: [String] = []
+    /// `auto` for the package the node offers for this objective, or one
+    /// package's id.
+    var package: String = "auto"
     var threads: Int? = nil
     /// GPU indices, or an empty string to explicitly offer CPU only.
     var gpus: String? = nil
@@ -47,7 +53,7 @@ struct WorkPlan: Equatable {
         if let threads { args += ["--threads", String(threads)] }
         if let gpus { args += ["--gpus", gpus.isEmpty ? "none" : gpus] }
         if let hoursPerDay, hoursPerDay < 24 { args += ["--hours-per-day", String(hoursPerDay)] }
-        return args + ["--", solver] + solverArguments
+        return args + ["--package", package]
     }
 
     /// Why this cannot start, in the sheet's words, or nil when it can.
@@ -65,9 +71,8 @@ struct WorkPlan: Equatable {
                 return "GPU numbers must be unique, separated by commas."
             }
         }
-        guard !solver.isEmpty else { return "Choose a solver: the program that searches for answers." }
-        guard FileManager.default.isExecutableFile(atPath: solver) else {
-            return "\(solver) is not a program this Mac can run."
+        guard package == "auto" || PageRequest.isObjectiveId(package) else {
+            return "The solver is the one published for this objective."
         }
         return nil
     }
@@ -89,31 +94,27 @@ struct WorkPlan: Equatable {
         let cleaned = cleanName(name)
         return cleaned.isEmpty ? "this-mac" : cleaned
     }
+}
 
-    /// The solver's arguments as typed into one field. Split on whitespace,
-    /// with single or double quotes keeping an argument together; no other
-    /// shell syntax, because nothing here goes through a shell.
-    static func splitArguments(_ text: String) -> [String] {
-        var args: [String] = []
-        var current = ""
-        var quote: Character?
-        var open = false
-        for ch in text {
-            if let q = quote {
-                if ch == q { quote = nil } else { current.append(ch) }
-            } else if ch == "\"" || ch == "'" {
-                quote = ch
-                open = true
-            } else if ch.isWhitespace {
-                if open || !current.isEmpty { args.append(current) }
-                current = ""
-                open = false
-            } else {
-                current.append(ch)
-            }
-        }
-        if open || !current.isEmpty { args.append(current) }
-        return args
+/// The solver an objective's row says the node offers: `solver` on
+/// `GET /objectives`. `ready` is false when the objective pins a package this
+/// node does not hold.
+struct WorkSolver: Equatable {
+    let package: String
+    let name: String
+    let version: String
+    let pinned: Bool
+    let ready: Bool
+
+    static func parse(_ value: Any?) -> WorkSolver? {
+        guard let row = value as? [String: Any],
+              let package = row["package"] as? String, PageRequest.isObjectiveId(package)
+        else { return nil }
+        return WorkSolver(package: package,
+                          name: row["name"] as? String ?? "",
+                          version: row["version"] as? String ?? "",
+                          pinned: row["pinned"] as? Bool ?? false,
+                          ready: row["ready"] as? Bool ?? false)
     }
 }
 
@@ -124,6 +125,10 @@ struct WorkObjective: Identifiable, Equatable {
     let open: Bool
     let workerLabel: String
     let resourceLabel: String
+    var solver: WorkSolver? = nil
+
+    /// Whether pressing Start has something to run.
+    var canStart: Bool { solver?.ready == true }
 
     /// The open objectives, as the reader's Objectives page would list
     /// them. Settled ones are left out: a worker on one is refused every
@@ -138,9 +143,17 @@ struct WorkObjective: Identifiable, Equatable {
             let worker = capabilities?["worker"] as? [String: Any]
             let workerMode = worker?["mode"] as? String
             let workerId = worker?["id"] as? String
-            let workerLabel = workerMode == "built_in"
-                ? "Cairn worker\(workerId.map { ": \($0)" } ?? "")"
-                : "external worker"
+            let solver = WorkSolver.parse(row["solver"])
+            let workerLabel: String
+            if let solver, solver.ready {
+                workerLabel = "\(solver.name) \(solver.version)"
+            } else if solver != nil {
+                workerLabel = "solver not on this node"
+            } else if workerMode == "built_in" {
+                workerLabel = "Cairn worker\(workerId.map { ": \($0)" } ?? "")"
+            } else {
+                workerLabel = "no published solver"
+            }
             let resources = capabilities?["resources"] as? [String: Any] ?? [:]
             let resourceLabel = [
                 (resources["cpus"] as? Int).map { "\($0) CPU\($0 == 1 ? "" : "s")" },
@@ -151,7 +164,8 @@ struct WorkObjective: Identifiable, Equatable {
                                                       statement: row["statement"] as? String, id: id),
                                  open: open,
                                  workerLabel: workerLabel,
-                                 resourceLabel: resourceLabel.isEmpty ? "the node's offer" : resourceLabel)
+                                 resourceLabel: resourceLabel.isEmpty ? "the node's offer" : resourceLabel,
+                                 solver: solver)
         }
     }
 
@@ -330,9 +344,6 @@ final class Worker: ObservableObject {
         let p = Process()
         p.executableURL = binary
         p.arguments = plan.arguments
-        // Beside the solver, so a solver that reads its own files by a
-        // relative path finds them, as it would from a terminal there.
-        p.currentDirectoryURL = URL(fileURLWithPath: plan.solver).deletingLastPathComponent()
         p.environment = environment
         // Nothing to say to it; closing stdin at once keeps a solver that
         // reads past its assignment from waiting on this app.

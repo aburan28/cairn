@@ -3,7 +3,9 @@
 //! The verifier module spawns three kinds of child: pinned checker/evaluator/
 //! statistic source, a `replay` command, and `lean` on a submitted proof. All
 //! three execute code that somebody other than the node operator wrote, so all
-//! three go through here.
+//! three go through here. So does a fourth, outside this module: every round
+//! of a published solver package ([`crate::solver::run`]), which runs a
+//! stranger's program on a contributor's machine for hours rather than seconds.
 //!
 //! # What this is and is not
 //!
@@ -108,6 +110,12 @@ pub struct Confinement<'a> {
     /// unlike the memory cap it cannot fail a checker that stays inside its
     /// own `RLIMIT_CPU`, so nothing needs to opt out.
     pub cpus: u32,
+    /// Variables set on top of whatever environment the child gets. Through
+    /// the plan rather than on the returned [`Command`], because bubblewrap
+    /// clears the environment *inside* the jail: a variable set on the `bwrap`
+    /// process never reaches the program. A solver's `CAIRN_*` contract
+    /// travels this way.
+    pub extra_env: Vec<(OsString, OsString)>,
 }
 
 impl<'a> Confinement<'a> {
@@ -121,6 +129,7 @@ impl<'a> Confinement<'a> {
             cpu_seconds,
             memory_mb: 0,
             cpus: super::limits::configured_cpus(),
+            extra_env: Vec::new(),
         }
     }
 
@@ -144,6 +153,15 @@ impl<'a> Confinement<'a> {
 
     pub fn scrubbed(mut self) -> Confinement<'a> {
         self.scrub_env = true;
+        self
+    }
+
+    pub fn with_env(
+        mut self,
+        key: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) -> Confinement<'a> {
+        self.extra_env.push((key.into(), value.into()));
         self
     }
 
@@ -409,6 +427,9 @@ fn bubblewrap(
         }
     } else {
         command.arg("--setenv").arg("TMPDIR").arg(plan.workdir);
+        for (key, value) in &plan.extra_env {
+            command.arg("--setenv").arg(key).arg(value);
+        }
     }
 
     command.arg("--").arg(bin).args(argv);
@@ -899,6 +920,9 @@ fn apply_env(command: &mut Command, plan: &Confinement<'_>, scrub_env: bool) {
         }
     } else {
         command.env("TMPDIR", plan.workdir);
+        for (key, value) in &plan.extra_env {
+            command.env(key, value);
+        }
     }
 }
 
@@ -913,7 +937,7 @@ fn apply_env(command: &mut Command, plan: &Confinement<'_>, scrub_env: bool) {
 fn minimal_env(plan: &Confinement<'_>) -> Vec<(OsString, OsString)> {
     let path =
         std::env::var_os("PATH").unwrap_or_else(|| OsString::from("/usr/local/bin:/usr/bin:/bin"));
-    vec![
+    let mut env = vec![
         (OsString::from("PATH"), path),
         (OsString::from("LANG"), OsString::from("C.UTF-8")),
         (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
@@ -931,7 +955,9 @@ fn minimal_env(plan: &Confinement<'_>) -> Vec<(OsString, OsString)> {
             OsString::from("PYTHONDONTWRITEBYTECODE"),
             OsString::from("1"),
         ),
-    ]
+    ];
+    env.extend(plan.extra_env.iter().cloned());
+    env
 }
 
 fn resolve(path: &Path) -> PathBuf {

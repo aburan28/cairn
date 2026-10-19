@@ -206,8 +206,8 @@ struct SettingsView: View {
                     readers see on the Network page. None of them gives this node a say \
                     over what is paid: only an objective's pinned checker decides that. \
                     Solving challenges is done by you, your agent (Node ▸ Connect an \
-                    Agent…) or your solver (Node ▸ Share this Mac…), and is paid when \
-                    an answer is accepted. The Contribute page in the window explains \
+                    Agent…) or the solver a challenge's author published (Node ▸ Share \
+                    this Mac…), and is paid when an answer is accepted. The Contribute page in the window explains \
                     every role, how each one is paid, and has a button for each.
                     """)
             }
@@ -420,8 +420,8 @@ struct SettingsView: View {
             Caption("""
                 Same as "Share this node on my network" below. Each machine opens \
                 Contribute in its own Cairn.app and chooses Share this Mac… with \
-                this node's address, and is paid for what the \
-                checker accepts, like any solver.
+                this node's address, runs the solver this node offers for the \
+                challenge, and is paid for what the checker accepts.
                 """)
             Toggle("Relay — let other nodes connect to this one", isOn: relay)
             Caption("""

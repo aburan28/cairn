@@ -334,9 +334,26 @@ enables and starts it; `uninstall [--purge]` reverses that. Every flag has a
 documents CPU preflight, rate selection, `POST /compute/quote` and the
 allocation estimates retained in executor receipts.
 
+### `work --node URL --objective ID --worker NAME [options] --package auto`
+
+Work one objective with the solver its author published, choosing nothing:
+`--package auto` asks the node which package to run (`GET /solvers?objective=`:
+the one the objective pins, else the newest approach that passed there),
+downloads it into `~/.cairn/solvers` (`--package-cache DIR`), hashes every
+file against the package id, runs the package's known-answer tests on this
+machine, and then runs every round in the sandbox with no network and none of
+your files, held to `--threads`. `--package sha256:…` picks one particular
+package the node offers. A package that fails its tests here never runs a
+round here; a host with no sandbox refuses to run one unless
+`--allow-unjailed` is given (development only). Everything below about rounds,
+commitments, heartbeats, stopping and offering compute applies unchanged.
+[solvers.md](solvers.md) is the package format and the interface;
+`scripts/solver-demo.sh` runs it end to end.
+
 ### `work --node URL --objective ID --worker NAME [options] -- SOLVER [ARGS]...`
 
-Work one objective from this machine with a solver you supply. Each round
+Work one objective from this machine with a solver you supply. It runs as
+your own program, outside the sandbox, with your environment. Each round
 takes this worker's slice from `GET /work_assignment`, starts the solver with
 the assignment as one line of JSON on stdin (and in `CAIRN_ASSIGNMENT`, beside
 `CAIRN_NODE`, `CAIRN_OBJECTIVE`, `CAIRN_WORKER`, `CAIRN_EPOCH` and
@@ -389,6 +406,23 @@ the solver kept failing, `2` usage, `3` the node could not be reached.
 `scripts/work-demo.sh` runs it against a real node;
 [design/roles-and-rewards.md](design/roles-and-rewards.md) says why compute is
 paid for output and not for time.
+
+### `solver pack|check|add|list`
+
+Solver packages ([solvers.md](solvers.md)): the program an objective's author
+publishes so contributors can press Start without choosing one.
+
+```sh
+cairn solver pack DIR                                  # list DIR's files in DIR/solver.json, print the id
+cairn solver check DIR --objective objective.json      # run its tests here, in the sandbox
+cairn --root R --log L solver add DIR [--objective F]  # check, then offer it from this node
+cairn --root R --log L solver list [--objective ID]    # what this node offers
+```
+
+`check` exits `0` when every test passed, `1` when one failed and `3` when
+none could run here. `add` files only a package whose tests passed on this
+node, in `ROOT/.cairn/solvers`. `cairn post` refuses an objective that pins a
+package this node does not hold or whose tests did not pass here.
 
 ### `drain --queue DIR [--dry-run]`
 

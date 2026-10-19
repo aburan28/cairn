@@ -8,9 +8,15 @@ public struct CuratedTask: Identifiable, Equatable, Sendable {
     public let detail: String
     public let objectives: [String]
     public let docPath: String?
+    /// Solver package directories (`solver.json` and its files) published
+    /// with the objectives, so a person can press Start on them without
+    /// choosing a program. Repository-relative, like `objectives`.
+    public let solvers: [String]
     public var paths: [String] { objectives }
-    public init(id: String, title: String, detail: String, objectives: [String], docPath: String?) {
+    public init(id: String, title: String, detail: String, objectives: [String], docPath: String?,
+                solvers: [String] = []) {
         self.id = id; self.title = title; self.detail = detail; self.objectives = objectives; self.docPath = docPath
+        self.solvers = solvers
     }
 }
 
@@ -45,7 +51,8 @@ public enum CuratedTasks {
             quickest way to watch a bounty go from posted to settled.
             """,
             objectives: ["examples/certicom-ecdlp/objective-ecc2k-23-orbit-batch.json"],
-            docPath: "examples/certicom-ecdlp/README.md"
+            docPath: "examples/certicom-ecdlp/README.md",
+            solvers: ["examples/certicom-ecdlp/solvers/ecc2k-23-orbit"]
         ),
     ]
 

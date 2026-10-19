@@ -142,6 +142,15 @@ establish prescribed execution.
   `python3` is a pyenv shim the checker cannot run inside the verifier
   sandbox and the payment step fails as `unavailable`; run it with
   `PATH=/usr/bin:$PATH`
+- `./scripts/solver-demo.sh` if you touched `src/solver/`, `--package` in
+  `src/agent/work.rs`, the `/solvers` routes, or the example package under
+  `examples/certicom-ecdlp/solvers/`. A node offers a package, a worker that
+  chose nothing runs it in the sandbox and is paid, and a package changed by
+  one byte on the node is refused by the worker before it runs. It needs the
+  real jail and a python3 the jail can run: on a Mac whose `python3` is a
+  pyenv shim, run it with `PATH=/opt/homebrew/bin:$PATH` or `/usr/bin` first.
+  `tests/solver.rs` probes the same jail for network, home and environment
+  leaks and skips, saying so, on a host with no jail
 - `./scripts/shard-demo.sh` if you touched `src/shards/`. That module has no
   network caller yet, so this script is its seam: six stores that share nothing,
   one shard each, one of them corrupt. A subsystem exercised only by its own

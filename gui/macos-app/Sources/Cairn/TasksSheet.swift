@@ -118,19 +118,28 @@ struct TasksSheet: View {
         }
         busy = true
         let files = task.objectives.map { library.appendingPathComponent($0).path }
+        let solvers = task.solvers.map { library.appendingPathComponent($0).path }
         node.postObjectives(at: files) { err in
-            busy = false
-            guard let err else {
-                info = "Posted. It is listed under Objectives once the node is back."
-                browser.reload()
+            // An objective's id is its content, so posting the same one twice
+            // is refused by the node. That is not a failure to show in red,
+            // and its solver still goes in: a log posted by an older app has
+            // the objective and not the package.
+            if let err, !err.contains("already posted") {
+                busy = false
+                error = err
                 return
             }
-            // An objective's id is its content, so posting the same one twice
-            // is refused by the node. That is not a failure to show in red.
-            if err.contains("already posted") {
-                info = "Already in this node's log."
-            } else {
-                error = err
+            let posted = err == nil ? "Posted." : "Already in this node's log."
+            node.addSolvers(at: solvers) { solverError in
+                busy = false
+                if let solverError {
+                    error = "\(posted) Its solver was not added: \(solverError)"
+                    return
+                }
+                info = solvers.isEmpty
+                    ? "\(posted) It is listed under Objectives once the node is back."
+                    : "\(posted) Its solver passed its tests here, so Share this Mac… can start it."
+                browser.reload()
             }
         }
     }

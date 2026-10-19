@@ -45,8 +45,10 @@ export type ResourceOffer = {
 };
 
 export type WorkerRequirement = {
-  mode: "built_in" | "external" | string;
+  mode: "built_in" | "package" | "external" | string;
   id?: string;
+  /** For `package`: the solver package the objective pins (docs/solvers.md). */
+  package?: string;
 };
 
 export type ResourceRequirements = Omit<ResourceOffer, "cpu" | "pricing" | "cpu_millis"> & {
@@ -132,5 +134,6 @@ export function workerModeLabel(worker: WorkerRequirement): string {
   if (worker.mode === "built_in") {
     return worker.id ? `Cairn worker: ${worker.id}` : "Cairn worker";
   }
+  if (worker.mode === "package") return "Published solver";
   return "External worker";
 }

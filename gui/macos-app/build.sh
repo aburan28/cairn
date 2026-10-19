@@ -76,11 +76,12 @@ EXAMPLES="$HERE/../../examples/certicom-ecdlp"
 mkdir -p "$TASKS/examples/certicom-ecdlp/checkers"
 cp "$EXAMPLES"/objective-*.json "$TASKS/examples/certicom-ecdlp/"
 cp "$EXAMPLES"/checkers/*.py "$TASKS/examples/certicom-ecdlp/checkers/"
-# The paid-orbit task has a one-round solver. Ship its program and pinned
-# search job so an installed app can launch it directly from the Work sheet.
-mkdir -p "$TASKS/examples/certicom-ecdlp/tools" "$TASKS/examples/certicom-ecdlp/jobs"
-cp "$EXAMPLES/tools/orbit_solver.py" "$EXAMPLES/tools/orbit_dp.py" "$TASKS/examples/certicom-ecdlp/tools/"
-cp "$EXAMPLES/jobs/ecc2k-23.json" "$TASKS/examples/certicom-ecdlp/jobs/"
+# Solver packages a curated task publishes with its objective (CuratedTask
+# `solvers`), so Share this Mac… can start it with nothing to choose. Copied
+# whole: `cairn solver add` holds every file to the package's own solver.json
+# when the task is posted, so a package edited without `cairn solver pack`
+# is refused there rather than run.
+ditto "$EXAMPLES/solvers" "$TASKS/examples/certicom-ecdlp/solvers"
 for objective in "$TASKS"/examples/certicom-ecdlp/objective-*.json; do
     checker="$(plutil -extract verifier.checker raw -o - "$objective")" \
         || { echo "build failed: $(basename "$objective") pins no checker" >&2; exit 1; }

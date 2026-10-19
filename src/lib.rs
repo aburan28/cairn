@@ -70,6 +70,7 @@ pub mod secret_file;
 pub mod secrets;
 pub mod serve;
 pub mod shards;
+pub mod solver;
 pub mod store;
 pub mod swarm_calls;
 pub mod tailnet;

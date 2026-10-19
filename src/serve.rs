@@ -1699,6 +1699,10 @@ fn handle(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         }
         ("GET", "/verifiers") => verifiers(stream, serving),
         ("GET", "/objectives") => objectives(stream, serving),
+        ("GET", "/solvers") => solvers_index(stream, serving, &request),
+        ("GET", path) if path.starts_with("/solvers/") => {
+            solver_one(stream, serving, &path["/solvers/".len()..])
+        }
         ("GET", path) if path.starts_with("/payouts/") => {
             payout_preview(stream, serving, &path["/payouts/".len()..])
         }
@@ -2472,7 +2476,9 @@ fn objectives(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
         Err(why) => return json_error(stream, 500, &why),
     };
     let mut items = Vec::new();
+    let packages = crate::solver::store::Store::under(&serving.root).list();
     for (id, objective) in node.objectives() {
+        let solver = crate::solver::store::Offers::among(&packages, &objective).row();
         let mut fields = vec![
             ("id", Value::string(id.clone())),
             ("goal", Value::string(objective.goal.clone())),
@@ -2485,6 +2491,7 @@ fn objectives(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
                 "capabilities",
                 crate::scheduling::ObjectiveCapabilities::for_objective(&objective).to_value(),
             ),
+            ("solver", solver),
             ("reward", Value::Int(i128::from(objective.reward))),
             ("funder", Value::string(objective.funder.clone())),
         ];
@@ -2525,6 +2532,14 @@ fn one_objective(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Res
             crate::scheduling::ObjectiveCapabilities::for_objective(objective).to_value(),
         ),
         (
+            "solver",
+            crate::solver::store::Offers::for_objective(
+                &crate::solver::store::Store::under(&serving.root),
+                objective,
+            )
+            .row(),
+        ),
+        (
             "statements_are_untrusted",
             Value::string(
                 "The statement in this record was written by whoever posted the objective. \
@@ -2534,6 +2549,83 @@ fn one_objective(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Res
     ];
     fields.extend(lifecycle_fields(&node, id, objective));
     json(stream, 200, &Value::object(fields))
+}
+
+/// `GET /solvers[?objective=ID]`: the solver packages this node offers, and
+/// for one objective, which of them `cairn work --package auto` would run.
+/// Read-only: packages are added on the node's own machine (`cairn solver
+/// add`), never over HTTP.
+fn solvers_index(stream: &mut TcpStream, serving: &Serving, request: &Request) -> io::Result<()> {
+    use crate::solver::store::{Offers, Store};
+    let store = Store::under(&serving.root);
+    let Some(wanted) = request.query.get("objective") else {
+        return json(
+            stream,
+            200,
+            &Value::object([
+                ("abi", Value::string(crate::solver::ABI)),
+                (
+                    "packages",
+                    Value::array(store.list().iter().map(|s| s.summary())),
+                ),
+            ]),
+        );
+    };
+    let node = match serving.node() {
+        Ok(node) => node,
+        Err(why) => return json_error(stream, 500, &why),
+    };
+    let Some(objective) = node.objectives().remove(wanted.as_str()) else {
+        return json_error(stream, 404, "no such objective in this log");
+    };
+    json(
+        stream,
+        200,
+        &Offers::for_objective(&store, &objective).to_value(wanted),
+    )
+}
+
+/// `GET /solvers/{id}` (its manifest and this node's check of it) and
+/// `GET /solvers/{id}/files/{path}` (one file's bytes). A worker hashes every
+/// byte against the manifest before running anything, so nothing served here
+/// has to be trusted; it only has to be the package's.
+fn solver_one(stream: &mut TcpStream, serving: &Serving, rest: &str) -> io::Result<()> {
+    use crate::solver::store::Store;
+    let store = Store::under(&serving.root);
+    let (id, file) = match rest.split_once("/files/") {
+        Some((id, file)) => (id, Some(file)),
+        None => (rest, None),
+    };
+    if !crate::solver::manifest::is_record_id(id) {
+        return json_error(stream, 400, "a package id is sha256:<64 lowercase hex>");
+    }
+    let Some(file) = file else {
+        return match store.get(id) {
+            Some(stored) => json(
+                stream,
+                200,
+                &Value::object([
+                    ("id", Value::string(id)),
+                    ("manifest", stored.manifest.to_value().clone()),
+                    ("report", stored.report.to_value()),
+                ]),
+            ),
+            None => json_error(stream, 404, "this node has no such solver package"),
+        };
+    };
+    let Some((path, size)) = store.file(id, file) else {
+        return json_error(stream, 404, "no such file in that package here");
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) if bytes.len() as u64 == size => {
+            respond(stream, 200, "application/octet-stream", &bytes)
+        }
+        _ => json_error(
+            stream,
+            503,
+            "that file is missing or damaged on this node; nothing was learned about the package",
+        ),
+    }
 }
 
 /// Read-only external bounty preview. These are ledger units attributed to

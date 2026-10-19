@@ -1,16 +1,19 @@
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
-/// Node → Share this Mac…: choose an objective first, then put this Mac to
-/// work. The solver is an advanced escape hatch because the protocol still
-/// needs a search program for objectives that do not ship one.
+/// Node → Share this Mac…: choose an objective and what this Mac may give it,
+/// then press Start.
 ///
-/// The fields are `cairn work`'s flags and nothing else, so what this sheet
-/// starts is exactly what the Contribute page used to print for a terminal.
-/// The solver is still yours: the sheet runs it, each round, with its slice
-/// of the work on stdin, and hands what it prints to the node. The node's
-/// pinned checker decides what is paid.
+/// There is no program to choose. The objective's author published a solver
+/// package with it (`cairn solver add`, docs/solvers.md), the node checked it
+/// against the objective's own verifier, and `cairn work --package auto`
+/// fetches it, checks every file against its pin, runs its tests on this Mac
+/// and runs each round in the sandbox: no network, nothing of the person's
+/// files, held to the cores they offered. An objective nobody has published a
+/// solver for cannot be started here; the page offers an agent instead.
+///
+/// The fields are `cairn work`'s flags and nothing else. The node's pinned
+/// checker decides what is paid.
 struct WorkSheet: View {
     @ObservedObject var node: Node
     @ObservedObject var worker: Worker
@@ -22,39 +25,16 @@ struct WorkSheet: View {
     @State private var loadingObjectives = false
     @State private var objectivesProblem: String?
     @State private var problem: String?
-    /// Remembered between openings: the solver is the one thing here a
-    /// person has to find on disk, and they have one or two.
-    @AppStorage("workSolver") private var solver = ""
-    @AppStorage("workSolverArguments") private var solverArguments = ""
     @AppStorage("workName") private var name = ""
     @AppStorage("workThreads") private var threads = max(1, ProcessInfo.processInfo.activeProcessorCount)
-    @AppStorage("workGPUEnabled") private var gpuEnabled = false
-    @AppStorage("workGPUNumbers") private var gpuNumbers = "0"
     @AppStorage("workHoursPerDay") private var hoursPerDay = 24
-    @AppStorage("workOrbitBatch") private var orbitBatch = 4
-    @State private var showSolverOptions = false
-    @State private var useCustomSolver = false
 
-    private var bundledWork: (solver: String, arguments: [String])? {
-        let environment = ProcessInfo.processInfo.environment
-        let configured = environment["CAIRN_PYTHON"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let directories = ["/opt/homebrew/bin", "/usr/local/bin"]
-            + Toolchains.searchPath(environment) + ["/usr/bin"]
-        let candidates = configured.isEmpty ? directories.map { URL(fileURLWithPath: $0).appendingPathComponent("python3") }
-            : configured.contains("/") ? [URL(fileURLWithPath: configured)]
-            : directories.map { URL(fileURLWithPath: $0).appendingPathComponent(configured) }
-        let python = candidates.first {
-            FileManager.default.isExecutableFile(atPath: $0.path) && !Toolchains.isShim($0)
-        }
-        return GuiTasks.bundledWork(for: objective, python: python, count: orbitBatch)
-    }
-
-    private var usesBundledWork: Bool { bundledWork != nil && !useCustomSolver }
+    private var selected: WorkObjective? { objectives.first(where: { $0.id == objective }) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Label("Share this Mac", systemImage: "cpu").font(.headline)
-            Text("Choose an objective and the resources this Mac may use. Cairn assigns a new slice each round and keeps pending answers moving while paused or stopping. The objective's checker decides what is paid.")
+            Text("Choose an objective and what this Mac may give it. Cairn runs the solver its author published, in a sandbox, on a new slice each round, and keeps pending answers moving while paused or stopping. The objective's checker decides what is paid.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -135,10 +115,10 @@ struct WorkSheet: View {
                         .disabled(loadingObjectives || worker.isRunning)
                 }
             }
-            if let selected = objectives.first(where: { $0.id == objective }) {
+            if let selected {
                 GridRow {
                     Text("").gridColumnAlignment(.trailing)
-                    Text("\(selected.workerLabel) · needs \(selected.resourceLabel)")
+                    Text("Needs \(selected.resourceLabel)")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -170,68 +150,13 @@ struct WorkSheet: View {
             }
             GridRow {
                 Text("Solver").gridColumnAlignment(.trailing)
-                VStack(alignment: .leading, spacing: 3) {
-                    if bundledWork != nil {
-                        Picker("Search program", selection: $useCustomSolver) {
-                            Text("Included orbit search").tag(false)
-                            Text("Choose another program").tag(true)
-                        }
-                        .labelsHidden()
-                        .disabled(worker.isRunning)
-                    }
-                    if usesBundledWork {
-                        Stepper("\(orbitBatch) orbits per round", value: $orbitBatch, in: 1...16)
-                            .disabled(worker.isRunning)
-                        Text("Ready to run from this app. No program or checkout to choose.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        HStack {
-                            TextField("A program on this Mac", text: $solver)
-                                .textFieldStyle(.roundedBorder)
-                                .font(.body.monospaced())
-                                .disabled(worker.isRunning)
-                            Button("Choose…") { chooseSolver() }
-                                .disabled(worker.isRunning)
-                        }
-                        DisclosureGroup("Advanced solver options", isExpanded: $showSolverOptions) {
-                            TextField("Options for this solver", text: $solverArguments)
-                                .textFieldStyle(.roundedBorder)
-                                .disabled(worker.isRunning)
-                        }
-                        Text("Choose the search program installed on this Mac. Cairn runs it for each assigned slice.")
-                            .font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .disabled(worker.isRunning)
+                solverInfo
             }
             GridRow {
                 Text("CPU cores").gridColumnAlignment(.trailing)
-                if usesBundledWork {
-                    Text("1 core for the included search").foregroundStyle(.secondary)
-                } else {
-                    Stepper("Offer \(threads) of \(ProcessInfo.processInfo.activeProcessorCount) CPU threads", value: $threads,
-                            in: 1...max(1, ProcessInfo.processInfo.activeProcessorCount))
-                        .disabled(worker.isRunning)
-                }
-            }
-            GridRow {
-                Text("GPU").gridColumnAlignment(.trailing)
-                if usesBundledWork {
-                    Text("CPU search; choose another program for GPU work")
-                        .foregroundStyle(.secondary)
-                } else {
-                    HStack {
-                        Toggle("Allow GPU use", isOn: $gpuEnabled)
-                            .disabled(worker.isRunning)
-                        if gpuEnabled {
-                            TextField("Device numbers, e.g. 0,1", text: $gpuNumbers)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 170)
-                                .disabled(worker.isRunning)
-                        }
-                    }
-                }
+                Stepper("Offer \(threads) of \(ProcessInfo.processInfo.activeProcessorCount) CPU threads", value: $threads,
+                        in: 1...max(1, ProcessInfo.processInfo.activeProcessorCount))
+                    .disabled(worker.isRunning)
             }
             GridRow {
                 Text("Daily limit").gridColumnAlignment(.trailing)
@@ -241,7 +166,7 @@ struct WorkSheet: View {
             }
             GridRow {
                 Text("")
-                Text("CPU and GPU choices are passed to the solver; the solver must honor them. The daily time limit is enforced between rounds.")
+                Text("The sandbox holds the solver to the threads you offer and gives it no network and none of your files. The daily limit is checked between rounds.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -269,6 +194,35 @@ struct WorkSheet: View {
         }
     }
 
+    /// What will run: the published package, read-only. Nothing here is a
+    /// path or a flag, because nothing a person types should become a
+    /// program this Mac executes.
+    @ViewBuilder private var solverInfo: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            switch selected?.solver {
+            case .some(let solver) where solver.ready:
+                Text("\(solver.name) \(solver.version)").font(.body.monospaced())
+                Text(solver.pinned
+                     ? "Published with this objective and checked by the node. Runs in a sandbox: no network, no access to your files."
+                     : "Published for this objective and checked by the node. Runs in a sandbox: no network, no access to your files.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .some:
+                Text("This objective's solver is not on this node yet.")
+                Text("It pins a solver package this node does not hold. Its operator adds it with `cairn solver add`.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .none where selected != nil:
+                Text("No solver has been published for this objective.")
+                Text("Its author publishes one with `cairn solver add`. Until then it can be worked with an agent from its page.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .none:
+                Text("Choose an objective.").foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private var log: some View {
         ScrollView {
             Text(worker.lines.suffix(12).joined(separator: "\n"))
@@ -283,21 +237,25 @@ struct WorkSheet: View {
     }
 
     private var plan: WorkPlan {
-        let included = usesBundledWork ? bundledWork : nil
-        return WorkPlan(
+        WorkPlan(
             node: address.trimmingCharacters(in: .whitespacesAndNewlines),
             objective: objective,
             worker: WorkPlan.cleanName(name.isEmpty ? WorkPlan.defaultName() : name),
             identity: node.settings.workerIdentity.path,
-            solver: included?.solver ?? solver.trimmingCharacters(in: .whitespacesAndNewlines),
-            solverArguments: included?.arguments ?? WorkPlan.splitArguments(solverArguments),
-            threads: included == nil ? threads : 1,
-            gpus: included == nil && gpuEnabled ? gpuNumbers.trimmingCharacters(in: .whitespacesAndNewlines) : "",
+            threads: threads,
             hoursPerDay: hoursPerDay
         )
     }
 
-    private var startProblem: String? { plan.problem }
+    private var startProblem: String? {
+        if let problem = plan.problem { return problem }
+        if let selected, !selected.canStart {
+            return selected.solver == nil
+                ? "No solver has been published for this objective."
+                : "This objective's solver is not on this node yet."
+        }
+        return nil
+    }
 
     /// This node's address and the objective the page asked for, unless a
     /// worker is up, whose plan the fields show as it is.
@@ -306,12 +264,8 @@ struct WorkSheet: View {
             address = plan.node
             objective = plan.objective
             if name.isEmpty { name = plan.worker }
-            if solver.isEmpty { solver = plan.solver }
             threads = plan.threads ?? threads
-            gpuEnabled = !(plan.gpus ?? "").isEmpty
-            if let gpus = plan.gpus, !gpus.isEmpty { gpuNumbers = gpus }
             hoursPerDay = plan.hoursPerDay ?? 24
-            if let included = bundledWork { useCustomSolver = plan.solverArguments.first != included.arguments.first }
             return
         }
         if address.isEmpty, let own = node.httpOrigin { address = own }
@@ -346,19 +300,6 @@ struct WorkSheet: View {
         } catch {
             objectives = []
             objectivesProblem = "Could not read the objectives at \(base): \(error.localizedDescription)"
-        }
-    }
-
-    private func chooseSolver() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.executable, .shellScript, .pythonScript, .unixExecutable, .data]
-        panel.message = "Choose the program that searches for answers. It gets its slice of the work on stdin and prints candidates, one JSON object per line."
-        panel.prompt = "Use as Solver"
-        if panel.runModal() == .OK, let url = panel.url {
-            solver = url.path
         }
     }
 

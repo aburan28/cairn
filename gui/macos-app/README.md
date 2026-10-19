@@ -359,17 +359,24 @@ shared node signs with `leader.identity.json` instead: a node has one
 
 ## Work on this Mac
 
-**Node → Work on This Mac…** (⇧⌘W), or **Work** in the toolbar: put this
-Mac to work on one objective with a solver of your own, which is what
-`cairn work` does from a terminal. The sheet's fields are that command's
-flags -- the node's address (this node's by default, or another's), the
-objective (read from that node's `/objectives`), the machine's roster name
-(this Mac's hostname, cleaned the way `cairn work` requires) and the solver
-with its arguments -- and **Start** runs it, with the node's `PATH`. Each
-round the solver gets its slice of the work as one line of JSON on stdin and
-prints candidate answers, one JSON object per line; the worker commits them,
-reveals them after the epoch turns and reports in, so the Mac shows as
-*working now* on the challenge page. What it prints goes to `work.log` in
+**Node → Share this Mac…** (⇧⌘W), or **Work** in the toolbar: put this
+Mac to work on one objective, which is what `cairn work --package auto` does
+from a terminal. There is no program to choose: the sheet shows the solver
+package the objective's author published (its name and version, and whether
+the objective pins it), and **Start** is enabled only when this node offers
+one that passed its tests here ([docs/solvers.md](../../docs/solvers.md)).
+The sheet's fields are the command's flags -- the node's address (this node's
+by default, or another's), the objective (read from that node's
+`/objectives`), the machine's roster name (this Mac's hostname, cleaned the
+way `cairn work` requires), the CPU threads offered and a daily limit -- and
+**Start** runs it, with the node's `PATH`. The worker downloads the package,
+checks every file against its pin, runs its tests on this Mac, and runs each
+round in the sandbox: no network, none of your files, held to the threads
+offered. Each round the solver gets its slice of the work and prints
+candidate answers; the worker commits them, reveals them after the epoch turns
+and reports in, so the Mac shows as *working now* on the challenge page.
+Posting the ECC2K-23 practice task from **Tasks…** also adds its solver
+package, so it can be started straight away. What it prints goes to `work.log` in
 the data folder, and the sheet shows the tail.
 
 The worker is paid to `worker.identity.json` in the data folder, made by

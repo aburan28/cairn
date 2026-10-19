@@ -741,15 +741,16 @@ function WorkOnThis({
     <Box title="Join this challenge">
       <div className="flex flex-col gap-4">
         <p className="text-[12.5px] text-ink-2">
-          A worker takes a slice of this goal, runs the solver you choose in Cairn.app,
-          and sends answers to this challenge's checker. {piecework
+          A worker takes a slice of this goal, runs the solver its author published, in a
+          sandbox on your Mac, and sends answers to this challenge's checker. There is no
+          program to choose. {piecework
             ? "Different machines can work different slices at the same time."
             : "The checker decides whether an answer moves the result forward."}
         </p>
         <WorkPanel objective={id} base={base ?? ""} />
         {bridge && (
           <button type="button" className="btn btn-sm self-start" onClick={configureWorker}>
-            Choose or change solver…
+            Share this Mac…
           </button>
         )}
         {appError && <p className="text-[12px] text-warn" role="alert">{appError}</p>}

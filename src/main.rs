@@ -832,6 +832,12 @@ enum Command {
     Work {
         args: Vec<String>,
     },
+    /// Write, check, add and list solver packages: the program an objective's
+    /// author publishes so contributors need not choose one. Parses its own
+    /// tail; see `src/solver/cli.rs`.
+    Solver {
+        args: Vec<String>,
+    },
     /// Enroll the machines that work for a leader: invites, joins,
     /// revocations, and signing for clients that cannot. Parses its own tail;
     /// see `src/fleet/cli.rs`.
@@ -1530,6 +1536,9 @@ fn parse(argv: Vec<String>) -> Result<Invocation, CliError> {
             args: cursor.rest(),
         },
         "work" => Command::Work {
+            args: cursor.rest(),
+        },
+        "solver" => Command::Solver {
             args: cursor.rest(),
         },
         "fleet" => Command::Fleet {
@@ -4763,6 +4772,20 @@ fn cmd_post(
     Ok(0)
 }
 
+/// `cairn solver …`. The log is opened only if a subcommand asks for an
+/// objective by id, so `pack` and `check` work in a directory with no node.
+fn cmd_solver(out: &mut dyn Write, options: &Options, args: &[String]) -> i32 {
+    let objective = |id: &str| -> Result<Option<Objective>, String> {
+        let node = open_node(options).map_err(|e| e.to_string())?;
+        Ok(node.objectives().remove(id))
+    };
+    let context = cairn::solver::cli::Context {
+        root: Path::new(&options.root),
+        objective: &objective,
+    };
+    cairn::solver::cli::main(args, &context, out)
+}
+
 /// Sign a draft for submission to a running node without opening its locked log.
 /// The signed JSON is the exact record that `POST /submit?kind=objective` accepts.
 fn cmd_sign_objective(
@@ -4982,6 +5005,16 @@ fn post_objective_file(
         Some(identity) => objective.funded_by(&identity),
         None => objective,
     };
+    // Unlike a checker pin below, a solver pin this node cannot run is
+    // refused, and before anything is appended. A checker a peer may serve
+    // later is still a checkable objective; a solver package exists to be
+    // pressed "Start" on, and nothing moves packages between nodes yet, so
+    // one missing here is missing for everybody working through this node.
+    // Only the author's own command applies this: record sync and peers never
+    // do, so it changes no rule about which records a node admits.
+    if let Some(problem) = cairn::solver::cli::pin_problem(Path::new(&options.root), &objective) {
+        return Err(CliError::Refused(problem.replace("<this file>", path)));
+    }
     let id = post_objective(&mut node, &objective, &timestamp())?;
 
     // Field 2 of this line is the objective id, and `scripts/demo.sh` reads it
@@ -10266,6 +10299,7 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Lab { args } => Ok(cairn::lab::cli::main(args.clone())),
         Command::Agent { args } => Ok(cairn::agent::cli::main(args.clone())),
         Command::Work { args } => Ok(cairn::agent::work::main(args.clone())),
+        Command::Solver { args } => Ok(cmd_solver(out, options, args)),
         Command::Fleet { args } => Ok(cairn::fleet::cli::main(args.clone(), &node_log(options))),
         Command::Propose {
             objective,
