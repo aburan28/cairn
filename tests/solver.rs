@@ -5,6 +5,7 @@
 //! The jail tests need a jail (seatbelt on macOS, bubblewrap on Linux) and a
 //! python3 it can run; without one they say so and return, because a host
 //! that cannot run a package proves nothing about the package either way.
+//! CI's declared sandbox makes native ECC2K-130 execution required instead.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -101,10 +102,9 @@ fn the_ecc2k130_package_is_packed_and_walks_the_job_the_checker_pins() {
         fs::read(repo().join(ECC2K130_JOB)).unwrap(),
         "jobs/ecc2k130.json differs from {ECC2K130_JOB}: copy it again and `cairn solver pack {ECC2K130}`"
     );
-    let checker = fs::read_to_string(
-        repo().join("examples/certicom-ecdlp/checkers/ecc2k130_orbit_batch.py"),
-    )
-    .unwrap();
+    let checker =
+        fs::read_to_string(repo().join("examples/certicom-ecdlp/checkers/ecc2k130_orbit_batch.py"))
+            .unwrap();
     let job_sha256 = cairn::canonical::digest_bytes(&fs::read(repo().join(ECC2K130_JOB)).unwrap());
     assert!(
         checker.contains(&format!(
@@ -330,11 +330,24 @@ fn the_example_package_passes_its_tests_in_the_sandbox_and_its_checker_accepts()
 /// it has nothing to run and says so.
 #[test]
 fn the_ecc2k130_package_passes_its_tests_in_the_sandbox_and_its_checker_accepts() {
+    // A developer without a supported host can inspect the package. The jail
+    // jobs promise execution, so a missing runner or checker must fail them.
+    let required = std::env::var_os("CAIRN_EXPECT_SANDBOX").is_some();
     if !cairn::verifiers::sandbox::mechanism().is_jail() {
+        assert!(
+            !required,
+            "CI requires the native solver to run in its declared sandbox"
+        );
         eprintln!("skipping: no sandbox on this host");
         return;
     }
     let package = Package::open(&repo().join(ECC2K130)).unwrap();
+    if required {
+        assert!(
+            package.manifest.target_for_host().is_some(),
+            "CI requires an ECC2K-130 target for this host"
+        );
+    }
     let objective = objective(&repo().join(ECC2K130_OBJECTIVE));
     let report = cli::check_package(
         &package,
@@ -343,10 +356,14 @@ fn the_ecc2k130_package_passes_its_tests_in_the_sandbox_and_its_checker_accepts(
         false,
         true,
     );
-    if !runnable(&report) {
+    if !required && !runnable(&report) {
         return;
     }
     assert_eq!(report.verdict(), Outcome::Pass, "{:#?}", report.tests);
+    assert_eq!(report.tests.len(), package.manifest.tests.len());
+    for result in &report.tests {
+        assert!(result.candidates > 0, "no candidate checked: {result:#?}");
+    }
 }
 
 #[test]
