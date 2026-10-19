@@ -1,5 +1,24 @@
 # Changelog
 
+## [12.2.0](https://github.com/aburan28/cairn/compare/v12.1.0...v12.2.0) (2026-10-17)
+
+
+### Features
+
+* Conductor on the reader's agent panel, and conductor.json for working on cairn ([#334](https://github.com/aburan28/cairn/issues/334)) ([fa85cc5](https://github.com/aburan28/cairn/commit/fa85cc53583bdd45e970153d06f4ba6937c685b7))
+
+## [12.1.0](https://github.com/aburan28/cairn/compare/v12.0.0...v12.1.0) (2026-10-17)
+
+
+### Features
+
+* **macos:** connect Conductor's agents to the app's node over MCP ([#328](https://github.com/aburan28/cairn/issues/328)) ([d3ed155](https://github.com/aburan28/cairn/commit/d3ed155c878e7dcff789d844f3b1b5dc56c46ddc))
+
+
+### Documentation
+
+* define dynamic task plans and resource incentives ([#330](https://github.com/aburan28/cairn/issues/330)) ([d782a50](https://github.com/aburan28/cairn/commit/d782a50822b93ff7189cb260674e648eb6697074))
+
 ## [12.0.0](https://github.com/aburan28/cairn/compare/v11.0.0...v12.0.0) (2026-10-17)
 
 

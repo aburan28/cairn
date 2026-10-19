@@ -112,6 +112,63 @@ impl Drop for InFlight {
     }
 }
 
+/// Tracks a same-peer inbound session queued behind the state lock so the tick
+/// can avoid starting a redundant outbound round. The authenticated peer-ID
+/// admission rule below remains responsible for breaking cycles across peers.
+#[derive(Default)]
+struct Crossing {
+    dialing: Option<PeerId>,
+    queued: BTreeMap<PeerId, usize>,
+}
+
+impl Crossing {
+    fn lock(shared: &Mutex<Crossing>) -> std::sync::MutexGuard<'_, Crossing> {
+        shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn dial(shared: &Arc<Mutex<Crossing>>, peer: PeerId) -> Option<Dialing> {
+        let mut crossing = Self::lock(shared);
+        if crossing.queued.contains_key(&peer) {
+            return None;
+        }
+        crossing.dialing = Some(peer);
+        Some(Dialing(Arc::clone(shared)))
+    }
+
+    fn queue(shared: &Arc<Mutex<Crossing>>, local: PeerId, remote: PeerId) -> Option<Queued> {
+        let mut crossing = Self::lock(shared);
+        if crossing.dialing == Some(remote) && local < remote {
+            return None;
+        }
+        *crossing.queued.entry(remote).or_insert(0) += 1;
+        Some(Queued(Arc::clone(shared), remote))
+    }
+}
+
+struct Dialing(Arc<Mutex<Crossing>>);
+
+impl Drop for Dialing {
+    fn drop(&mut self) {
+        Crossing::lock(&self.0).dialing = None;
+    }
+}
+
+struct Queued(Arc<Mutex<Crossing>>, PeerId);
+
+impl Drop for Queued {
+    fn drop(&mut self) {
+        let mut crossing = Crossing::lock(&self.0);
+        if let Some(count) = crossing.queued.get_mut(&self.1) {
+            *count -= 1;
+            if *count == 0 {
+                crossing.queued.remove(&self.1);
+            }
+        }
+    }
+}
+
 /// Ticks between checks of the store against its cap: a minute. Walking the
 /// data directory is not free, and a log does not grow by a meaningful
 /// fraction of any sensible cap in sixty seconds.
@@ -1332,6 +1389,8 @@ pub fn run(config: Config) -> Result<(), String> {
     let accept_checkpoint = config.checkpoint.clone();
     let accept_population = config.population.clone();
     let accept_registry = registry.clone();
+    let crossing = Arc::new(Mutex::new(Crossing::default()));
+    let accept_crossing = Arc::clone(&crossing);
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     thread::spawn(move || loop {
         // Accept **before** taking the lock, and this ordering is the whole
@@ -1373,6 +1432,7 @@ pub fn run(config: Config) -> Result<(), String> {
         let accept_checkpoint = accept_checkpoint.clone();
         let accept_population = accept_population.clone();
         let accept_registry = accept_registry.clone();
+        let accept_crossing = Arc::clone(&accept_crossing);
         thread::spawn(move || {
             let _slot = InFlight(in_flight);
             // The first frame is read **before** the lock, so a key request is
@@ -1414,6 +1474,16 @@ pub fn run(config: Config) -> Result<(), String> {
                     return;
                 }
             };
+            let remote = connection.remote();
+            let Some(_queued) =
+                Crossing::queue(&accept_crossing, accept_service.identity(), remote)
+            else {
+                log::info!(
+                    "inbound session: {} dialled us while we dialled it; keeping our dial",
+                    peer_id_string(&remote)
+                );
+                return;
+            };
             // A cycle of outbound callers can each hold its own ledger while
             // every inbound worker waits on those same locks. Under contention,
             // admit waiting edges only from lower to higher authenticated peer
@@ -1421,11 +1491,8 @@ pub fn run(config: Config) -> Result<(), String> {
             // closed, its dialler releases the lock, and the remaining session
             // proceeds. An idle node accepts either direction: asymmetric
             // bootstrap still works. This is scheduling, never record ordering.
-            let mut guard = match inbound_guard(
-                &accept_state,
-                &accept_service.identity(),
-                &connection.remote(),
-            ) {
+            let mut guard = match inbound_guard(&accept_state, &accept_service.identity(), &remote)
+            {
                 Some(guard) => guard,
                 None => {
                     log::debug!("inbound sync deferred: node busy; peer may retry");
@@ -1714,6 +1781,14 @@ pub fn run(config: Config) -> Result<(), String> {
             let mut guard = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Taken after the lock, so `dialing` names a dial that holds it.
+            let Some(_dialing) = Crossing::dial(&crossing, endpoint.peer.id()) else {
+                log::debug!(
+                    "outbound session to {}: skipped; its own session with us is queued on the lock",
+                    peer_id_string(&endpoint.peer.id())
+                );
+                continue;
+            };
             let State {
                 node, population, ..
             } = &mut *guard;
@@ -1984,6 +2059,69 @@ fn describe_readiness(report: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::Crossing;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn a_crossed_dial_is_broken_on_exactly_one_side() {
+        let (low, high) = ([1u8; 32], [2u8; 32]);
+        let (at_low, at_high) = (
+            Arc::new(Mutex::new(Crossing::default())),
+            Arc::new(Mutex::new(Crossing::default())),
+        );
+        let _low_dials = Crossing::dial(&at_low, high).expect("nothing queued yet");
+        let _high_dials = Crossing::dial(&at_high, low).expect("nothing queued yet");
+        // The low node drops the high node's session, so the high node's dial
+        // fails and frees its lock; the high node keeps the low node's
+        // session, which then runs. One survivor, decided on each side alone.
+        assert!(Crossing::queue(&at_low, low, high).is_none());
+        assert!(Crossing::queue(&at_high, high, low).is_some());
+    }
+
+    #[test]
+    fn a_dial_to_a_peer_whose_session_is_queued_is_skipped_until_it_ends() {
+        let (local, remote) = ([2u8; 32], [1u8; 32]);
+        let shared = Arc::new(Mutex::new(Crossing::default()));
+        // The order `queue` cannot see: the inbound session queued first, and
+        // the tick took the lock before it. Dialling would be the same cycle.
+        let first = Crossing::queue(&shared, local, remote).unwrap();
+        let second = Crossing::queue(&shared, local, remote).unwrap();
+        assert!(Crossing::dial(&shared, remote).is_none());
+        drop(first);
+        assert!(
+            Crossing::dial(&shared, remote).is_none(),
+            "one still queued"
+        );
+        drop(second);
+        let dialing = Crossing::dial(&shared, remote).expect("nothing queued");
+        assert!(Crossing::queue(&shared, [0u8; 32], remote).is_none());
+        // Another peer's session is not this dial's business.
+        assert!(Crossing::queue(&shared, [0u8; 32], [3u8; 32]).is_some());
+        drop(dialing);
+        assert!(Crossing::queue(&shared, [0u8; 32], remote).is_some());
+    }
+
+    #[test]
+    fn queued_inbound_skips_same_peer_dial_without_bypassing_cycle_order() {
+        use super::*;
+
+        let (local, remote) = ([1u8; 32], [2u8; 32]);
+        let crossing = Arc::new(Mutex::new(Crossing::default()));
+        let state = Mutex::new(());
+        let queued = Crossing::queue(&crossing, local, remote).expect("queue inbound");
+
+        // Queueing releases the Crossing mutex before admission waits on state.
+        // A lower-ID waiter defers while state is busy; the tick sees the queued
+        // edge and skips its duplicate dial, then the inbound can proceed.
+        let held = state.lock().unwrap();
+        assert!(inbound_guard(&state, &local, &remote).is_none());
+        assert!(Crossing::dial(&crossing, remote).is_none());
+        drop(held);
+        assert!(inbound_guard(&state, &local, &remote).is_some());
+        assert!(Crossing::dial(&crossing, remote).is_none());
+        drop(queued);
+        assert!(Crossing::dial(&crossing, remote).is_some());
+    }
 
     #[test]
     fn idle_inbound_accepts_either_direction_and_busy_waits_have_a_strict_order() {

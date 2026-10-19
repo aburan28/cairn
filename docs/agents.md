@@ -219,10 +219,10 @@ whichever starts second refuses.
 
 On a Mac running Cairn.app, **Node → Connect an Agent…** (⇧⌘A) shows these
 stanzas with that Mac's real `cairn` path, data folder and resource limits
-filled in, for either arrangement below (the agent's client supervising
-`cairn run` on the app's node, with the app attached to its reader; or a log
-of the agent's own), with a copy button and an identity the agent can sign
-with. [gui/macos-app/README.md](../gui/macos-app/README.md#connect-an-agent)
+filled in, for each arrangement below (agents sharing the app's node over
+HTTP, Conductor's among them; the agent's client supervising `cairn run` on
+the app's node, with the app attached to its reader; or a log of the agent's
+own), with a copy button and an identity the agent can sign with. [gui/macos-app/README.md](../gui/macos-app/README.md#connect-an-agent)
 has the details.
 
 The stanzas below are the same thing by hand. The server takes the same
@@ -416,7 +416,43 @@ head at the epoch boundary, and `docs/p2p.md` says what is still open there.
 
 `cairn run` serves one stdio MCP client. Several independently spawned clients
 still must not share its ledger or its default ports; give each complete node
-different paths and listeners, or run one client at a time.
+different paths and listeners, run one client at a time, or have them all
+connect to one node over HTTP, below.
+
+### Several agents on one node: Conductor
+
+[Conductor](https://conductor.build) runs Claude Code and Codex side by side,
+each in a workspace of its own, and every session starts the MCP servers its
+client's config names. A stdio stanza is therefore a writer per workspace: the
+first `cairn run` takes the log's lock and the rest are refused. Serve the live
+node over HTTP once and point the clients at it instead:
+
+```sh
+cairn run --mcp-http 127.0.0.1:8001
+claude mcp add --transport http --scope user cairn http://127.0.0.1:8001/mcp
+codex mcp add cairn --url http://127.0.0.1:8001/mcp
+```
+
+User scope (`~/.claude.json`, `~/.codex/config.toml`), because a workspace is a
+fresh worktree of whatever repository the agent works in, and those are the
+files every Conductor session reads; a new session picks up a changed config.
+Conductor needs no `conductor.json` for this -- its setup and run scripts
+belong to the repository, and the node belongs to none of them.
+
+Each session that connects gets its own `Mcp-Session-Id` and its own citation
+capabilities. What they share is the node's: one log, one `--mcp-identity`
+signing every submission, one `--mcp-max-spend` ceiling, and pending
+commitments keyed by submitter and artifact, so two agents that find the same
+artifact commit it once. `work_assignment` slices the search by the `node_id`
+the agent passes, so give each workspace its own -- Conductor sets
+`$CONDUCTOR_WORKSPACE_NAME` in every agent process -- or two of them search
+the same slice.
+
+On a Mac running Cairn.app, **Connect an Agent… → Conductor** does all of it:
+it restarts the app's node with `--mcp-http 127.0.0.1:8001` (another free port
+if that one is taken, which the sheet says) and writes both user configs,
+keeping whatever else they hold and refusing to replace a `cairn` entry that
+says something else.
 
 ## Driving it without an agent
 

@@ -24,8 +24,9 @@ export type RoleId = "experimenter" | "compute" | "validator" | "relay" | "funde
  */
 export type AppRole = "validator" | "relay" | "worker-host";
 
-/** A sheet of Cairn.app's that a page may open (`PageSheet`). */
-export type AppSheet = "agents" | "work" | "peers" | "settings" | "new-challenge";
+/** A sheet of Cairn.app's that a page may open (`PageSheet`). `conductor`
+ * is Connect an Agent… open on its Conductor tab. */
+export type AppSheet = "agents" | "conductor" | "work" | "peers" | "settings" | "new-challenge";
 
 /** The messages the app reads; `PageRequest.swift` parses exactly these. */
 export type RoleRequest = { kind: "set-role"; role: AppRole; on: boolean };

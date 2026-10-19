@@ -13,40 +13,77 @@ import Link from "next/link";
 import { useState } from "react";
 import {
   type McpPresence,
+  conductorSetup,
   describePresence,
   slashCommand,
 } from "@/lib/agents";
+import { type AppSheet } from "@/lib/contribute";
 import { type Bridge } from "@/lib/draft";
 import { openSheet } from "@/lib/contribute";
 import { type NodeEvent } from "@/lib/journal";
 import { ago } from "@/lib/events";
-import { Badge, Hash } from "@/components/ui";
+import { Badge, Command, Hash } from "@/components/ui";
 
 /** Connect through the app, which knows the local node and key paths. */
 export function AgentConnect({ bridge }: { bridge: Bridge | null }) {
   const [error, setError] = useState<string | null>(null);
+  const open = (sheet: AppSheet) => () => {
+    if (!bridge) return;
+    setError(null);
+    openSheet(bridge, sheet).catch((cause: unknown) =>
+      setError(cause instanceof Error ? cause.message : String(cause)),
+    );
+  };
   return (
     <div className="flex flex-col gap-3">
       {bridge ? (
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            className="btn btn-primary btn-sm"
-            onClick={() =>
-              openSheet(bridge, "agents").catch((cause: unknown) =>
-                setError(cause instanceof Error ? cause.message : String(cause)),
-              )
-            }
-          >
+          <button type="button" className="btn btn-primary btn-sm" onClick={open("agents")}>
             Connect an agent…
+          </button>
+          <button type="button" className="btn btn-sm" onClick={open("conductor")}>
+            Connect Conductor…
           </button>
           <span className="text-[12px] text-ink-3">
             Cairn.app writes the configuration with this Mac&rsquo;s paths.
           </span>
           {error && <span className="text-[12px] text-bad">{error}</span>}
         </div>
-      ) : <p className="text-[12.5px] text-ink-2">Open this node in Cairn.app to connect an agent. The app sets up the connection for this computer.</p>}
+      ) : (
+        <>
+          <p className="text-[12.5px] text-ink-2">Open this node in Cairn.app to connect an agent. The app sets up the connection for this computer.</p>
+          <ConductorSetup />
+        </>
+      )}
       <p className="hint">The challenge&rsquo;s checker decides what is accepted and paid.</p>
+    </div>
+  );
+}
+
+/**
+ * Conductor by hand, for a browser tab with no app to write the configs:
+ * every workspace's agent shares this node over HTTP. In Cairn.app the
+ * Connect Conductor… button does the same and restarts the node itself.
+ */
+function ConductorSetup() {
+  const setup = conductorSetup();
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-[12.5px] text-ink-2">
+        <span className="text-ink">Conductor</span> runs Claude Code and Codex side by side, one
+        workspace each. Start this node with the agents&rsquo; port, then point both at it once:
+      </p>
+      <Command text={setup.serve} />
+      <Command text={setup.claude} />
+      <Command text={setup.codex} />
+      <p className="hint">
+        Each session gets its own connection to this one node, so workspaces can work at once
+        &mdash; a node of their own each would be refused the log&rsquo;s lock. The port is
+        loopback only, and any program on this computer can act as this node through it. Have
+        each workspace pass its own <span className="mono">node_id</span> to{" "}
+        <span className="mono">work_assignment</span> (<span className="mono">$CONDUCTOR_WORKSPACE_NAME</span>),
+        or two of them search the same slice.
+      </p>
     </div>
   );
 }

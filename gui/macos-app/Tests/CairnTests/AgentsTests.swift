@@ -55,6 +55,98 @@ final class AgentsTests: XCTestCase {
         XCTAssertEqual((server["environment"] as? [String: String])?["CAIRN_SANDBOX_CPUS"], "4")
     }
 
+    func testTheSharedNodeIsAURLForEveryClient() throws {
+        let url = "http://127.0.0.1:8001/mcp"
+        let claude = inputs(.shared, .claudeCode)
+        XCTAssertEqual(AgentStanza.arguments(claude), [], "nothing to launch: the app's node already serves")
+        XCTAssertEqual(AgentStanza.environment(claude), [:])
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(AgentStanza.render(claude).utf8)) as? [String: Any])
+        let server = try XCTUnwrap((json["mcpServers"] as? [String: Any])?["cairn"] as? [String: Any])
+        XCTAssertEqual(NSDictionary(dictionary: server), NSDictionary(dictionary: ["type": "http", "url": url]))
+        XCTAssertEqual(AgentStanza.claudeAdd(claude), "claude mcp add --transport http --scope user cairn \(url)")
+
+        let open = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(AgentStanza.render(inputs(.shared, .opencode)).utf8)) as? [String: Any])
+        let remote = try XCTUnwrap((open["mcp"] as? [String: Any])?["cairn"] as? [String: Any])
+        XCTAssertEqual(NSDictionary(dictionary: remote), NSDictionary(dictionary: ["type": "remote", "url": url, "enabled": true]))
+
+        let codex = inputs(.shared, .codex)
+        XCTAssertEqual(AgentStanza.render(codex), "[mcp_servers.cairn]\nurl = \"\(url)\"\n")
+        XCTAssertEqual(AgentStanza.codexAdd(codex), "codex mcp add cairn --url \(url)")
+
+        var moved = codex
+        moved.agentsURL = NodeSettings.agentsURL(port: 50123)
+        XCTAssertEqual(AgentStanza.render(moved), "[mcp_servers.cairn]\nurl = \"http://127.0.0.1:50123/mcp\"\n",
+                       "the live port when 8001 was taken")
+    }
+
+    func testConductorIsClaudeCodeAndCodexUserConfigs() throws {
+        XCTAssertEqual(AgentClient.conductor.targets, [.claudeCode, .codex])
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("home-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        XCTAssertEqual(AgentClient.conductor.configURLs(home: home).map(\.lastPathComponent), [".claude.json", "config.toml"])
+
+        // Claude Code's file already holds other settings and another server.
+        let claudeFile = home.appendingPathComponent(".claude.json")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try Data(#"{"numStartups": 3, "mcpServers": {"other": {"command": "x"}}}"#.utf8).write(to: claudeFile)
+
+        let i = inputs(.shared, .conductor)
+        let first = AgentStanza.install(i, home: home)
+        XCTAssertEqual(first.map(\.url.lastPathComponent), [".claude.json", "config.toml"])
+        guard case .success(.installed(_, let backup)) = first[0].outcome else { return XCTFail("\(first[0].outcome)") }
+        XCTAssertNotNil(backup, "an existing file is copied before it is rewritten")
+        guard case .success(.installed(_, nil)) = first[1].outcome else { return XCTFail("\(first[1].outcome)") }
+
+        let claude = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: claudeFile)) as? [String: Any])
+        XCTAssertEqual(claude["numStartups"] as? Int, 3)
+        let servers = try XCTUnwrap(claude["mcpServers"] as? [String: Any])
+        XCTAssertNotNil(servers["other"], "other servers survive")
+        XCTAssertEqual((servers["cairn"] as? [String: Any])?["url"] as? String, "http://127.0.0.1:8001/mcp")
+        let toml = try String(contentsOf: home.appendingPathComponent(".codex/config.toml"), encoding: .utf8)
+        XCTAssertTrue(toml.contains("[mcp_servers.cairn]\nurl = \"http://127.0.0.1:8001/mcp\"\n"), toml)
+
+        // Again: both already say this.
+        for (url, outcome) in AgentStanza.install(i, home: home) {
+            guard case .success(.alreadyConfigured) = outcome else { return XCTFail("\(url.path): \(outcome)") }
+        }
+    }
+
+    func testAnEntryThatStartsItsOwnNodeIsNotOverwritten() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("home-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        // Last month's stanza: each Conductor workspace would start `cairn run`.
+        let stdio = inputs(.runNode, .claudeCode)
+        guard case .success(.installed) = AgentStanza.install(stdio, home: home)[0].outcome else { return XCTFail() }
+        let file = home.appendingPathComponent(".claude.json")
+        let before = try Data(contentsOf: file)
+        guard case .success(.conflicting) = AgentStanza.install(inputs(.shared, .claudeCode), home: home)[0].outcome
+        else { return XCTFail("a different cairn entry is reported, not replaced") }
+        XCTAssertEqual(try Data(contentsOf: file), before)
+
+        guard case .success(.installed) = AgentStanza.install(inputs(.runNode, .codex), home: home)[0].outcome else { return XCTFail() }
+        guard case .success(.conflicting) = AgentStanza.install(inputs(.shared, .codex), home: home)[0].outcome
+        else { return XCTFail("the same for config.toml") }
+
+        // An entry a client wrote itself, with fields of its own, is the same entry.
+        XCTAssertTrue(AgentStanza.matches(["type": "http", "url": "u", "headers": [String: String]()], ["type": "http", "url": "u"]))
+        XCTAssertFalse(AgentStanza.matches(["type": "http", "url": "v"], ["type": "http", "url": "u"]))
+        XCTAssertFalse(AgentStanza.matches(["command": "/x"], ["type": "http", "url": "u"]))
+    }
+
+    func testTheNodeServesAgentsOnlyWhenAsked() {
+        var s = settings
+        let identity = URL(fileURLWithPath: dir + "/agent.identity.json")
+        XCTAssertEqual(s.agentArguments(port: 8001, signedBy: identity), [], "off unless asked: the port acts as this node")
+        s.serveAgents = true
+        XCTAssertEqual(s.agentArguments(port: 8001, signedBy: nil), ["--mcp-http", "127.0.0.1:8001"])
+        XCTAssertEqual(s.agentArguments(port: 8001, signedBy: identity),
+                       ["--mcp-http", "127.0.0.1:8001", "--mcp-identity", identity.path])
+        s.leadFleet = true
+        XCTAssertEqual(s.agentArguments(port: 8001, signedBy: identity), ["--mcp-http", "127.0.0.1:8001"],
+                       "a leader's one --mcp-identity is its fleet's, passed by fleetArguments")
+        XCTAssertEqual(NodeSettings.agentsURL(port: 8001).absoluteString, "http://127.0.0.1:8001/mcp")
+    }
+
     func testShellAndTomlQuoting() {
         XCTAssertEqual(AgentStanza.shellQuote("--data-dir"), "--data-dir")
         XCTAssertEqual(AgentStanza.shellQuote("CAIRN_SANDBOX_CPUS=4"), "CAIRN_SANDBOX_CPUS=4")

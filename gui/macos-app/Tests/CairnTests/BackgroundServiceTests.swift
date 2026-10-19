@@ -82,6 +82,17 @@ final class BackgroundServiceTests: XCTestCase {
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o700)
     }
 
+    func testTheServiceAnswersAgentsOnTheDocumentedPortWhenAsked() {
+        var shared = settings()
+        XCTAssertFalse((BackgroundService.definition(settings: shared, binary: binary)["ProgramArguments"] as? [String] ?? [])
+            .contains("--mcp-http"))
+        shared.serveAgents = true
+        let args = BackgroundService.definition(settings: shared, binary: binary)["ProgramArguments"] as? [String] ?? []
+        XCTAssertTrue(args.contains("--no-mcp"), "stdio stays off under launchd")
+        XCTAssertEqual(args.firstIndex(of: "--mcp-http").map { args[$0 + 1] }, "127.0.0.1:8001",
+                       "--no-mcp turns off stdio, not the agents' port")
+    }
+
     func testLeadingAFleetServesEveryInterfaceAndSignsWithTheLeaderIdentity() {
         let leader = settings(lead: true)
         XCTAssertEqual(leader.serveHost, "0.0.0.0")

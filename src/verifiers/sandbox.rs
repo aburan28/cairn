@@ -656,24 +656,34 @@ fn seatbelt_profile(program: &Path, plan: &Confinement<'_>, writable: &[PathBuf]
 
     let mut profile = String::from(
         "(version 1)\n(deny default)\n(import \"system.sb\")\n(deny network*)\n\
-         (allow process-fork)\n(allow process-exec)\n(allow signal (target self))\n\
-         (allow file-read-metadata)\n",
+         (allow process-fork)\n(allow process-exec)\n(allow signal (target self))\n",
     );
     // Metadata is allowed broadly because path resolution stats every
     // directory on the way down, and a tool that cannot is a broken jail. Not
     // under home directories, though: there a stat is a fact about the
     // operator (does `~/.ssh/id_ed25519` exist, how large is it, when did it
     // change) that evidence can carry out. The paths granted below, and the
-    // directories above them, are allowed again; later rules win.
+    // directories above them, are allowed by rules of their own.
+    //
+    // Every rule here is an allow, carved by `require-not`. A deny under home
+    // with allows after it for the granted paths does not work: under the
+    // real `sandbox-exec` the deny won and the bundle itself could not be
+    // listed, so precedence between rules is not something to lean on.
     let homes: Vec<PathBuf> = std::iter::once(PathBuf::from("/Users"))
         .chain(configured_home())
         .collect();
-    for home in &homes {
-        profile.push_str(&format!(
-            "(deny file-read-metadata (subpath \"{}\"))\n",
-            escape(&home.to_string_lossy())
-        ));
-    }
+    let outside_homes: String = homes
+        .iter()
+        .map(|home| {
+            format!(
+                " (require-not (subpath \"{}\"))",
+                escape(&home.to_string_lossy())
+            )
+        })
+        .collect();
+    profile.push_str(&format!(
+        "(allow file-read-metadata (require-all{outside_homes}))\n"
+    ));
     let mut ancestors: Vec<&Path> = readable
         .iter()
         .flat_map(|path| path.ancestors().skip(1))
@@ -1006,10 +1016,77 @@ mod tests {
         assert!(!profile.contains("(allow default)"));
         assert!(profile.contains("/Volumes/objectives/example"));
         assert!(profile.contains("/private/tmp/proofwork-seatbelt-work"));
-        assert!(!profile
-            .lines()
-            .any(|line| line.starts_with("(allow") && line.contains("/Users/")));
+        // Nothing under a home directory is granted. The metadata rule names
+        // `$HOME` too, but only to carve it out (`require-not`).
+        assert!(!profile.lines().any(|line| line.starts_with("(allow")
+            && !line.contains("require-not")
+            && line.contains("/Users/")));
         assert!(!profile.contains("(subpath \"/\")"));
+    }
+
+    /// The profile above, run by the real `sandbox-exec`. Its text can be
+    /// checked anywhere; whether macOS reads it the way it is written cannot,
+    /// and a profile that is too tight fails every verdict on a Mac as
+    /// `Unavailable` rather than any test here. CI's `jail-macos` job runs
+    /// this with `CAIRN_EXPECT_SANDBOX=sandbox-exec`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn under_seatbelt_a_bundle_in_home_runs_and_the_rest_of_home_is_not_seen() {
+        if !matches!(mechanism(), Mechanism::Seatbelt(_)) {
+            return;
+        }
+        let home = configured_home().expect("HOME");
+        let tag = format!("cairn-seatbelt-probe-{}", std::process::id());
+        let bundle = home.join(&tag).join("bundle");
+        let secret = home.join(format!(".{tag}-secret"));
+        let work = std::env::temp_dir().join(format!("{tag}-work"));
+        for dir in [&bundle, &work] {
+            std::fs::create_dir_all(dir).expect("dir");
+        }
+        // Read by `/bin/cat`, not run by `/usr/bin/python3`: on a Mac that is
+        // an `xcrun` shim into Xcode, which the jail rightly does not show.
+        std::fs::write(bundle.join("checker.txt"), "checked\n").expect("checker");
+        std::fs::write(&secret, "operator data\n").expect("secret");
+
+        let plan = Confinement::new(&work, &bundle, 10).scrubbed();
+        let script = "if [ -e \"$1\" ]; then echo seen; else echo hidden; fi; \
+                      /bin/cat \"$2\"; ls \"$3\" >/dev/null && echo listed";
+        let args = argv([
+            OsStr::new("-c"),
+            OsStr::new(script),
+            OsStr::new("sh"),
+            secret.as_os_str(),
+            bundle.join("checker.txt").as_os_str(),
+            bundle.as_os_str(),
+        ]);
+        let jailed = confine(Path::new("/bin/sh"), &args, &plan).expect("a seatbelt jail");
+        assert_eq!(jailed.mechanism, "sandbox-exec");
+        let mut command = jailed.command;
+        let output = command.output().expect("runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = std::fs::remove_dir_all(home.join(&tag));
+        let _ = std::fs::remove_file(&secret);
+        let _ = std::fs::remove_dir_all(&work);
+
+        assert!(
+            stdout.contains("hidden"),
+            "a home file was stat-able:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("checked"),
+            "the bundle's checker did not run:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("listed"),
+            "the bundle did not resolve:\n{stdout}\n{stderr}"
+        );
+        // The jail starts in the bundle; a shell that cannot find its own
+        // working directory there says so on stderr.
+        assert!(
+            !stderr.contains("getcwd"),
+            "the working directory did not resolve:\n{stdout}\n{stderr}"
+        );
     }
 
     /// A stat is a fact too. Under home directories only the granted paths,
@@ -1024,21 +1101,29 @@ mod tests {
             &plan,
             std::slice::from_ref(&work),
         );
-        let deny = profile
-            .find("(deny file-read-metadata (subpath \"/Users\"))")
-            .expect("home metadata is denied");
+        // Allows only: macOS does not let a later allow override a deny.
+        assert!(!profile.contains("(deny file-read"), "{profile}");
+        assert!(
+            !profile.contains("(allow file-read-metadata)\n"),
+            "{profile}"
+        );
+        assert!(
+            profile.contains(
+                "(allow file-read-metadata (require-all (require-not (subpath \"/Users\"))"
+            ),
+            "{profile}"
+        );
         for ancestor in ["/Users", "/Users/alice", "/Users/alice/objectives"] {
-            let allow = profile
-                .find(&format!(
+            assert!(
+                profile.contains(&format!(
                     "(allow file-read-metadata (literal \"{ancestor}\"))"
-                ))
-                .unwrap_or_else(|| panic!("{ancestor} is not resolvable:\n{profile}"));
-            assert!(allow > deny, "a later rule wins, so the allow must follow");
+                )),
+                "{ancestor} is not resolvable:\n{profile}"
+            );
         }
-        let granted = profile
-            .find("(allow file-read* file-map-executable (subpath \"/Users/alice/objectives/example\"))")
-            .expect("the bundle is readable");
-        assert!(granted > deny);
+        assert!(profile.contains(
+            "(allow file-read* file-map-executable (subpath \"/Users/alice/objectives/example\"))"
+        ));
         assert!(!profile.contains("(literal \"/Users/alice/.ssh\")"));
     }
 

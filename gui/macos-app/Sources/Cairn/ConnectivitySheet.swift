@@ -103,6 +103,10 @@ final class ConnectivityCheck: ObservableObject {
                 } catch { return (.warning, "could not read /sessions: \(error.localizedDescription)") }
             })
         }
+        // Where agents on this Mac connect, when the node serves them.
+        if let agents = node.agentsURL {
+            add("agents", "Agents (MCP)", agents.absoluteString, { await Self.agents(agents) })
+        }
         if node.isAttached {
             add("attached", "P2P", "", nil, status: .info,
                 detail: "attached to another node; its listener is that node's, not this Mac's")
@@ -191,6 +195,28 @@ final class ConnectivityCheck: ObservableObject {
         }
 
         return jobs
+    }
+
+    /// The agents endpoint's own description, `GET /` beside `POST /mcp`,
+    /// which says it is cairn's without opening an MCP session there.
+    nonisolated static func agents(_ url: URL) async -> (ConnectivityRow.Status, String) {
+        var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        parts?.path = "/"
+        guard let root = parts?.url else { return (.failed, "not a URL") }
+        var request = URLRequest(url: root)
+        request.timeoutInterval = 5
+        do {
+            let (data, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            guard status == 200 else { return (.failed, "answered HTTP \(status)") }
+            guard info?["name"] as? String == "cairn" else {
+                return (.failed, "something other than cairn answers on that port")
+            }
+            return (.ok, "answering MCP; agents on this Mac connect here, one session each")
+        } catch {
+            return (.failed, error.localizedDescription)
+        }
     }
 
     /// The reader's page, as the window would load it.
