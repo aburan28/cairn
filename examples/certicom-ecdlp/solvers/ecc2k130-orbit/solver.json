@@ -1,0 +1,155 @@
+{
+  "abi": "cairn-solver/v1",
+  "files": {
+    "bin/ecc2k130-orbit-darwin-arm64": {
+      "sha256": "70f5ce93416f8c0f5d1c264d494a32f08bd1f7e2db27791c6ab3358f944d8f77",
+      "size": 478848
+    },
+    "bin/ecc2k130-orbit-linux-x86_64": {
+      "sha256": "06f5d78e9c2c098a2bb41101b1a4fcbd37173927b5cb2d8739b6cd0f17545da3",
+      "size": 640440
+    },
+    "build.sh": {
+      "sha256": "ee1621a3e060c10b3e655824a606a0b54b476a4cc3b0777610eba9f729e7ab8b",
+      "size": 1936
+    },
+    "jobs/ecc2k130.json": {
+      "sha256": "493f92c981c13756e45864f02e22364344944362a8b900587cb36ac9dc4b126f",
+      "size": 814
+    },
+    "src/main.rs": {
+      "sha256": "1fde107e8c4980862373bc32c0f3918b8dbf56593c26dfd4bc33d3fca1f1beb9",
+      "size": 46897
+    }
+  },
+  "name": "ecc2k130-orbit-walk",
+  "objective": "sha256:f59556b4b74664f6c7326e21240bee831a1db2a3bdeab7d60538176f67fd158c",
+  "resources": {
+    "memory_mb": 256,
+    "round_seconds": 600
+  },
+  "summary": "Walks the shared ECC2K-130 Pollard rho on every CPU thread offered, natively (arm64 PMULL, x86-64 PCLMULQDQ), and submits the distinguished orbits it reaches with their witnesses. A trail averages about 2^25 steps; one 2024-class core reaches one every few seconds. Rounds last ten minutes, and each orbit is re-checked against its witness before it is submitted. CPU only.",
+  "targets": {
+    "darwin-arm64": {
+      "args": [
+        "--job",
+        "jobs/ecc2k130.json",
+        "--lanes",
+        "16"
+      ],
+      "entry": "bin/ecc2k130-orbit-darwin-arm64"
+    },
+    "linux-x86_64": {
+      "args": [
+        "--job",
+        "jobs/ecc2k130.json",
+        "--lanes",
+        "16"
+      ],
+      "entry": "bin/ecc2k130-orbit-linux-x86_64"
+    }
+  },
+  "tests": [
+    {
+      "assignment": {
+        "epoch": 1,
+        "epoch_ends_in_seconds": 600,
+        "trails": 2,
+        "units": {
+          "end": 5868,
+          "first": 5804,
+          "of": 281474976710656,
+          "unit_price": 1000
+        }
+      },
+      "expect": [
+        {
+          "dps": [
+            {
+              "j": [
+                12475,
+                12678,
+                12075,
+                10790,
+                9564,
+                9334,
+                10016,
+                11432
+              ],
+              "seed": "16ac0000",
+              "x": "2600d0c203c1020840a2093302500b5"
+            },
+            {
+              "j": [
+                98963,
+                101102,
+                95564,
+                84969,
+                75470,
+                74594,
+                80129,
+                90399
+              ],
+              "seed": "16ac0001",
+              "x": "858192200a089842294c20ac208419"
+            }
+          ]
+        }
+      ],
+      "name": "the first two trails of a unit",
+      "round": 0,
+      "verify": "accept"
+    },
+    {
+      "assignment": {
+        "epoch": 1,
+        "epoch_ends_in_seconds": 600,
+        "trails": 2,
+        "units": {
+          "end": 6589,
+          "first": 6525,
+          "of": 281474976710656,
+          "unit_price": 1000
+        }
+      },
+      "expect": [
+        {
+          "dps": [
+            {
+              "j": [
+                98160,
+                100649,
+                95022,
+                84035,
+                75143,
+                73348,
+                79183,
+                89987
+              ],
+              "seed": "197e0000",
+              "x": "125c834038162311b18a80808100401"
+            },
+            {
+              "j": [
+                29863,
+                30553,
+                28883,
+                25733,
+                22941,
+                22161,
+                24048,
+                27419
+              ],
+              "seed": "197e0001",
+              "x": "2208443e2041404c10bd00602290849"
+            }
+          ]
+        }
+      ],
+      "name": "the round picks the unit",
+      "round": 1,
+      "verify": "accept"
+    }
+  ],
+  "version": "1.0.0"
+}
