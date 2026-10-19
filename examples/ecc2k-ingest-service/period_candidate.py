@@ -167,7 +167,7 @@ def assemble(args, s3=None):
     before = next((item for item in snapshots
                    if start - args.period_seconds <= utc_second(item["generated_at"]) <= start), None)
     if before is None:
-        raise MissingEvidence(f"{key}: no status generated before the period boundary")
+        raise ValueError(f"{key}: completed journal has no status generated before the period boundary")
     after = next((item for item in snapshots if end <= utc_second(item["generated_at"])), None)
     after_journal = None
     if after is None:
@@ -185,7 +185,7 @@ def assemble(args, s3=None):
                       if type(item) is dict and type(item.get("generated_at")) is str
                       and end <= utc_second(item["generated_at"]) <= end + args.period_seconds), None)
         if after is None:
-            raise MissingEvidence(f"{next_key}: no status generated after the period boundary")
+            raise ValueError(f"{next_key}: completed journal has no status generated after the period boundary")
         if (not re.fullmatch(r"[0-9a-f]{64}", after.get("sha256", ""))
                 or after.get("file") != "status-" + after["sha256"] + ".json"):
             raise ValueError(f"{next_key}: after status reference is malformed")
