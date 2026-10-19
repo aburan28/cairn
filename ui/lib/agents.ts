@@ -70,6 +70,28 @@ export function claudeAdd(binary = "cairn"): string {
   return `claude mcp add cairn --scope user -- ${binary} run`;
 }
 
+/** Where a node started with `--mcp-http` answers agents, as Cairn.app and
+ * `docs/agents.md` set it up. */
+export const AGENTS_URL = "http://127.0.0.1:8001/mcp";
+
+/**
+ * Conductor (conductor.build) runs Claude Code and Codex side by side, one
+ * workspace each, and every session starts the MCP servers its user config
+ * names. A stanza that launches a node is then a writer per workspace, and
+ * all but the first are refused the log's lock -- so the node serves MCP
+ * over HTTP once and each client is pointed at that URL. Unlike the stdio
+ * stanzas, none of these names a path on this computer, so a browser can
+ * show them as they are: the flag for this node's `cairn run`, then the
+ * command each client writes its own user config with.
+ */
+export function conductorSetup(url = AGENTS_URL): { serve: string; claude: string; codex: string } {
+  return {
+    serve: `cairn run --mcp-http ${new URL(url).host}`,
+    claude: `claude mcp add --transport http --scope user cairn ${url}`,
+    codex: `codex mcp add cairn --url ${url}`,
+  };
+}
+
 /** The slash command a prompt is in Claude Code. */
 export function slashCommand(prompt: string): string {
   return `/mcp__cairn__${prompt}`;

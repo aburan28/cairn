@@ -120,6 +120,8 @@ themselves rather than reading a status word, each attempt made now from
 this Mac:
 
 - **Reader**: an HTTP request to the page this window shows.
+- **Agents (MCP)**, when the node serves them: `GET /` on that port, which
+  names the server without opening an MCP session there.
 - **P2P listener**: a TCP connect to the port the node said it bound. When
   Settings accepts inbound, also to that port on each of this Mac's LAN
   addresses, with whether the macOS firewall is on (it asks once per program
@@ -304,14 +306,23 @@ writes. A match is a suggestion from the node's alias catalog, never a rule.
 ## Connect an agent
 
 **Node → Connect an Agent…** (⇧⌘A): the MCP
-stanza that points Claude Code, Codex or OpenCode at cairn, with this Mac's
-real paths and this window's settings in it, and a copy button. The shapes
-are the ones `scripts/mcp-config.sh` writes and
+stanza that points Claude Code, Codex, OpenCode or Conductor at cairn, with
+this Mac's real paths and this window's settings in it, and a copy button.
+The shapes are the ones `scripts/mcp-config.sh` writes and
 [docs/agents.md](../../docs/agents.md#wiring) shows, so nothing here drifts
 from the flags the server takes.
 
-Two arrangements, because a log has one writer:
+Three arrangements, because a log has one writer:
 
+- **Agents share this node.** This app keeps running the node and serves
+  MCP beside it on loopback, `--mcp-http 127.0.0.1:8001` (another free port
+  if that one is taken; the sheet says which). The stanza is that URL, and
+  every client that connects opens its own session on the one log, so any
+  number of agents work at once and what they submit reaches the network
+  live. Adding the stanza turns the endpoint on and restarts the node;
+  **Stop Serving** turns it off. Nothing off this Mac can reach the port, and
+  any program on it can, acting as this node -- which is why it is off until
+  asked for.
 - **The agent runs this node.** The client launches `cairn run` on this
   node's data folder, with the CPU and memory limits from Settings in its
   environment, and becomes the node's supervisor: one process owns the log,
@@ -325,11 +336,26 @@ Two arrangements, because a log has one writer:
   running. Nothing it writes reaches peers while the client runs, and it
   sees only objectives in that log.
 
+**Conductor** has no MCP config of its own -- each of its workspaces runs
+Claude Code or Codex, which read their user configs when a session starts --
+so it takes the shared node, and **Add to Conductor…** writes the entry into
+both `~/.claude.json` and `~/.codex/config.toml`. A stdio stanza there would
+start a `cairn run` per workspace, and every one after the first would be
+refused the log's lock. [docs/agents.md](../../docs/agents.md#several-agents-on-one-node-conductor)
+has the same by hand, and why each workspace should pass its own `node_id`
+to `work_assignment`.
+
+Adding never overwrites: other settings and servers in the file are kept, a
+backup is saved, and a `cairn` entry that already says something else is
+left alone and named, with the command that removes it.
+
 **Create Identity** runs `cairn identity --out <data folder>/agent.identity.json`;
-the stanza then names it (`--mcp-identity`, or `--identity`), so the agent's
-submissions are signed and its public key is the submitter name nobody else
-can claim. For Claude Code the sheet also shows the `claude mcp add` command
-that writes the stanza itself.
+the stanza then names it (`--mcp-identity`, or `--identity`; the shared node
+restarts to sign with it), so the agent's submissions are signed and its
+public key is the submitter name nobody else can claim. A fleet leader's
+shared node signs with `leader.identity.json` instead: a node has one
+`--mcp-identity`. For Claude Code and Codex the sheet also shows the
+`claude mcp add` / `codex mcp add` command that writes the stanza itself.
 
 ## Work on this Mac
 
@@ -358,7 +384,8 @@ stops with the app.
 
 The reader's **Contribute** page (and the challenge page's *Join this
 challenge* box) has a button for every role when it is shown in this
-window, so nothing there asks for a terminal: **Connect an agent…** and
+window, so nothing there asks for a terminal: **Connect an agent…**,
+**Connect Conductor…** (the same sheet, on its Conductor tab) and
 **Work on this Mac…** open the sheets above, and **Check answers here**,
 **Relay here** and **Share on my network** flip the matching toggle in
 Settings ▸ Roles and restart the node. Each toggle asks first, with a
@@ -379,6 +406,7 @@ objective's pinned checker, one at a time, in a jail.
 | Attach to URL | off (run a local node) | — (no process; window loads the URL) |
 | Keep the node running in the background | off | — (a launchd agent, `org.cairn.node`, runs `cairn run --no-mcp` with every setting below; the window attaches to it) |
 | Lead a fleet | off | `--serve 0.0.0.0:<port>`, `--mcp-identity <data folder>/leader.identity.json`, `CAIRN_FLEET=<member networks>` |
+| Agents share this node (Connect an Agent…) | off | `--mcp-http 127.0.0.1:8001`, and `--mcp-identity <data folder>/agent.identity.json` when that exists and the node leads no fleet |
 | Serve members over Tailscale only | off | `--serve tailnet:<port>` in place of `0.0.0.0:<port>` |
 | CPU cores | all | `CAIRN_SANDBOX_CPUS` |
 | Memory for each verifier | 4 GB | `CAIRN_SANDBOX_MEMORY_MB` (`0` when switched off) |

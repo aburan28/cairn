@@ -28,6 +28,8 @@ enum PageRole: String, CaseIterable {
 /// node is started with -- and each is already a menu item here.
 enum PageSheet: String, CaseIterable {
     case agents
+    /// Connect an Agent…, open on its Conductor tab.
+    case conductor
     case work
     case peers
     case settings

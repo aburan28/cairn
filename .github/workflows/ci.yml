@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 # A newer push to a pull request supersedes the run it replaces, so cancel it:
-# this workflow is 12 jobs, two of them on macOS runners, and every superseded
+# this workflow is 13 jobs, three of them on macOS runners, and every superseded
 # run holds those runners until it finishes. A push to main is never cancelled,
 # so every merged revision still gets a finished result.
 concurrency:
@@ -291,6 +291,30 @@ jobs:
       - run: cargo test --locked --all-targets
         env:
           CAIRN_EXPECT_SANDBOX: bwrap
+
+  jail-macos:
+    # The same question for a Mac node, whose jail is a seatbelt profile this
+    # crate writes. Its text is unit-tested on Linux, but only `sandbox-exec`
+    # can say whether macOS reads it as written, and a profile that is too
+    # tight does not fail a test: it turns every verdict on a Mac into
+    # Unavailable. So the verifier suite runs here inside the real jail, and
+    # `under_seatbelt_a_bundle_in_home_runs_and_the_rest_of_home_is_not_seen`
+    # runs a checker from a bundle under $HOME while another file in $HOME
+    # must stay invisible to it. The rest of the suite is the `rust` job's.
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.jail != 'false')
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The probe `sandbox::mechanism` runs, by name, so a runner where the
+      # jail cannot start fails here rather than going green unjailed.
+      - run: sandbox-exec -p '(version 1)(allow default)' /usr/bin/true
+      - run: cargo test --locked --lib verifiers
+        env:
+          CAIRN_EXPECT_SANDBOX: sandbox-exec
 
   msrv:
     # The crate claims rust-version 1.89 (`File::try_lock` stabilized there).

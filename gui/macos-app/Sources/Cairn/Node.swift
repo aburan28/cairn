@@ -33,6 +33,10 @@ final class Node: ObservableObject {
     /// node has said so; never invented by the app.
     @Published private(set) var peerId: String?
     @Published private(set) var listenAddress: String?
+    /// Where this node answers agents over MCP, when Settings asked it to:
+    /// `http://127.0.0.1:<port>/mcp`. Nil when it does not, and when this
+    /// window is attached to a node it did not start with that flag.
+    @Published private(set) var agentsURL: URL?
     /// Recent discovery / session lines, newest last, for the status strip.
     @Published private(set) var networkLines: [String] = []
     @Published private(set) var sessionsOK = 0
@@ -60,6 +64,9 @@ final class Node: ObservableObject {
     /// What New Challenge… opens with: the description the reader's Post a
     /// challenge page handed over, or nil from the Node menu.
     private(set) var challengeBrief: String?
+    /// What Connect an Agent… opens on: Conductor when the reader's page
+    /// asked for it, else Claude Code.
+    private(set) var agentsClient: AgentClient = .claudeCode
 
     /// Where the node keeps its log, keys and queue.
     var dataDir: URL { settings.dataFolder }
@@ -157,7 +164,9 @@ final class Node: ObservableObject {
         if sheetIsOpen { return "Close the sheet that is open in Cairn.app first." }
         switch sheet {
         case .agents:
-            presentAgents = true
+            connectAgent()
+        case .conductor:
+            connectAgent(.conductor)
         case .work:
             work(on: objective)
         case .peers:
@@ -171,6 +180,12 @@ final class Node: ObservableObject {
             return "Settings opens from the Cairn menu."
         }
         return nil
+    }
+
+    /// Connect an Agent…, open on `client`.
+    func connectAgent(_ client: AgentClient = .claudeCode) {
+        agentsClient = client
+        presentAgents = true
     }
 
     /// Start `cairn work` as the sheet asked, with the key it is paid to
@@ -272,6 +287,7 @@ final class Node: ObservableObject {
         lines = []
         peerId = nil
         listenAddress = nil
+        agentsURL = nil
         networkLines = []
         sessionsOK = 0
         binaryVersion = nil
@@ -282,6 +298,11 @@ final class Node: ObservableObject {
         // same way the iOS reader retargets. Resource limits and bootstrap
         // files do not apply — that node already chose them.
         if let attach = settings.attachURL {
+            // The service was started from these same settings, on the
+            // fixed port; any other node's flags are its own business.
+            if runsInBackground, settings.serveAgents {
+                agentsURL = NodeSettings.agentsURL(port: NodeSettings.agentsPort)
+            }
             probe?.cancel()
             probe = Task { await waitUntilServing(attach, process: nil) }
             return
@@ -370,6 +391,14 @@ final class Node: ObservableObject {
             return
         }
         listenAddress = "\(settings.p2pHost):\(p2p)"
+        // Agents' configs name the port, so the documented one when it is
+        // free; otherwise another, said in Connect an Agent…, rather than a
+        // node that refuses to start over a port it was not going to need.
+        let agents = settings.serveAgents ? Self.freePort(preferring: NodeSettings.agentsPort, on: "127.0.0.1") : 0
+        if settings.serveAgents, agents == 0 {
+            state = .failed("Could not find a free port to serve agents on.")
+            return
+        }
 
         let p = Process()
         p.executableURL = binary
@@ -379,6 +408,7 @@ final class Node: ObservableObject {
             "--listen", "\(settings.p2pHost):\(p2p)",
             "--serve", "\(settings.serveHost):\(http)",
         ] + settings.runArguments + settings.fleetArguments
+            + settings.agentArguments(port: agents, signedBy: settings.existingAgentIdentity)
         p.environment = Self.childEnvironment(settings)
 
         let input = Pipe()
@@ -413,6 +443,7 @@ final class Node: ObservableObject {
         process = p
         stdin = input
         self.sink = sink
+        if settings.serveAgents { agentsURL = NodeSettings.agentsURL(port: agents) }
         let url = URL(string: "http://127.0.0.1:\(http)/ui/")!
         Task { await waitUntilServing(url, process: p) }
     }
@@ -684,6 +715,14 @@ final class Node: ObservableObject {
         }
     }
 
+    /// Serve agents over MCP, or stop: written to Settings and applied. The
+    /// flag is the node's, so either way is a restart -- of the service, when
+    /// one runs the node.
+    func setServeAgents(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: NodeSettings.Key.serveAgents)
+        restart()
+    }
+
     // MARK: internals
 
     private func waitUntilServing(_ url: URL, process p: Process?) async {
@@ -732,6 +771,7 @@ final class Node: ObservableObject {
         sink = nil
         process = nil
         stdin = nil
+        agentsURL = nil
     }
 
     nonisolated private static func wait(for p: Process, seconds: Double) -> Bool {

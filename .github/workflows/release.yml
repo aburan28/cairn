@@ -368,11 +368,20 @@ jobs:
             echo "install.sh accepted a bad --libc" >&2; exit 1
           fi
 
+      # Same reason for the Windows wrapper around it. pwsh is on the runner
+      # image; parsing is all that can be checked without a Windows host.
+      - name: the Windows installer parses
+        shell: pwsh
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/install.ps1", [ref]$null, [ref]$errors)
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+
       - name: upload to the release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/release-upload.sh "$VERSION" scripts/install.sh
+        run: scripts/release-upload.sh "$VERSION" scripts/install.sh scripts/install.ps1
 
   # The .deb and the .rpm: the musl binary `build` already tested, wrapped.
   #
