@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 import re
+import ssl
 import sys
 from urllib.parse import urlsplit
 
@@ -29,6 +30,18 @@ def endpoint(url, allow_loopback_http):
 def rpc_error(identifier, message):
     return {"jsonrpc": "2.0", "id": identifier,
             "error": {"code": -32000, "message": message}}
+
+
+def tls_context():
+    defaults = ssl.get_default_verify_paths()
+    if (defaults.cafile is None and defaults.capath is None
+            and not os.environ.get("SSL_CERT_FILE")
+            and not os.environ.get("SSL_CERT_DIR")
+            and os.path.isfile("/etc/ssl/cert.pem")):
+        # Some Python.org macOS installs have no bundled roots even though the
+        # operating system has a CA bundle. Keep certificate verification on.
+        return ssl.create_default_context(cafile="/etc/ssl/cert.pem")
+    return ssl.create_default_context()
 
 
 def run(url, allow_loopback_http=False):
@@ -74,9 +87,12 @@ def run(url, allow_loopback_http=False):
         if session:
             headers["Mcp-Session-Id"] = session
             headers["MCP-Protocol-Version"] = "2025-06-18"
-        connection_type = (http.client.HTTPSConnection if address.scheme == "https"
-                           else http.client.HTTPConnection)
-        connection = connection_type(address.hostname, address.port, timeout=timeout)
+        if address.scheme == "https":
+            connection = http.client.HTTPSConnection(
+                address.hostname, address.port, timeout=timeout, context=tls_context())
+        else:
+            connection = http.client.HTTPConnection(address.hostname, address.port,
+                                                    timeout=timeout)
         try:
             connection.request("POST", "/mcp", body=raw.rstrip(b"\n"), headers=headers)
             response = connection.getresponse()
