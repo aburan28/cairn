@@ -626,7 +626,9 @@ impl Ledger {
     /// fork it silently and `audit` reports the damage afterwards, which is
     /// too late for the writes that already landed.
     ///
-    /// Advisory, on the log file itself: `flock` semantics via
+    /// On Unix this is advisory, on the log file itself. On Windows a
+    /// canonical-path sidecar keeps mandatory locks away from log reads.
+    /// Both use
     /// [`std::fs::File::try_lock`], released when the handle drops or the
     /// process exits — including on a crash, so a killed node leaves no stale
     /// lock to clear by hand. It binds processes on one machine, which is the
@@ -655,11 +657,33 @@ impl Ledger {
         // `create(true).append(true)` rather than `write`: taking the lock must
         // not truncate a log that already exists, and must still work before
         // the first append has created one.
-        let file = OpenOptions::new()
+        let log_file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .map_err(|e| io_error(format!("opening {} for writing", path.display()), e))?;
+        #[cfg(not(windows))]
+        let file = log_file;
+        #[cfg(windows)]
+        drop(log_file);
+        // Windows byte-range locks are mandatory: locking the log itself
+        // would also block our separate append handle and concurrent readers.
+        // Use a stable sidecar for writer exclusion, resolving aliases first.
+        // Never remove it: unlinking a locked sidecar permits a second writer
+        // to create and lock a different file at the same name.
+        #[cfg(windows)]
+        let file = {
+            let canonical = fs::canonicalize(&path)
+                .map_err(|e| io_error(format!("resolving {}", path.display()), e))?;
+            let mut lock_path = canonical.into_os_string();
+            lock_path.push(".writer-lock");
+            OpenOptions::new()
+                .create(true)
+                .read(true)
+                .append(true)
+                .open(PathBuf::from(lock_path))
+                .map_err(|e| io_error(format!("opening writer lock for {}", path.display()), e))?
+        };
         // Held by somebody else, or the platform/filesystem cannot lock. Both
         // are refusals: a lock that silently does nothing is worse than no
         // lock, because it reads as a guarantee.
