@@ -168,7 +168,7 @@ class CandidateTests(unittest.TestCase):
                  "sha256": "b" * 64, "version_id": "v1"}]))
         attempted = []
 
-        def assemble(args):
+        def assemble(args, database_url=None):
             attempted.append(args.period)
             return self.root / "candidate"
 
