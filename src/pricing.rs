@@ -174,11 +174,11 @@ pub fn quote(offer: &ResourceOffer, request: &QuoteRequest) -> Result<Value, Str
     if request.cpu_millis == 0 || request.duration_ms == 0 {
         return Err("CPU allocation and duration_ms must be positive".into());
     }
-    if !offer
+    if offer
         .cpus
-        .is_some_and(|n| u128::from(n) * 1000 >= u128::from(request.cpu_millis))
-        || !offer.cpu_millis.is_none_or(|n| n >= request.cpu_millis)
-        || (request.memory_mb > 0 && !offer.memory_mb.is_some_and(|n| n >= request.memory_mb))
+        .is_none_or(|n| u128::from(n) * 1000 < u128::from(request.cpu_millis))
+        || offer.cpu_millis.is_some_and(|n| n < request.cpu_millis)
+        || (request.memory_mb > 0 && offer.memory_mb.is_none_or(|n| n < request.memory_mb))
         || offer.concurrency == Some(0)
         || !request.cpu.matches(offer.cpu.as_ref())
     {
