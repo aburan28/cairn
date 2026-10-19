@@ -13,15 +13,17 @@ import {
   ROLES,
   ROLE_TOGGLE,
   type RoleId,
+  type OpenGoals,
   type RoleInfo,
+  afterRead,
   openSheet,
   setRole,
 } from "@/lib/contribute";
 import { type Bridge, appBridge } from "@/lib/draft";
 import { objectiveTitle } from "@/lib/title";
 import { AgentConnect } from "@/components/agents";
-import { WorkPanel } from "@/components/WorkPanel";
-import { useNode } from "@/components/hooks";
+import { OfferCompute } from "@/components/OfferCompute";
+import { useEvery, useNode } from "@/components/hooks";
 import { Badge, Box, Note, PageHeader, Sheet } from "@/components/ui";
 
 /**
@@ -40,7 +42,8 @@ import { Badge, Box, Note, PageHeader, Sheet } from "@/components/ui";
 export default function Page() {
   const base = useNode();
   const [network, setNetwork] = useState<NetworkResponse | null>(null);
-  const [objectives, setObjectives] = useState<Objective[]>([]);
+  const [goals, setGoals] = useState<OpenGoals>({ objectives: [], live: null });
+  const objectives = goals.objectives;
   const [underserved, setUnderserved] = useState<Underserved[]>([]);
   const [origin, setOrigin] = useState("");
   const [bridge, setBridge] = useState<Bridge | null>(null);
@@ -61,18 +64,22 @@ export default function Page() {
     if (ids[fromHash]) setOpen(ids[fromHash]);
   }, []);
 
-  useEffect(() => {
+  // Read again on a timer rather than once. Cairn.app opens this page while
+  // the node it attaches to may still be starting; a single read that missed
+  // left the sheet saying "no open goal" until someone reloaded the page.
+  // A failed read keeps the last good answer instead of blanking it.
+  const read = useCallback(async () => {
     if (base === null) return;
-    void Promise.all([
+    const [net, feed, scarce] = await Promise.all([
       fetchNetwork(base).catch(() => null),
       loadObjectives(base),
       fetchGoals(base).catch(() => null),
-    ]).then(([net, feed, goals]) => {
-      setNetwork(net);
-      setObjectives(feed.live ? feed.objectives.filter((o) => o.open) : []);
-      setUnderserved(goals?.underserved ?? []);
-    });
+    ]);
+    if (net) setNetwork(net);
+    if (scarce) setUnderserved(scarce.underserved ?? []);
+    setGoals((previous) => afterRead(previous, feed));
   }, [base]);
+  useEvery(read, 20, base !== null, base);
 
   const declared = new Set<string>(network?.node.roles.declared ?? []);
 
@@ -177,6 +184,8 @@ export default function Page() {
             <OfferCompute
               network={network}
               objectives={objectives}
+              live={goals.live}
+              onRetry={() => void read()}
               requestedObjective={requestedObjective}
               underserved={underserved}
               origin={base || origin}
@@ -344,84 +353,6 @@ function RoleCard({ role, on, onOpen }: { role: RoleInfo; on: boolean; onOpen: (
       <p className="text-[12.5px] leading-relaxed text-ink-3">{role.payDetail}</p>
       <span className="mt-auto pt-1 text-[12.5px] font-medium text-accent">{ACTION[role.id]} →</span>
     </button>
-  );
-}
-
-// -- offer compute ---------------------------------------------------------------
-
-function OfferCompute({
-  network,
-  objectives,
-  requestedObjective,
-  underserved,
-  origin,
-  bridge,
-  busy,
-  onShare,
-  onWork,
-}: {
-  network: NetworkResponse | null;
-  objectives: Objective[];
-  requestedObjective: string | null;
-  underserved: Underserved[];
-  origin: string;
-  bridge: Bridge | null;
-  busy: boolean;
-  onShare: () => void;
-  onWork: (objective?: string) => void;
-}) {
-  const [objective, setObjective] = useState("");
-
-  useEffect(() => {
-    if (objective || objectives.length === 0) return;
-    if (requestedObjective && objectives.some((row) => row.id === requestedObjective)) {
-      setObjective(requestedObjective);
-      return;
-    }
-    const scarce = underserved.flatMap((row) => row.objectives).find((id) => objectives.some((row) => row.id === id));
-    setObjective(scarce ?? objectives[0].id);
-  }, [objectives, underserved, objective, requestedObjective]);
-
-  return (
-    <div className="flex flex-col gap-4 text-[13px]">
-      <p className="text-ink-2">
-        Choose a goal, then start a worker on this Mac. The worker takes a slice of the search,
-        runs the solver you chose in Cairn.app, and sends its answers for verification.
-      </p>
-      <label className="flex flex-col gap-1 text-[12px] text-ink-3">
-        Goal to work on
-        <select className="field" value={objective} onChange={(event) => setObjective(event.target.value)} disabled={!objectives.length}>
-          {objectives.length === 0 && <option value="">No open goal on this node</option>}
-          {objectives.map((row) => <option key={row.id} value={row.id}>{objectiveTitle(row)}</option>)}
-        </select>
-      </label>
-      {objective && <WorkPanel objective={objective} base={origin} />}
-      {bridge && (
-        <button type="button" className="btn btn-sm self-start" disabled={busy || !objective} onClick={() => onWork(objective)}>
-          Choose or change solver…
-        </button>
-      )}
-      {!bridge && (
-        <p className="text-ink-2">
-          Open this node in Cairn.app on the computer that will do the work. Choose a goal and
-          a solver there, then use the Start and Stop controls above.
-        </p>
-      )}
-      {network?.node.reach && !network.node.reach.lan && (
-        <div className="rounded-lg border border-edge bg-surface-2 p-3 text-ink-2">
-          Other machines cannot reach this node yet.
-          {bridge && (
-            <button type="button" className="btn btn-sm mt-2 block" onClick={onShare} disabled={busy}>
-              Share this node on my network
-            </button>
-          )}
-        </div>
-      )}
-      <p className="text-[12px] text-ink-3">
-        CPU use is measured on this Mac. Search rate comes from worker reports and appears only when
-        its solver measures steps. Rewards count verified results in the log, never idle time.
-      </p>
-    </div>
   );
 }
 
