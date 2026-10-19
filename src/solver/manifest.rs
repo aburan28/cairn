@@ -409,15 +409,29 @@ pub fn is_record_id(text: &str) -> bool {
 /// arrived from a stranger.
 pub fn valid_path(path: &str) -> bool {
     path.len() <= 200
-        && path != "solver.json"
+        && !path.eq_ignore_ascii_case("solver.json")
         && path.split('/').count() <= 8
         && path.split('/').all(|part| {
             !part.is_empty()
                 && !part.starts_with('.')
+                && !part.ends_with('.')
                 && part
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                && !windows_device_name(part)
         })
+}
+
+/// A package can be published on a case-sensitive filesystem and installed on
+/// Windows or a case-insensitive volume. Refuse DOS device names there even
+/// when they have an extension (`NUL.txt` is still a device path on Windows).
+fn windows_device_name(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or_default();
+    let stem = stem.to_ascii_lowercase();
+    matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
+        || (stem.len() == 4
+            && (stem.starts_with("com") || stem.starts_with("lpt"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
 }
 
 fn parse_files(value: Option<&Value>) -> Result<BTreeMap<String, FileEntry>, Invalid> {
@@ -428,12 +442,18 @@ fn parse_files(value: Option<&Value>) -> Result<BTreeMap<String, FileEntry>, Inv
         return invalid(format!("files lists 1 to {MAX_FILES} files"));
     }
     let mut files = BTreeMap::new();
+    let mut portable_paths = std::collections::BTreeSet::new();
     let mut total: u64 = 0;
     for (path, entry) in object {
         if !valid_path(path) {
             return invalid(format!(
                 "file path {path:?} must be relative, '/'-separated, use only letters, digits, \
                  '.', '_', '-', and have no hidden, empty, '.' or '..' part"
+            ));
+        }
+        if !portable_paths.insert(path.to_ascii_lowercase()) {
+            return invalid(format!(
+                "file path {path:?} collides on a case-insensitive filesystem"
             ));
         }
         let hash = entry.get("sha256").and_then(Value::as_str).unwrap_or("");
@@ -462,6 +482,24 @@ fn parse_files(value: Option<&Value>) -> Result<BTreeMap<String, FileEntry>, Inv
         return invalid(format!(
             "the package is {total} bytes; the limit is {MAX_PACKAGE_BYTES}"
         ));
+    }
+    // A case-insensitive filesystem can make one file collide with a
+    // differently-cased directory prefix (for example, `Foo` and
+    // `foo/bar`).
+    for path in &portable_paths {
+        let mut prefix = String::new();
+        let parts: Vec<_> = path.split('/').collect();
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(part);
+            if portable_paths.contains(&prefix) {
+                return invalid(format!(
+                    "file path {path:?} collides with a directory on a case-insensitive filesystem"
+                ));
+            }
+        }
     }
     // A file and a directory of the same name cannot both be on disk.
     for path in files.keys() {
@@ -745,13 +783,47 @@ mod tests {
             ".hidden",
             "a/..",
             "solver.json",
+            "SOLVER.JSON",
             "a b",
+            "notes.",
+            "CON",
+            "nul.txt",
+            "dir/COM1.log",
+            "LPT9",
         ] {
             assert!(!valid_path(bad), "{bad:?} was accepted");
         }
         for good in ["solve.py", "bin/solve-darwin-arm64", "data/job_23.json"] {
             assert!(valid_path(good), "{good:?} was refused");
         }
+    }
+
+    #[test]
+    fn files_that_alias_on_case_insensitive_filesystems_are_refused() {
+        let hash = blobs::address(b"x=1");
+        let files = Value::from_json(&format!(
+            r#"{{"solve.py":{{"sha256":"{hash}","size":3}},"SOLVE.PY":{{"sha256":"{hash}","size":3}}}}"#
+        ))
+        .unwrap();
+        let value = with(minimal(), "files", files);
+        assert!(Manifest::from_value(&value)
+            .unwrap_err()
+            .0
+            .contains("case-insensitive filesystem"));
+    }
+
+    #[test]
+    fn files_that_alias_directories_on_case_insensitive_filesystems_are_refused() {
+        let hash = blobs::address(b"x=1");
+        let files = Value::from_json(&format!(
+            r#"{{"Foo":{{"sha256":"{hash}","size":3}},"foo/bar.py":{{"sha256":"{hash}","size":3}}}}"#
+        ))
+        .unwrap();
+        let value = with(minimal(), "files", files);
+        assert!(Manifest::from_value(&value)
+            .unwrap_err()
+            .0
+            .contains("directory on a case-insensitive filesystem"));
     }
 
     #[test]

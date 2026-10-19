@@ -111,8 +111,19 @@ fn a_changed_byte_or_a_symlink_is_refused_before_anything_runs() {
         let elsewhere = dir.join("elsewhere.py");
         fs::write(&elsewhere, "print('{}')\n").unwrap();
         std::os::unix::fs::symlink(&elsewhere, dir.join("solve.py")).unwrap();
-        let refused = Package::at(&dir, manifest).unwrap_err();
+        let refused = Package::at(&dir, manifest.clone()).unwrap_err();
         assert!(refused.0.contains("not a regular file"), "{refused}");
+
+        fs::remove_file(dir.join("solve.py")).unwrap();
+        let elsewhere_dir = dir.join("elsewhere");
+        fs::create_dir(&elsewhere_dir).unwrap();
+        fs::write(elsewhere_dir.join("solve.py"), "print('{}')\n").unwrap();
+        std::os::unix::fs::symlink(&elsewhere_dir, dir.join("sub")).unwrap();
+        let mut nested_manifest = manifest;
+        let entry = nested_manifest.files.remove("solve.py").unwrap();
+        nested_manifest.files.insert("sub/solve.py".into(), entry);
+        let refused = Package::at(&dir, nested_manifest).unwrap_err();
+        assert!(refused.0.contains("symlink parent"), "{refused}");
     }
     let _ = fs::remove_dir_all(dir);
 }
