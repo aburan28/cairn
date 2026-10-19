@@ -45,7 +45,13 @@ const go = async (route) => {
   // Measure the loaded data, not a skeleton. Track the reader's actual fetch
   // and body promises: browser lifecycle events can miss an aborted/coalesced
   // health request and leave networkidle unset after the reads have finished.
-  await page.waitForFunction(() => window.__uxReads === 0 && performance.now() - window.__uxLastRead > 250);
+  try {
+    await page.waitForFunction(() => window.__uxReads === 0 && performance.now() - window.__uxLastRead > 250);
+  } catch (error) {
+    const state = await page.evaluate(() => ({ url: location.href, reads: window.__uxReads,
+      sinceRead: performance.now() - window.__uxLastRead, text: document.body.innerText.slice(0, 1800) }));
+    throw new Error(`Reader did not settle: ${JSON.stringify({ ...state, errors })}`, { cause: error });
+  }
 };
 const inDialog = () => page.evaluate(() => Boolean(document.activeElement?.closest("dialog[open]")));
 
