@@ -8,6 +8,7 @@ be to run them.
 | you have | use | it lands in | needs root |
 |---|---|---|---|
 | macOS, Apple Silicon or Intel | the [`.dmg`](#macos-the-disk-image) | `/usr/local/bin/cairn`, and `/Applications/Cairn.app` | yes |
+| Windows 10/11, x64 | the [portable ZIP](#windows-the-portable-zip) | the folder you extract it to | no |
 | Debian 11+, Ubuntu 22.04+ | the [`.deb`](#debian-and-ubuntu-the-deb) | `/usr/bin/cairn` | yes |
 | Fedora, RHEL / Alma / Rocky 9+ | the [`.rpm`](#fedora-and-the-rhel-family-the-rpm) | `/usr/bin/cairn` | yes |
 | any Linux or macOS, or no root | the [install script](#anything-else-the-install-script) | `~/.local/bin/cairn` | no |
@@ -19,16 +20,41 @@ There is no native Windows build, by decision, not oversight: the verifier
 sandbox is seatbelt and bubblewrap, and a node that runs objective-authored code
 without one is the configuration `CAIRN_REQUIRE_SANDBOX` exists to refuse. On
 Windows the Linux release runs inside WSL 2, which has a real Linux kernel and
-so the real jail.
+so the real jail. Native Windows packages include the node and web reader, but
+external verifier programs require a qualified sandbox; Windows reports
+`Unavailable` instead of executing them without confinement, even with
+`CAIRN_REQUIRE_SANDBOX=off`.
 
 **Pick one route per machine.** They install to different directories, and your
 shell runs whichever comes first on `PATH` — see
 [two copies](#two-copies-and-the-wrong-one-runs).
 
-## What no route does
+## Windows: the portable ZIP
+
+Download `cairn-<version>-x86_64-pc-windows-msvc.zip`, verify its adjacent
+`.sha256`, and extract the whole ZIP to a folder you own. Open **Start Cairn.cmd**
+to start a local node and open the reader. Close the node console to stop it.
+Your data remains in `%LOCALAPPDATA%\Cairn`; restarting reopens it. Nothing
+adds a service, login item or firewall exception.
+
+`cairn.exe` embeds the UI and works directly from PowerShell, for example
+`.\cairn.exe --help` or `.\cairn.exe mcp`. If the launcher's default port is
+occupied it refuses to start another node; the packaged README explains how to
+select another port. Keep state and secrets in your own user profile, not a
+shared folder. The portable package is unsigned; the checksum establishes
+download integrity, not an Authenticode publisher signature.
+
+The native Windows CI gate builds and unpacks the ZIP, tests OS entropy and
+mandatory confinement, and exercises the actual executable's CLI, MCP, embedded
+UI, network reports and persistent restart. External objective programs need a
+supported verifier host; isolated lab experiments require a supported Linux
+sandbox.
+
+## What installation does
 
 None of them starts a service, adds a login item, creates a user, or writes a
-configuration file. They put a program on `PATH` and stop.
+configuration file. Native packages and the install script put a program on
+`PATH`; the Windows ZIP stays in the folder you choose.
 
 That is deliberate. A node keeps its state in the directory it is started from
 (`.local/`, or wherever `--data-dir` and `$CAIRN_DATA` say) and its at-rest key

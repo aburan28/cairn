@@ -506,6 +506,57 @@ jobs:
       # that says they are the same file.
       - run: cmp -s ui/lib/snapshot.json gui/ios/Sources/CairnKit/Resources/snapshot.json
 
+  windows:
+    name: Windows executable
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.core != 'false' || needs.changes.outputs.ui != 'false' || needs.changes.outputs.packaging != 'false')
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+      CAIRN_REQUIRE_SANDBOX: "off"
+      CAIRN_WINDOWS_BROWSER: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
+      - run: npx playwright install chromium
+        working-directory: ui
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --lib --target x86_64-pc-windows-msvc windows_objective_processes_require_a_supported_jail
+      - run: 'cargo test --locked --lib --target x86_64-pc-windows-msvc canonical::'
+      - run: 'cargo test --locked --lib --target x86_64-pc-windows-msvc crypto::'
+      - run: cargo test --locked --bin cairn --target x86_64-pc-windows-msvc generated_nonce
+      - run: cargo build --release --locked --features ui --target x86_64-pc-windows-msvc
+      - name: package the standalone executable
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -Binary target/x86_64-pc-windows-msvc/release/cairn.exe -Version 0.0.0-ci.${{ github.run_id }} -OutputDirectory dist
+      - name: the unpacked Windows package runs
+        shell: pwsh
+        run: |
+          Expand-Archive -Path dist/*.zip -DestinationPath unpacked
+          python scripts/windows-smoke.py unpacked/cairn.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cairn-windows-x64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
   gui-macos:
     # The macOS launcher in gui/macos, and Cairn.app in gui/macos-app, compiled. No other job builds Swift and
     # neither does `make check`, so a change that broke the launcher surfaced

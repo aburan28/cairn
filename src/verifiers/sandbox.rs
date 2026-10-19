@@ -194,7 +194,7 @@ pub fn confine(
     plan: &Confinement<'_>,
 ) -> Result<Jailed, Unavailable> {
     let mechanism = mechanism();
-    let required = require_sandbox(std::env::var(REQUIRE_ENV).ok().as_deref());
+    let required = required();
     // Strict mode is a promise about the whole host boundary, not only the
     // availability of a kernel jail. Replay and Lean normally inherit the
     // operator's environment for toolchain discovery, but an objective can
@@ -218,7 +218,7 @@ pub fn confine(
 
     match mechanism {
         Mechanism::None(why) if required => Err(Unavailable(format!(
-            "{REQUIRE_ENV} is set and no sandbox mechanism is usable here ({why}); \
+            "{REQUIRE_ENV} or this platform requires confinement, but no sandbox mechanism is usable here ({why}); \
              refusing to run objective-authored code unjailed"
         ))),
         Mechanism::None(_) => Ok(Jailed {
@@ -241,7 +241,10 @@ fn effective_scrub_env(plan: &Confinement<'_>, required: bool) -> bool {
 /// mandatory jail: what `GET /verifiers` reports beside the mechanism, so a
 /// node that answers `Unavailable` to everything can say why.
 pub fn required() -> bool {
-    require_sandbox(std::env::var(REQUIRE_ENV).ok().as_deref())
+    // Windows can read, sync and use in-process checkers, but has no supported
+    // jail for objective-authored processes yet. Never turn that into execution
+    // without confinement, even if an inherited environment says `off`.
+    cfg!(windows) || require_sandbox(std::env::var(REQUIRE_ENV).ok().as_deref())
 }
 
 /// Whether [`REQUIRE_ENV`] asks for a mandatory jail.
@@ -957,6 +960,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_objective_processes_require_a_supported_jail() {
+        assert!(
+            required(),
+            "Windows must refuse unconfined objective code, even with the environment set to off"
+        );
+        let dir = std::env::temp_dir();
+        let plan = Confinement::new(&dir, &dir, 1);
+        assert!(confine(Path::new("cmd.exe"), &[], &plan).is_err());
+    }
 
     #[test]
     fn the_probe_is_stable_and_names_itself() {

@@ -5,6 +5,8 @@ enforce a physical air gap. See [private installations](fleet.md#private-install
 
 | attack | defence | status |
 |---|---|---|
+| **unconfined objective code on Windows** | Native Windows binaries always require a supported verifier jail, even when `CAIRN_REQUIRE_SANDBOX=off`. With no qualified Windows backend, objective-authored processes return `Unavailable`; in-process checkers, node sync and the reader remain available. Windows CI and the portable smoke check assert the requirement | handled for fallback execution; native Windows jail not implemented |
+| **Windows credentials in a shared folder** | Default store keys and named secrets resolve through the user's profile when `HOME` is absent. The portable launcher stores data in the user's Local AppData and opens only a local reader; it creates no service or firewall exception. Windows files inherit NTFS permissions instead of Unix mode bits; manually choosing a shared directory does not harden its ACL | partial; user-profile ACLs and same-user processes remain the host boundary |
 | Accidental public discovery from a private installation | Private startup disables compiled/public seed discovery, published-list refresh, multicast discovery, automatic router mappings and Tailscale probing. P2P permits only configured peer identities (zero is valid). External Google sign-in conflicts refuse startup instead of silently removing the configured sign-in. Explicit peer addresses, DNS, tools and job execution still need operator egress controls; WireGuard gateway forwarding exposes HTTP payloads to the gateway | partial |
 
 What breaks this, and which parts Stage 0 actually handles. "Handled" below

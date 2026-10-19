@@ -137,13 +137,7 @@ jobs:
             target: aarch64-apple-darwin
           - os: macos-15-intel      # the last Intel image
             target: x86_64-apple-darwin
-          #
-          # No Windows target, and that is a decision rather than an oversight.
-          # `src/verifiers`, `src/blobs.rs`, `src/store/{quota,atrest}.rs` and
-          # the binary reach for `std::os::unix` and the seatbelt/bubblewrap
-          # sandbox; shipping a Windows build would mean porting the sandbox,
-          # and a node that verifies objective-authored code *without* one is
-          # the configuration `CAIRN_REQUIRE_SANDBOX` exists to refuse.
+          # Windows has its own native ZIP build and unpacked smoke gate below.
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -343,6 +337,54 @@ jobs:
   # Not a step in `build`: that job is a six-way matrix, and six runners racing
   # to upload the same asset name is a coin flip over which one wins. One job,
   # one upload.
+  windows:
+    name: Windows x64 portable package
+    needs: ui
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+      CAIRN_REQUIRE_SANDBOX: "off"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: actions/download-artifact@v8
+        with:
+          name: ui-out
+          path: ui/out
+      - run: cargo test --locked --lib --target x86_64-pc-windows-msvc windows_objective_processes_require_a_supported_jail
+      - run: cargo build --release --locked --features ui --target x86_64-pc-windows-msvc
+      - name: package
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -Binary target/x86_64-pc-windows-msvc/release/cairn.exe -Version $env:VERSION -OutputDirectory dist
+      - name: unpacked executable and embedded reader work on Windows
+        shell: pwsh
+        run: |
+          Expand-Archive -Path dist/*.zip -DestinationPath unpacked
+          python scripts/windows-smoke.py unpacked/cairn.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: x86_64-pc-windows-msvc
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+      - name: upload to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release-upload.sh "$VERSION" dist/*.zip dist/*.sha256
+
   installer:
     name: install.sh
     runs-on: ubuntu-latest
@@ -727,7 +769,7 @@ jobs:
   # times the page went wrong that they come from.
   notes:
     name: release notes
-    needs: [build, installer, linux-packages, macos-dmg]
+    needs: [build, windows, installer, linux-packages, macos-dmg]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}

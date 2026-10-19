@@ -53,8 +53,10 @@
 use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::process::CommandExt;
+#[cfg(unix)]
+use std::os::unix::{fs::DirBuilderExt, process::CommandExt};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -357,6 +359,7 @@ fn managed_args(args: &[String]) -> Result<(String, PathBuf, Vec<String>), Strin
     let root = state_dir
         .or_else(|| std::env::var_os("CAIRN_WORK_STATE_DIR").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cairn/work")))
+        .or_else(|| std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join(".cairn/work")))
         .ok_or("set --state-dir or HOME for managed work")?;
     Ok((name, root, rest))
 }
@@ -382,6 +385,24 @@ fn live_pid(pid: u32) -> bool {
             return false;
         }
     }
+    #[cfg(windows)]
+    {
+        // Query the OS instead of treating an absent Unix `kill` as a dead
+        // worker. A failed query is uncertain, so never archive its state.
+        return Command::new("tasklist.exe")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .map(|output| {
+                !output.status.success()
+                    || String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                        line.split(',')
+                            .nth(1)
+                            .is_some_and(|field| field.trim_matches('"') == pid.to_string())
+                    })
+            })
+            .unwrap_or(true);
+    }
+    #[cfg(not(windows))]
     Command::new("/bin/kill")
         .arg("-0")
         .arg(pid.to_string())
@@ -393,6 +414,14 @@ fn live_pid(pid: u32) -> bool {
                 // and starting a second worker would be the harmful guess.
                 || String::from_utf8_lossy(&output.stderr).contains("Operation not permitted")
         })
+}
+
+fn control_dir(path: &Path, recursive: bool) -> std::io::Result<()> {
+    let mut builder = DirBuilder::new();
+    builder.recursive(recursive);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(path)
 }
 
 fn managed_start(args: &[String]) -> i32 {
@@ -408,7 +437,7 @@ fn managed_start(args: &[String]) -> i32 {
         }
         Err(error) => return control_error(error),
     };
-    if let Err(error) = DirBuilder::new().recursive(true).mode(0o700).create(&root) {
+    if let Err(error) = control_dir(&root, true) {
         return control_error(format!("{}: {error}", root.display()));
     }
     let root = match root.canonicalize() {
@@ -439,7 +468,7 @@ fn managed_start(args: &[String]) -> i32 {
             return control_error(format!("cannot archive previous {name} state: {error}"));
         }
     }
-    if let Err(error) = DirBuilder::new().mode(0o700).create(&dir) {
+    if let Err(error) = control_dir(&dir, false) {
         return control_error(format!("{}: {error}", dir.display()));
     }
     let log_path = dir.join("worker.log");
@@ -460,14 +489,18 @@ fn managed_start(args: &[String]) -> i32 {
         Ok(binary) => binary,
         Err(error) => return control_error(format!("cannot locate cairn binary: {error}")),
     };
-    let mut child = match Command::new(binary)
+    let mut command = Command::new(binary);
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
+    command.creation_flags(0x0000_0008 | 0x0000_0200); // detached, separate process group
+    let mut child = match command
         .arg("work")
         .arg("__managed")
         .arg(&name)
         .arg(&root)
         .arg(&token)
         .args(&worker_args)
-        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr))

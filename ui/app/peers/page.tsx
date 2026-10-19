@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { endpointKind, peerAddress } from "@/lib/addresses";
 import { useNodeRead } from "@/components/hooks";
 import {
   type Peer,
@@ -9,7 +10,7 @@ import {
 } from "@/lib/peers";
 import { type Chain, fetchChain } from "@/lib/chain";
 import { type CheckpointAnswer, readCheckpoint } from "@/lib/checkpoint";
-import { Box, EmptyState, Hash, Note, PageHeader, Stat } from "@/components/ui";
+import { Box, CopyButton, EmptyState, Hash, Note, PageHeader, Stat } from "@/components/ui";
 
 /**
  * The address book this node has been handed.
@@ -32,7 +33,7 @@ export default function Page() {
     <>
       <PageHeader
         title="Peers"
-        actions={<button className="btn btn-sm" disabled={loading} onClick={() => void refresh()}>Refresh</button>}
+        actions={<><Link href="/diagnostics" className="btn btn-sm btn-ghost">Diagnostics</Link><button className="btn btn-sm" disabled={loading} onClick={() => void refresh()}>{loading ? "Refreshing…" : "Refresh"}</button></>}
         subtitle="Addresses announced in this node's log. For active connections and node types, open Network."
       />
 
@@ -108,7 +109,7 @@ export default function Page() {
                 <tbody className="divide-edge-y">
                   {peers.map((peer) => (
                     <tr key={peer.identity}>
-                      <td className="mono px-4 py-2.5 font-semibold text-ink">{peer.addr}</td>
+                      <td className="px-4 py-2.5 font-semibold text-ink"><span className="mono">{peerAddress(peer.addr)}</span>{endpointKind(peer.addr) === "address" && <CopyButton value={peer.addr} />}</td>
                       <td className="px-3 py-2.5">
                         <Hash value={peer.identity} chars={8} />
                       </td>

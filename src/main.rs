@@ -60,7 +60,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, IsTerminal, Read as _, Write};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -10069,15 +10069,12 @@ fn percent(units: u64, total: u128) -> f64 {
 /// something clock-shaped that would be guessable by anyone who knows roughly
 /// when the commitment was made.
 fn random_nonce() -> Result<String, CliError> {
-    const SOURCE: &str = "/dev/urandom";
-    let complain = |error: io::Error| {
-        CliError::Entropy(format!(
-            "no entropy for a nonce ({SOURCE}: {error}); pass --nonce explicitly"
-        ))
-    };
-    let mut source = File::open(SOURCE).map_err(complain)?;
     let mut bytes = [0u8; NONCE_BYTES];
-    source.read_exact(&mut bytes).map_err(complain)?;
+    rand_core::RngCore::try_fill_bytes(&mut rand_core::OsRng, &mut bytes).map_err(|error| {
+        CliError::Entropy(format!(
+            "no OS entropy for a nonce ({error}); pass --nonce explicitly"
+        ))
+    })?;
     Ok(hex(&bytes))
 }
 
@@ -13229,8 +13226,8 @@ mod tests {
                 assert_eq!(nonce.chars().count(), NONCE_BYTES * 2);
                 assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()));
             }
-            // A machine with no /dev/urandom must say so rather than invent
-            // entropy; that refusal is the tested behaviour too.
+            // An unavailable OS randomness source must be reported rather than
+            // replaced with predictable entropy; that refusal is tested too.
             Err(error) => assert!(matches!(error, CliError::Entropy(_)), "got {error:?}"),
         }
     }

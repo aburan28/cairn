@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { readableNode } from "@/lib/site";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { type Objective, loadObjective, progress, short, units } from "@/lib/site";
@@ -396,7 +397,7 @@ function Challenge({ id }: { id: string }) {
           </Box>
           <p className="px-1 text-[11.5px] leading-relaxed text-ink-3">
             {live
-              ? `Read from ${origin}.`
+              ? `Read from ${readableNode(origin)}.`
               : `No node answered, so this is from ${origin}, a real settled log that ships in the repository.`}
           </p>
         </aside>

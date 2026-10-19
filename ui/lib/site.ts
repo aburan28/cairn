@@ -21,6 +21,7 @@
  */
 
 import { readCheckpoint } from "./checkpoint";
+import { endpointKind } from "./addresses";
 import { loadSeeds, readableEndpoints } from "./seeds";
 import snapshot from "./snapshot.json";
 import { ShapeMismatch, expectFields } from "./shape";
@@ -138,8 +139,7 @@ export function isLocalNodeUrl(value: string, pageOrigin?: string): boolean {
   if (!value) return true;
   try {
     const url = new URL(value, pageOrigin || "http://this-node.invalid");
-    const host = url.hostname.toLowerCase();
-    if (["localhost", "127.0.0.1", "::1"].includes(host) || host.startsWith("127.")) return true;
+    if (endpointKind(value) === "local" || endpointKind(value) === "unspecified") return true;
     return Boolean(pageOrigin && url.origin === new URL(pageOrigin).origin);
   } catch {
     return false;
@@ -149,7 +149,7 @@ export function isLocalNodeUrl(value: string, pageOrigin?: string): boolean {
 /** Human-facing source label. Keep addresses available to advanced controls,
  * but don't make a transport endpoint the identity of the product. */
 export function readableNode(value: string, pageOrigin?: string): string {
-  return isLocalNodeUrl(value, pageOrigin) ? "this node" : value;
+  return value === "this node" || isLocalNodeUrl(value, pageOrigin) ? "this node" : "the connected node";
 }
 
 /**
@@ -383,7 +383,7 @@ export async function loadCheckpoint(base?: string): Promise<Sourced<CheckpointF
       };
     }
     case "unsigned":
-      return { ...fallback, note: `${at || "this node"} publishes no checkpoint` };
+      return { ...fallback, note: `${readableNode(at)} publishes no checkpoint` };
     case "unreadable":
       return { ...fallback, note: answer.message };
     case "no-node":

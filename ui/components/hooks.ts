@@ -124,7 +124,7 @@ export function useModalDialog() {
     // as well, where there is no address bar to receive that focus.
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Tab") return;
-      const controls = [...element.querySelectorAll<HTMLElement>("a[href], button, input, select, textarea, [tabindex]")]
+      const controls = [...element.querySelectorAll<HTMLElement>("a[href], button, input, select, textarea, summary, [tabindex]")]
         .filter((control) => control.tabIndex >= 0 && !control.matches(":disabled") && control.getClientRects().length > 0);
       const first = controls[0];
       const last = controls.at(-1);

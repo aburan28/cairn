@@ -83,6 +83,10 @@ Linux amd64/arm64 and macOS Intel/Apple Silicon. There is no native Windows
 build, because the verifier sandbox is seatbelt and bubblewrap; on Windows,
 `irm https://github.com/aburan28/cairn/releases/latest/download/install.ps1 | iex`
 installs the Linux release inside WSL 2 (see [docs/install.md](docs/install.md)).
+Windows x64 also has a portable ZIP with `cairn.exe`, the embedded reader and
+a double-click launcher; it needs no Node.js, Rust toolchain or administrator
+access. On native Windows, external verifier programs require a qualified
+sandbox and return `Unavailable` when one is unavailable.
 
 Or a native package, from the
 [releases page](https://github.com/aburan28/cairn/releases/latest):
@@ -90,11 +94,13 @@ Or a native package, from the
 | you have | download | then |
 |---|---|---|
 | macOS, either chip | `cairn-<version>-macos-universal.dmg` | open it, run *Install Cairn.pkg* |
+| Windows 10/11, x64 | `cairn-<version>-x86_64-pc-windows-msvc.zip` | extract it, open *Start Cairn.cmd* |
 | Debian, Ubuntu | `cairn_<version>-1_amd64.deb` (or `_arm64`) | `sudo apt install ./cairn_*.deb` |
 | Fedora, RHEL 9 family | `cairn-<version>-1.x86_64.rpm` (or `.aarch64`) | `sudo dnf install ./cairn-*.rpm` |
 
-Same binary, on `PATH` for every user, and nothing else: no service, no
-account, no configuration. The macOS installer is unsigned, so macOS asks you
+The native Linux/macOS packages put that binary on `PATH` for every user; the
+Windows ZIP stays in the folder you choose. Neither adds a service or account.
+The macOS installer is unsigned, so macOS asks you
 to approve it the first time. [docs/install.md](docs/install.md) has that, what
 each package recommends and why, upgrading, removing, and what to do when two
 routes have both been used.

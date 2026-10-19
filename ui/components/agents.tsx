@@ -22,7 +22,7 @@ import { type Bridge } from "@/lib/draft";
 import { openSheet } from "@/lib/contribute";
 import { type NodeEvent } from "@/lib/journal";
 import { ago } from "@/lib/events";
-import { Badge, Command, Hash } from "@/components/ui";
+import { Badge, Command, Disclosure, Hash } from "@/components/ui";
 
 /** Connect through the app, which knows the local node and key paths. */
 export function AgentConnect({ bridge }: { bridge: Bridge | null }) {
@@ -51,7 +51,7 @@ export function AgentConnect({ bridge }: { bridge: Bridge | null }) {
         </div>
       ) : (
         <>
-          <p className="text-[12.5px] text-ink-2">Open this node in Cairn.app to connect an agent. The app sets up the connection for this computer.</p>
+          <p className="text-[12.5px] text-ink-2">Connect an agent using the setup below, or use the desktop app to configure it for this computer.</p>
           <ConductorSetup />
         </>
       )}
@@ -68,7 +68,7 @@ export function AgentConnect({ bridge }: { bridge: Bridge | null }) {
 function ConductorSetup() {
   const setup = conductorSetup();
   return (
-    <div className="flex flex-col gap-2">
+    <Disclosure summary="Manual agent setup"><div className="flex flex-col gap-2">
       <p className="text-[12.5px] text-ink-2">
         <span className="text-ink">Conductor</span> runs Claude Code and Codex side by side, one
         workspace each. Start this node with the agents&rsquo; port, then point both at it once:
@@ -84,7 +84,7 @@ function ConductorSetup() {
         <span className="mono">work_assignment</span> (<span className="mono">$CONDUCTOR_WORKSPACE_NAME</span>),
         or two of them search the same slice.
       </p>
-    </div>
+    </div></Disclosure>
   );
 }
 

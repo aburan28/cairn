@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import CairnNodeUI
+import CairnNodeKit
 
 /// The node the researcher runs: what it serves, who holds what, the ledger
 /// itself, and the reader it embeds -- the same pages a browser would show.
@@ -17,7 +18,7 @@ struct NodeView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 160))], spacing: 12) {
                         Tile(title: "Node", value: model.nodeReachable ? "up" : "down", color: model.nodeReachable ? .green : .gray,
-                             caption: "http \(model.httpAddress) · p2p \(model.p2pAddress)")
+                             caption: model.nodeReachable ? "Connected to your node" : "Node offline")
                         Tile(title: "Epoch", value: "\(model.currentEpoch)", color: .gray,
                              caption: "next in \(model.secondsToNextEpoch)s · \(model.epochLength)s long")
                         Tile(title: "Ledger height", value: model.chain?.height.map(String.init) ?? "–", color: .green,
@@ -242,7 +243,7 @@ struct NodeView: View {
         }
         .overlay {
             if model.ledger.isEmpty {
-                Text(model.nodeReachable ? "The log is empty." : "No node is answering on \(model.httpAddress). Start the researcher; it runs one.")
+                Text(model.nodeReachable ? "The log is empty." : "The node is offline. Start the researcher to connect.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -254,7 +255,7 @@ struct NodeView: View {
                 .font(.caption).foregroundStyle(.secondary)
             Table(model.peers) {
                 TableColumn("identity") { p in Text(String(p.identity.prefix(24))).font(.caption.monospaced()) }
-                TableColumn("address") { p in Text(p.addr) }
+                TableColumn("address") { p in Text(NodeAddress.label(p.addr)) }
                 TableColumn("transport") { p in Text(p.transport) }.width(90)
                 TableColumn("since") { p in Text(p.createdAt).font(.caption.monospaced()) }
             }
@@ -279,7 +280,7 @@ struct NodeView: View {
         } else {
             VStack(spacing: 8) {
                 Image(systemName: "network.slash").font(.largeTitle).foregroundStyle(.secondary)
-                Text("No node is answering on \(model.httpAddress).").foregroundStyle(.secondary)
+                Text("The node is offline.").foregroundStyle(.secondary)
                 Text("Start the researcher; it runs one.").font(.caption).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
