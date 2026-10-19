@@ -91,11 +91,25 @@ fn describe_record(message: &Message) -> String {
 
 fn describe_code(message: &CodeMessage) -> String {
     match message {
-        CodeMessage::Want { addresses } => format!("code.Want addresses={}", addresses.len()),
+        CodeMessage::Want {
+            addresses,
+            packages,
+        } => format!(
+            "code.Want addresses={} packages={}",
+            addresses.len(),
+            packages
+                .as_ref()
+                .map_or("none".to_string(), |p| p.len().to_string())
+        ),
         CodeMessage::Blobs { blobs } => format!(
             "code.Blobs n={} bytes={}",
             blobs.len(),
             blobs.iter().map(Vec::len).sum::<usize>()
+        ),
+        CodeMessage::Part { of, size, at, body } => format!(
+            "code.Part of={} at={at} len={} size={size}",
+            crate::canonical::short(of),
+            body.len()
         ),
         CodeMessage::Done => "code.Done".to_string(),
     }
@@ -406,30 +420,189 @@ pub fn reconcile_code(
     needs: &BTreeSet<String>,
     limits: CodeLimits,
 ) -> Result<CodeReport, SessionError> {
-    send_code(connection, code::want_message(needs, limits))?;
-    let their_want = match receive_code(connection, limits)? {
-        CodeMessage::Want { addresses } => addresses,
+    reconcile_code_with(connection, store, needs, None, limits)
+}
+
+/// [`reconcile_code`], and then the solver-package round when both sides
+/// speak it. `packages` is `None` for a caller with no package store, which
+/// then says nothing in its want and is never sent a part.
+///
+/// The package round comes after the blobs for the reason the blobs come
+/// after records: a package's `verify: "accept"` tests are scored by the
+/// objective's pinned checker, so the checker arriving in the same session is
+/// what lets the package be checked as soon as it lands.
+pub fn reconcile_code_with(
+    connection: &mut Connection,
+    store: &BlobStore,
+    needs: &BTreeSet<String>,
+    packages: Option<&mut crate::solver::sync::Exchange>,
+    limits: CodeLimits,
+) -> Result<CodeReport, SessionError> {
+    let package_wants = packages.as_ref().map(|exchange| exchange.wants());
+    let want = code::want_message_with(needs, package_wants.as_ref(), limits);
+    let (mine, my_packages) = match &want {
+        CodeMessage::Want {
+            addresses,
+            packages,
+        } => (addresses.clone(), packages.clone()),
+        _ => unreachable!("want_message_with builds a Want"),
+    };
+    send_code(connection, want)?;
+    let (their_want, their_packages) = match receive_code(connection, limits)? {
+        CodeMessage::Want {
+            addresses,
+            packages,
+        } => (addresses, packages),
         _ => return Err(SessionError::Protocol("expected code_want".into())),
     };
-    if needs.is_empty() && their_want.is_empty() {
-        return Ok(CodeReport::default());
+
+    // Decided on the lists as sent, which are what the peer decides on too.
+    let mut report = CodeReport::default();
+    if !(mine.is_empty() && their_want.is_empty()) {
+        let served = code::serve(store, &their_want, limits);
+        let served_count = served.len();
+        send_code(connection, CodeMessage::Blobs { blobs: served })?;
+        let incoming = match receive_code(connection, limits)? {
+            CodeMessage::Blobs { blobs } => blobs,
+            _ => return Err(SessionError::Protocol("expected code_blobs".into())),
+        };
+
+        // A refusal is not a session error, for the same reason as a
+        // population refusal: a peer whose blob does not hash to a pin we
+        // asked for has told us nothing we needed, and tearing the connection
+        // down over it would let one bad blob cost the peer its record sync
+        // too.
+        report = code::admit(store, needs, incoming);
+        report.served = served_count;
     }
 
-    let served = code::serve(store, &their_want, limits);
-    let served_count = served.len();
-    send_code(connection, CodeMessage::Blobs { blobs: served })?;
-    let incoming = match receive_code(connection, limits)? {
-        CodeMessage::Blobs { blobs } => blobs,
-        _ => return Err(SessionError::Protocol("expected code_blobs".into())),
-    };
-
-    // A refusal is not a session error, for the same reason as a population
-    // refusal: a peer whose blob does not hash to a pin we asked for has told us
-    // nothing we needed, and tearing the connection down over it would let one
-    // bad blob cost the peer its record sync too.
-    let mut report = code::admit(store, needs, incoming);
-    report.served = served_count;
+    if let (Some(exchange), Some(mine), Some(theirs)) = (packages, my_packages, their_packages) {
+        if !(mine.is_empty() && theirs.is_empty()) {
+            exchange_packages(connection, exchange, &theirs, limits)?;
+        }
+    }
     Ok(report)
+}
+
+/// The package round: one side streams, then the other. See
+/// [`super::code`], "One direction at a time".
+fn exchange_packages(
+    connection: &mut Connection,
+    exchange: &mut crate::solver::sync::Exchange,
+    asked: &[String],
+    limits: CodeLimits,
+) -> Result<(), SessionError> {
+    let (local, remote) = (connection.local(), connection.remote());
+    if local == remote {
+        return Ok(());
+    }
+    if local < remote {
+        send_parts(connection, exchange, asked, limits)?;
+        receive_parts(connection, exchange, limits)
+    } else {
+        receive_parts(connection, exchange, limits)?;
+        send_parts(connection, exchange, asked, limits)
+    }
+}
+
+fn send_parts(
+    connection: &mut Connection,
+    exchange: &mut crate::solver::sync::Exchange,
+    asked: &[String],
+    limits: CodeLimits,
+) -> Result<(), SessionError> {
+    let part = limits.max_part_bytes.max(1);
+    let plan = exchange.plan(
+        asked,
+        limits.max_package_session_bytes,
+        limits.max_parts_per_session,
+        part,
+    );
+    for item in plan {
+        let Some(bytes) = item.read() else {
+            continue;
+        };
+        let size = bytes.len() as u64;
+        let mut at = 0;
+        loop {
+            let end = (at + part).min(bytes.len());
+            send_code(
+                connection,
+                CodeMessage::Part {
+                    of: item.address.clone(),
+                    size,
+                    at: at as u64,
+                    body: bytes[at..end].to_vec(),
+                },
+            )?;
+            at = end;
+            if at >= bytes.len() {
+                break;
+            }
+        }
+        exchange.served(size);
+    }
+    send_code(connection, CodeMessage::Done)
+}
+
+/// Read a stream of parts until `code_done`, assembling one item at a time.
+///
+/// A part out of order is a session error, unlike a wrong hash: an honest
+/// sender cannot produce one, and the stream after it cannot be trusted to
+/// mean anything. A wrong hash, an unwanted item or one cut short is counted
+/// and dropped, for the reason [`reconcile_code_with`] gives for blobs.
+fn receive_parts(
+    connection: &mut Connection,
+    exchange: &mut crate::solver::sync::Exchange,
+    limits: CodeLimits,
+) -> Result<(), SessionError> {
+    let mut assembling: Option<(String, u64, Vec<u8>)> = None;
+    let mut bytes: u64 = 0;
+    let mut parts: usize = 0;
+    loop {
+        match receive_code(connection, limits)? {
+            CodeMessage::Done => {
+                if assembling.is_some() {
+                    exchange.refused_one();
+                }
+                return Ok(());
+            }
+            CodeMessage::Part { of, size, at, body } => {
+                parts += 1;
+                bytes = bytes.saturating_add(body.len() as u64);
+                if parts > limits.max_parts_per_session || bytes > limits.max_package_session_bytes
+                {
+                    return Err(SessionError::Protocol(
+                        "a solver package stream ran past its ceiling".into(),
+                    ));
+                }
+                let (address, expected, mut buffer) = match assembling.take() {
+                    None if at == 0 => (of, size, Vec::new()),
+                    Some((address, expected, buffer))
+                        if address == of && expected == size && buffer.len() as u64 == at =>
+                    {
+                        (address, expected, buffer)
+                    }
+                    _ => {
+                        return Err(SessionError::Protocol(
+                            "solver package parts arrived out of order".into(),
+                        ))
+                    }
+                };
+                buffer.extend_from_slice(&body);
+                if buffer.len() as u64 == expected {
+                    exchange.admit(&buffer);
+                } else {
+                    assembling = Some((address, expected, buffer));
+                }
+            }
+            _ => {
+                return Err(SessionError::Protocol(
+                    "expected code_part or code_done".into(),
+                ))
+            }
+        }
+    }
 }
 
 /// Ask a peer which of the blobs this node needs it holds, and answer the same

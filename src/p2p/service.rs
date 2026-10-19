@@ -1274,7 +1274,8 @@ impl Service {
         wanted: &BTreeSet<String>,
         dialable: Option<SocketAddr>,
     ) -> Result<(), ServiceError> {
-        let held: BTreeSet<String> = node.registry().blobs().addresses().into_iter().collect();
+        let mut held: BTreeSet<String> = node.registry().blobs().addresses().into_iter().collect();
+        held.extend(crate::solver::sync::held(node.root()));
         let now = crate::time::unix_seconds();
         if connection.remote_authenticated() {
             if let Some(addr) = dialable {
@@ -1406,7 +1407,38 @@ fn exchange_records_and_code(
     let said = session::reconcile_with(connection, &mut peer, about.as_ref(), decode_record)?;
     let needs = needed_code(node, &peer);
     let store = node.registry().blobs().clone();
-    let code = session::reconcile_code(connection, &store, &needs, CodeLimits::default());
+    // Staged objectives' pins as well as the log's, for the reason
+    // `needed_code` gives: the session that brings an objective can bring its
+    // package. One the rules then refuse is removed by `solver::sync::settle`,
+    // which files nothing a log objective does not pin.
+    let mut packages =
+        crate::solver::sync::Exchange::new(node.root(), needed_packages(node, &peer));
+    let code = session::reconcile_code_with(
+        connection,
+        &store,
+        &needs,
+        Some(&mut packages),
+        CodeLimits::default(),
+    );
+    let moved = packages.report();
+    if moved.accepted + moved.refused + moved.served > 0 {
+        log::info!(
+            "solver packages: {} item(s) staged ({} bytes), {} refused, {} served ({} bytes){}",
+            moved.accepted,
+            moved.bytes_in,
+            moved.refused,
+            moved.served,
+            moved.bytes_out,
+            if moved.complete.is_empty() {
+                String::new()
+            } else {
+                format!("; complete, to be checked: {}", {
+                    let ids: Vec<&str> = moved.complete.iter().map(String::as_str).collect();
+                    ids.join(", ")
+                })
+            }
+        );
+    }
     // Applied whatever the code round did. The records are already reconciled
     // and refusing to apply them because a blob did not arrive would throw away
     // work this node accepted; a claim whose checker is still missing simply
@@ -1422,7 +1454,31 @@ fn exchange_records_and_code(
     if let Ok(report) = &code {
         discard_unpinned(node, &store, &report.stored);
     }
-    code.map(|report| (report, needs, said)).map_err(Into::into)
+    // The DHT round asks who holds what this round wanted, packages included:
+    // a package id is a content address like a checker's, and a holder of the
+    // manifest can serve every file it names.
+    let mut wanted = needs;
+    wanted.extend(packages.pins().iter().cloned());
+    code.map(|report| (report, wanted, said))
+        .map_err(Into::into)
+}
+
+/// The solver packages this node will want once `peer`'s objectives are
+/// applied: every pin in the log, and every pin among the staged objectives.
+fn needed_packages(node: &Node, peer: &Peer) -> BTreeSet<String> {
+    let mut pins: BTreeSet<String> = node.pinned_packages().into_keys().collect();
+    for id in peer.ids() {
+        let Some(record) = peer.get(&id) else {
+            continue;
+        };
+        if record.kind != "objective" {
+            continue;
+        }
+        if let Ok(objective) = Objective::from_value(&record.payload) {
+            pins.extend(crate::solver::store::pinned(&objective));
+        }
+    }
+    pins
 }
 
 /// Remove each of `stored` that no objective in `node`'s log pins.
