@@ -8,8 +8,10 @@ source_dir="$HOME/Library/Application Support/ECC2K130/ingest/evidence/macbook-p
 destination='s3://ecc2k130-590183823895/logs/rho-ingest-macbook-publisher/evidence/'
 
 # Archived journals and content-addressed snapshots are durable; the live
-# period and lock are mutable supervisor state and must never be copied.
+# period, its atomic-write temporary file, and lock are mutable supervisor
+# state and must never be copied.
 /opt/homebrew/bin/aws s3 sync "$source_dir/" "$destination" \
   --exclude 'current-period.json' \
   --exclude 'operator.lock' \
+  --exclude '*.tmp' \
   --only-show-errors

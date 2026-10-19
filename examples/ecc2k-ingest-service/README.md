@@ -54,8 +54,9 @@ The current Mac ingester publishes public status and uses
 completed evidence to the versioned private source bucket. A second ingester
 replica runs on EC2 in worker-only mode and ships its completed evidence every
 two minutes. Both use the RDS object lease and distinct replica ids. The Mac
-shipper excludes its live period and lock; the EC2 shipper likewise sends only
-completed periods. The Mac remains the single public status publisher.
+shipper excludes its live period, temporary writes, and lock; the EC2 shipper
+likewise sends only completed periods. The Mac remains the single public status
+publisher.
 
 ```sh
 python3 examples/ecc2k-ingest-service/cairn_ingest_operator.py \
