@@ -135,6 +135,8 @@ class PeriodCandidateRunnerTests(unittest.TestCase):
         modules = self.fake_modules(cursor, observed)
         with patch.dict(os.environ, original, clear=True), patch.dict(sys.modules, modules):
             original_sys_path = sys.path[:]
+            previous_umask = os.umask(0o027)
+            os.umask(previous_umask)
             def candidate_run(args, database_url=None):
                 self.assertEqual(database_url, "postgresql://auditor@db.example.invalid/rho")
                 self.assertNotIn("DATABASE_URL", os.environ)
@@ -183,6 +185,28 @@ class PeriodCandidateRunnerTests(unittest.TestCase):
             )
             self.assertNotIn("DATABASE_URL", os.environ)
             self.assertEqual(sys.path, original_sys_path)
+            self.assertEqual(os.umask(0o077), previous_umask)
+            os.umask(previous_umask)
+
+    def test_database_preflight_error_does_not_expose_url_or_secret(self):
+        observed = {}
+        modules = self.fake_modules(FakeCursor(), observed)
+
+        def fail_connect(database_url, **_kwargs):
+            raise RuntimeError(
+                f"connection failed for {database_url} secret=auditor-ro-secret"
+            )
+
+        modules["psycopg"].connect = fail_connect
+        original = {"RHO_DB_SECRET": "before", "PGOPTIONS": "before"}
+        with patch.dict(os.environ, original, clear=True), patch.dict(sys.modules, modules):
+            with self.assertRaises(RuntimeError) as raised:
+                runner.main(self.args())
+            self.assertNotIn("postgresql://", str(raised.exception))
+            self.assertNotIn("auditor-ro-secret", str(raised.exception))
+            self.assertEqual({key: os.environ[key] for key in original}, original)
+            self.assertNotIn("RHO_DB_HOST", os.environ)
+            self.assertNotIn("AWS_REGION", os.environ)
 
     def test_refuses_non_readonly_session_or_privileged_role_before_candidate(self):
         for cursor in (

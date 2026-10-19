@@ -119,10 +119,21 @@ def main(argv=None):
             raise RuntimeError("cannot load the installed dp_ingest.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        database_url = module.databaseUrl()
+        try:
+            database_url = module.databaseUrl()
+        except Exception:
+            raise RuntimeError(
+                "could not resolve the explicitly selected auditor database secret"
+            ) from None
         if not database_url:
             raise RuntimeError("installed dp_ingest.py did not resolve a database URL")
-        with psycopg.connect(database_url, connect_timeout=10) as connection:
+        try:
+            connection = psycopg.connect(database_url, connect_timeout=10)
+        except Exception:
+            raise RuntimeError(
+                "auditor database preflight failed; check connectivity, selected secret, and table grants"
+            ) from None
+        with connection:
             _check_read_only_connection(connection)
         return period_candidate.main(candidate_args, database_url=database_url)
     finally:

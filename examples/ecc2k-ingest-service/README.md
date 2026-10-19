@@ -345,6 +345,9 @@ roles, DML grants on those tables, or a connection that does not report
 grants are the authority boundary. The AWS role needs only the required RDS
 endpoint lookup, access to that selected database secret, and the evidence and
 source S3 reads. Do not give it the ingester's write credential for this task.
+The preflight checks effective table privileges for the connected role on
+these two source tables; it is not a database-wide membership or callable-
+function audit.
 
 This process holds no auditor signing key and never calls Cairn. A missing
 shipped period is retried in watch mode; an unhealthy or inconsistent journal

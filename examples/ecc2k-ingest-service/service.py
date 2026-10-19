@@ -216,7 +216,13 @@ def collect(args):
     database_url = getattr(args, "database_url", None) or os.environ.get("DATABASE_URL")
     if not database_url:
         raise ValueError("DATABASE_URL or an explicit database_url is required")
-    with psycopg.connect(database_url, autocommit=True) as conn:
+    try:
+        connection = psycopg.connect(database_url, autocommit=True)
+    except Exception:
+        raise RuntimeError(
+            "database connection failed; check the selected credential and connectivity"
+        ) from None
+    with connection as conn:
         with conn.cursor() as cursor:
             cursor.execute(
                 "SELECT object_key, records, duplicates, object_sha256, "
