@@ -1,18 +1,14 @@
-{$CAIRN_MCP_DOMAIN} {
-    handle /mcp {
-        # Give each trusted agent its own credential. Caddy expects password
-        # hashes here; generate them with `caddy hash-password`.
-        basic_auth {
-            agent_americas {$CAIRN_MCP_AGENT_AMERICAS_HASH}
-            agent_europe {$CAIRN_MCP_AGENT_EUROPE_HASH}
-        }
-        reverse_proxy 127.0.0.1:8001 {
-            # Cairn refuses public Host authorities even from a loopback proxy.
-            header_up Host 127.0.0.1:8001
-            header_up -Authorization
-        }
-    }
-    handle {
-        respond 404
-    }
+# Loopback-only reverse proxy for a hub reachable through Tailscale Serve.
+# Public DNS and public internet exposure are unsupported.
+:8082 {
+	bind 127.0.0.1
+	handle /mcp {
+		reverse_proxy 127.0.0.1:8001 {
+			header_up Host 127.0.0.1:8001
+			# Preserve Authorization: Bearer so Cairn selects the right profile.
+		}
+	}
+	handle {
+		respond 404
+	}
 }

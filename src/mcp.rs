@@ -5030,6 +5030,107 @@ mod tests {
     }
 
     #[test]
+    fn http_agent_profiles_require_bearers_and_isolate_sessions_on_the_wire() {
+        let operator_token = "31".repeat(32);
+        let agent_token = "42".repeat(32);
+        let unknown_token = "53".repeat(32);
+        let mut operator = server();
+        operator.identity = Some(Identity::from_secret_bytes([1; 32]));
+        let mut agent = server();
+        agent.identity = Some(Identity::from_secret_bytes([2; 32]));
+        assert_ne!(
+            operator.identity.as_ref().unwrap().submitter_id(),
+            agent.identity.as_ref().unwrap().submitter_id()
+        );
+        let hubs = Arc::new(vec![
+            Arc::new(Mutex::new(HttpHub::new(operator))),
+            Arc::new(Mutex::new(HttpHub::new(agent))),
+        ]);
+
+        let probe = |authorization: Option<&str>, session: Option<&str>, body: &str| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let hubs = Arc::clone(&hubs);
+            let operator_token = operator_token.clone();
+            let agent_token = agent_token.clone();
+            let worker = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut access = HttpAccess::new(Some(&operator_token), None).unwrap();
+                access.add_token(&agent_token).unwrap();
+                handle_http_conn(&mut stream, &hubs, &access).unwrap();
+            });
+            let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let auth = authorization
+                .map_or_else(String::new, |value| format!("Authorization: {value}\r\n"));
+            let session =
+                session.map_or_else(String::new, |value| format!("Mcp-Session-Id: {value}\r\n"));
+            client
+                .write_all(
+                    format!(
+                        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{auth}{session}\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            worker.join().unwrap();
+            response
+        };
+        let session_id = |response: &str| {
+            response
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("Mcp-Session-Id")
+                        .then(|| value.trim().to_string())
+                })
+                .expect("successful initialize returns a session id")
+        };
+
+        let init = http_init();
+        assert!(probe(None, None, &init).starts_with("HTTP/1.1 401"));
+        assert!(probe(Some(&format!("Bearer {unknown_token}")), None, &init)
+            .starts_with("HTTP/1.1 401"));
+
+        let operator = probe(Some(&format!("Bearer {operator_token}")), None, &init);
+        let agent = probe(Some(&format!("Bearer {agent_token}")), None, &init);
+        assert!(operator.starts_with("HTTP/1.1 200"), "{operator}");
+        assert!(agent.starts_with("HTTP/1.1 200"), "{agent}");
+        let operator_session = session_id(&operator);
+        let agent_session = session_id(&agent);
+        assert_ne!(operator_session, agent_session);
+
+        let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}).to_string();
+        assert!(probe(
+            Some(&format!("Bearer {operator_token}")),
+            Some(&operator_session),
+            &list
+        )
+        .starts_with("HTTP/1.1 200"));
+        assert!(probe(
+            Some(&format!("Bearer {agent_token}")),
+            Some(&agent_session),
+            &list
+        )
+        .starts_with("HTTP/1.1 200"));
+        assert!(probe(
+            Some(&format!("Bearer {agent_token}")),
+            Some(&operator_session),
+            &list
+        )
+        .starts_with("HTTP/1.1 404"));
+        assert!(probe(
+            Some(&format!("Bearer {operator_token}")),
+            Some(&agent_session),
+            &list
+        )
+        .starts_with("HTTP/1.1 404"));
+    }
+
+    #[test]
     fn http_agent_pending_nonces_survive_other_agent_writes() {
         let dir = std::env::temp_dir().join(format!("cairn-mcp-pending-{}", fresh_nonce()));
         std::fs::create_dir_all(&dir).unwrap();

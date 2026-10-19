@@ -106,11 +106,13 @@ its holder act as that agent, including invoking the hub's other MCP tools;
 revoke it by replacing the token in the private file and restarting the hub.
 Keep each `name` stable across restarts: its private pending sidecar holds the
 nonce needed to reveal commitments that agent already made.
-The hub still holds all signing keys, so its host is trusted for every profile.
-For a temporary direct Tailscale Serve route, Cairn can enforce a random
-`CAIRN_MCP_HTTP_TOKEN` and the exact `CAIRN_MCP_HTTP_PUBLIC_HOST` itself,
-without Caddy's password check. Keep both values private, require HTTPS at
-Serve, and retain the default zero MCP spend.
+The hub holds all signing keys, so its host is trusted for every profile;
+profiles share the ledger and spending ceiling. Require Tailscale enrollment
+and ACL access as well as the profile's Bearer token. A temporary direct
+Tailscale Serve route can enforce the random `CAIRN_MCP_HTTP_TOKEN` for the
+operator profile and exact `CAIRN_MCP_HTTP_PUBLIC_HOST`; set both privately,
+keep the ACL restricted, require HTTPS, and retain the default zero MCP spend.
+Public internet access is unsupported.
 
 ### EC2 agent route while the hub runs on the Mac
 

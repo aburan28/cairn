@@ -302,28 +302,31 @@ writes the stanza (Claude Code: `claude mcp add --transport http cairn URL`);
 `scripts/mcp-http-smoke.sh` drives the whole flow against a real process.
 
 Plain HTTP, always: this binary terminates no TLS (see `cipher_policy`), so it
-refuses a bind outside loopback. Remote clients must use an SSH tunnel or a
-trusted proxy to the loopback address. The endpoint acts as the operator's
+refuses a bind outside loopback. Remote clients must use a private-network SSH tunnel or a
+Tailscale-enrolled proxy to the loopback address. The endpoint acts as the operator's
 identity and may hold secrets, so it rejects browser `Origin` headers and
 non-loopback `Host` authorities by default; browser clients cannot call it
 directly.
-For a trusted HTTPS proxy that preserves the public `Host`, set both
-`CAIRN_MCP_HTTP_PUBLIC_HOST` to that exact DNS authority (including a port if
-the URL has one) and `CAIRN_MCP_HTTP_TOKEN` to a random 32-byte token encoded
-as 64 hexadecimal characters. Cairn then requires `Authorization: Bearer
-<token>` on every MCP HTTP request, including loopback requests. An invalid
-token or a public host without a token refuses startup; duplicate
-Authorization headers and browser origins are refused. The token is a shared
-operator capability: keep it in a private service environment rather than a
-URL or repository file. TLS still terminates at the trusted proxy. For agents
-that need distinct signing identities, set `CAIRN_MCP_HTTP_AGENTS_FILE` to a
+A remote hub is supported only on a private Tailscale tailnet. Enroll the hub
+and every authorized client, and use tailnet ACLs to limit access to the hub
+service. Tailscale Serve supplies HTTPS; public DNS and public internet access
+are unsupported. The hub still requires a separate 32-byte Cairn bearer token
+for every profile. For direct Tailscale Serve, set
+`CAIRN_MCP_HTTP_PUBLIC_HOST` to the exact MagicDNS authority (including a port
+if the URL has one) and set `CAIRN_MCP_HTTP_TOKEN` to the operator profile's
+random 32-byte token encoded as 64 lowercase hexadecimal characters. Cairn
+then requires `Authorization: Bearer <token>` on every MCP HTTP request.
+An invalid token, or a public-host configuration without a token, refuses
+startup; duplicate Authorization headers and browser origins are refused.
+Keep the token in a private service environment, never in a URL or repository
+file. For distinct signing identities, set `CAIRN_MCP_HTTP_AGENTS_FILE` to a
 private JSON file with schema `cairn-mcp-agent-profiles-v1` and an `agents`
 array of `{ "name": "region", "token": "64 lowercase hex", "identity":
-"/absolute/private/identity.json" }` entries. Each token routes to a separate
-signer and MCP session table; the operator token remains profile zero. All
-profiles share the daemon's ledger and spend ceiling. An agent bearer grants
-that agent's full MCP tool access, so give each one only to its intended agent
-and rotate it on suspected disclosure.
+"/absolute/private/identity.json" }` entries. The operator token is profile
+zero; each agent token selects its own signer and MCP session table. Every
+profile shares the daemon ledger and spend ceiling, and the hub holds every
+profile key. A bearer grants full MCP tool access for that signer. Rotate a
+credential after suspected disclosure and restart the hub.
 
 ### One global address for trusted ingester agents
 
@@ -342,7 +345,7 @@ the hub and each trusted remote agent in one Tailscale tailnet, with access
 restricted to the hub's HTTPS service. Tailscale's MagicDNS gives the hub a
 stable `cairn-hub.<tailnet>.ts.net` name, so this needs no purchased domain or
 public inbound 80/443. Put `Caddyfile.tailnet.example` on that hub, configure
-distinct password hashes for agent accounts, and run:
+the required private bearer profile configuration, and run:
 
 ```sh
 caddy validate --config /etc/caddy/Caddyfile
@@ -350,10 +353,11 @@ tailscale serve --bg --https=8443 http://127.0.0.1:8082
 tailscale serve status
 ```
 
-The agent URL is `https://cairn-hub.<tailnet>.ts.net:8443/mcp` from anywhere
-its enrolled machine can reach the tailnet. Tailscale Serve supplies the
-certificate and HTTPS; Caddy binds only to loopback, authenticates each agent,
-rewrites `Host` for Cairn, and strips Basic credentials before forwarding.
+The agent URL is `https://cairn-hub.<tailnet>.ts.net:8443/mcp` from an
+enrolled machine permitted by the tailnet ACL. Tailscale Serve supplies the
+certificate and HTTPS; Caddy binds only to loopback and rewrites `Host` for
+Cairn while preserving the Bearer header that selects the profile. The tailnet
+ACL and the separate Cairn bearer are both required.
 Tailscale [documents the persistent Serve mode](https://tailscale.com/docs/reference/tailscale-cli/serve)
 and [MagicDNS names](https://tailscale.com/docs/features/magicdns).
 The actual `<tailnet>` value comes from that tailnet's DNS settings after
@@ -385,42 +389,37 @@ operator explicitly configures a reviewed tranche. Install the unit as
 `/etc/systemd/system/cairn-ingest-hub.service`, then run `systemctl
 daemon-reload` and `systemctl enable --now cairn-ingest-hub`.
 
-Install `Caddyfile.tailnet.example` as `/etc/caddy/Caddyfile` and supply
-distinct agent password **hashes** to Caddy's systemd service as
-`CAIRN_MCP_AGENT_AMERICAS_HASH` and `CAIRN_MCP_AGENT_EUROPE_HASH`. Keep the
-hash environment file readable only by the service manager; passwords stay
-in each agent's private environment. After validating and starting Caddy,
-configure Tailscale Serve as above. From a different enrolled machine with
-`CAIRN_MCP_USER` and `CAIRN_MCP_PASSWORD` already set in its private
-environment, run `examples/ecc2k-ingest-service/hub-check.sh
+Install `Caddyfile.tailnet.example` as `/etc/caddy/Caddyfile`. Create
+`/etc/cairn/ingest-hub.env`, readable only by root and the Cairn service user,
+with `CAIRN_MCP_HTTP_TOKEN` and `CAIRN_MCP_HTTP_AGENTS_FILE`. Store the
+operator bearer in that file and point the second variable at a private
+mode-0600 JSON profile file containing distinct agent bearers and identity
+paths. The systemd unit refuses to start if the environment file is missing.
+Keep each agent bearer in that agent's private environment as
+`CAIRN_MCP_BEARER_TOKEN`. After validating and starting Caddy, configure
+Tailscale Serve as above. From a different enrolled machine permitted by the
+ACL, run `examples/ecc2k-ingest-service/hub-check.sh
 https://cairn-hub.<tailnet>.ts.net:8443/mcp`. It uses the real remote adapter
-to check TLS, authentication, MCP session creation, and the expected tool
-names without posting or spending. Run it once from each agent location.
+to check TLS, bearer authentication, MCP session creation, and the expected
+tool names without posting or spending. Run it once from each agent location.
 Also inspect the hub journal for `sandbox bwrap` and for zero unmet pinned
 verifiers before relying on a payment verdict. Local checkout tests cannot
 establish these properties on the future host.
 
-If independently operated agents must connect without tailnet enrollment,
-use `Caddyfile.example` on the **same host** as the loopback listener instead.
-Set `CAIRN_MCP_DOMAIN` to an owned DNS name pointing to that host, configure
-password hashes, and open 80/443 for Caddy's HTTPS certificate and clients.
-The proxy
-accepts only `/mcp`, authenticates each agent, resets `Host` to the loopback
-authority Cairn checks, and removes the Basic credential before forwarding.
-Each client's remote MCP URL is the selected HTTPS `/mcp` address; it must send its Basic
-authorization header on every request. Check the exact header configuration
-supported by that MCP client before deployment. The Caddyfile uses the
-[documented `basic_auth` hash format](https://caddyserver.com/docs/caddyfile/directives/basic_auth)
-and [automatic HTTPS](https://caddyserver.com/docs/quick-starts/https).
+The service does not support a public internet endpoint or credentials
+managed only by an external reverse proxy. Enrolled tailnet devices must pass
+the Tailscale ACL and the Cairn Bearer token. `Caddyfile.example` is a
+loopback-only template behind Tailscale Serve; it does not enable public DNS,
+public listeners, or public ingress.
 
 For a client that only launches stdio servers, use
-`scripts/cairn-remote-stdio.py https://<domain>/mcp` as its MCP command.
-Set `CAIRN_MCP_USER` and `CAIRN_MCP_PASSWORD` in that agent's private process
-environment; do not put the password in a shared MCP configuration file or
-command arguments. The adapter sends one HTTPS POST per JSON-RPC message,
-keeps the session ID, validates TLS, and never follows a redirect carrying
-the credential. It refuses plaintext URLs except an explicit loopback test
-mode. An example stanza is:
+`scripts/cairn-remote-stdio.py https://cairn-hub.<tailnet>.ts.net:8443/mcp`
+as its MCP command. Set `CAIRN_MCP_BEARER_TOKEN` in that agent's private
+process environment; do not put the token in a URL, shared MCP configuration
+file, or command arguments. The adapter sends one HTTPS POST per JSON-RPC
+message, keeps the session ID, validates TLS, and never follows a redirect
+carrying the credential. It refuses plaintext URLs except an explicit
+loopback test mode. An example stanza is:
 
 ```json
 {
@@ -433,15 +432,15 @@ mode. An example stanza is:
 }
 ```
 
-**Access boundary:** all accounts at this address act through the same
-`--mcp-identity`. They are separate sessions, but they can all submit claims
-under the service operator's name and call the same tools. Issue credentials
-only to agents trusted to act as that operator. For independently paid
-contributors, run separate Cairn nodes with their own signing identities and
-P2P sync; a reverse proxy alone does not create separate Cairn identities.
-`post_objective` remains subject to the node's shared `--mcp-max-spend` budget
-(zero by default). The public proxy does not expose the private S3 bucket,
-database, or the ingester process.
+**Access boundary:** each configured Bearer token selects one signing identity
+and its own MCP session table, so that profile signs under its assigned
+identity. All profiles share one ledger and one `--mcp-max-spend` ceiling (zero
+by default); they are not independent security domains or spending accounts.
+The hub holds every profile key, so a hub compromise reaches every identity.
+Only issue profiles to agents trusted with full MCP tool access for that
+identity. The loopback proxy does not expose the private S3 bucket, database,
+or ingester process. Tailscale enrollment and ACL restrictions remain required
+in addition to each profile's Bearer token.
 
 `python3 scripts/mcp-http-ingest-smoke.py` runs two HTTP MCP sessions through
 one local listener, scores and settles an auditor-signed ingester operating

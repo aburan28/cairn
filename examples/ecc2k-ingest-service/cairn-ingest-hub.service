@@ -19,6 +19,8 @@ Environment=CAIRN_REQUIRE_SANDBOX=1
 # Remote agents may submit and score, but cannot fund a new objective by
 # accident. Set a reviewed spend budget only when the operator funds a tranche.
 Environment=CAIRN_MCP_MAX_SPEND=0
+# Required private file: CAIRN_MCP_HTTP_TOKEN and CAIRN_MCP_HTTP_AGENTS_FILE.
+EnvironmentFile=/etc/cairn/ingest-hub.env
 ExecStartPre=/usr/bin/test -r /var/lib/cairn-ingest-hub/operator.identity.json
 ExecStartPre=/usr/bin/test -d /var/lib/cairn-ingest-hub/bundle
 # One process owns the log and every HTTP MCP session. Both HTTP listeners
