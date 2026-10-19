@@ -207,10 +207,16 @@ def collect(args):
 
     if utc_stamp(args.start) >= utc_stamp(args.end):
         raise ValueError("start must precede end")
+    # Resolve the AWS client before opening the database. Auditor callers may
+    # pass a database URL in memory so credential-provider subprocesses never
+    # inherit it from DATABASE_URL.
     s3 = boto3.client("s3")
     objects = []
     progress = []
-    with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+    database_url = getattr(args, "database_url", None) or os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise ValueError("DATABASE_URL or an explicit database_url is required")
+    with psycopg.connect(database_url, autocommit=True) as conn:
         with conn.cursor() as cursor:
             cursor.execute(
                 "SELECT object_key, records, duplicates, object_sha256, "

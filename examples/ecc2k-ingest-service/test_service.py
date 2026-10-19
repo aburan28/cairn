@@ -261,12 +261,19 @@ class ServiceReceiptTests(unittest.TestCase):
 
         self_outer = self
         self.empty_polls = False
+        database_urls = []
         def get_object(**kw):
             self.assertEqual(kw["VersionId"], "fixture-v1")
             return {"Body": io.BytesIO(payload)}
         s3 = types.SimpleNamespace(get_object=get_object)
-        boto3 = types.SimpleNamespace(client=lambda name: s3)
-        psycopg = types.SimpleNamespace(connect=lambda *_args, **_kwargs: Connection())
+        def aws_client(name):
+            self.assertEqual(name, "s3")
+            return s3
+        boto3 = types.SimpleNamespace(client=aws_client)
+        def connect(database_url, **_kwargs):
+            database_urls.append(database_url)
+            return Connection()
+        psycopg = types.SimpleNamespace(connect=connect)
         args = SimpleNamespace(start="2026-10-10T00:00:00Z", end="2026-10-10T01:00:00Z", campaign="ecc2k-130",
                                bucket="private-bucket", replica_id="ingest-a", max_objects=3,
                                max_polls=3, polls_out=self.root / "polls.json",
@@ -275,6 +282,16 @@ class ServiceReceiptTests(unittest.TestCase):
         with patch.dict(sys.modules, {"boto3": boto3, "psycopg": psycopg}), \
              patch.dict(os.environ, {"DATABASE_URL": "postgresql://private"}):
             service.collect(args)
+        self.assertEqual(database_urls, ["postgresql://private"])
+        args.database_url = "postgresql://selected-auditor"
+        with patch.dict(sys.modules, {"boto3": boto3, "psycopg": psycopg}), \
+             patch.dict(os.environ, {}, clear=True):
+            def aws_client_without_db_url(name):
+                self.assertNotIn("DATABASE_URL", os.environ)
+                return aws_client(name)
+            boto3.client = aws_client_without_db_url
+            service.collect(args)
+        self.assertEqual(database_urls[-1], "postgresql://selected-auditor")
         import hashlib
         objects = json.loads(args.objects_out.read_text())
         progress = json.loads(args.progress_out.read_text())
@@ -287,8 +304,9 @@ class ServiceReceiptTests(unittest.TestCase):
         self.assertEqual(polls["events"], [
             {"completed_at": "2026-10-10T00:20:00Z", "objects": 1, "rows_added": 2}])
         self.empty_polls = True
+        args.database_url = "postgresql://private"
         with patch.dict(sys.modules, {"boto3": boto3, "psycopg": psycopg}), \
-             patch.dict(os.environ, {"DATABASE_URL": "postgresql://private"}):
+             patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(ValueError, "0 completed polls"):
                 service.collect(args)
             args.allow_empty_polls = True

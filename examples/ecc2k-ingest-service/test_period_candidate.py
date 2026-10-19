@@ -75,7 +75,9 @@ class CandidateTests(unittest.TestCase):
         return FakeS3(objects)
 
     def test_assembles_private_unsigned_candidate_with_exact_status_bytes(self):
+        collected = {}
         def collect(args):
+            collected["database_url"] = args.database_url
             service.write_json(args.objects_out, [])
             service.write_json(args.progress_out, [])
             service.write_json(args.polls_out, {
@@ -85,7 +87,10 @@ class CandidateTests(unittest.TestCase):
                             "objects": 0, "rows_added": 0}]})
 
         with patch.object(service, "collect", collect):
-            destination = period_candidate.assemble(self.args, self.s3())
+            destination = period_candidate.assemble(
+                self.args, self.s3(), database_url="postgresql://selected-auditor"
+            )
+        self.assertEqual(collected["database_url"], "postgresql://selected-auditor")
         body = service.load_json(destination / "body.json")
         candidate = service.load_json(destination / "candidate.json")
         self.assertEqual(body["before_status"]["raw"], self.before_raw.decode())

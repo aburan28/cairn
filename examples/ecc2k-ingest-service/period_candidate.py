@@ -129,7 +129,7 @@ def check_journal(journal, period, seconds, replica_id):
     return snapshots
 
 
-def assemble(args, s3=None):
+def assemble(args, s3=None, database_url=None):
     if s3 is None:
         import boto3
         s3 = boto3.client("s3")
@@ -221,7 +221,7 @@ def assemble(args, s3=None):
             start=iso(start), end=iso(end), max_objects=args.max_objects,
             max_polls=args.max_polls, allow_empty_polls=True,
             objects_out=work / "objects.json", progress_out=work / "progress.json",
-            polls_out=work / "polls.json"))
+            polls_out=work / "polls.json", database_url=database_url))
         service.prepare(SimpleNamespace(
             service=args.service, input_bucket=args.bucket, period=args.period,
             period_seconds=args.period_seconds, replica_id=args.replica_id,
@@ -245,7 +245,7 @@ def assemble(args, s3=None):
     return destination
 
 
-def main(argv=None):
+def main(argv=None, database_url=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--evidence-prefix", required=True)
@@ -275,7 +275,7 @@ def main(argv=None):
         else:
             args.period = period
             try:
-                print(assemble(args))
+                print(assemble(args, database_url=database_url))
                 period += 1
                 last_missing = None
             except MissingEvidence as error:

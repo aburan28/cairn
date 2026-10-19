@@ -324,7 +324,10 @@ after downtime and waits for later completed periods without assuming an end
 date:
 
 ```sh
-python3 examples/ecc2k-ingest-service/period_candidate.py \
+python3 examples/ecc2k-ingest-service/period_candidate_runner.py \
+  --ingest-source /opt/rho-ingest/dp_ingest.py \
+  --db-secret "$AUDITOR_READ_ONLY_DB_SECRET" \
+  --db-instance "$DP_DB_INSTANCE" --aws-region "$AWS_REGION" \
   --bucket "$PRIVATE_DP_BUCKET" \
   --evidence-prefix "logs/rho-ingest-$REPLICA_HOST/evidence/" \
   --replica-id "$REPLICA_HOST" --operator "$OPERATOR_PUBLIC_ID" \
@@ -332,14 +335,33 @@ python3 examples/ecc2k-ingest-service/period_candidate.py \
   --out-dir "$PRIVATE_AUDITOR_CANDIDATES"
 ```
 
+The runner uses the auditor host's AWS credential chain to resolve the RDS
+endpoint and the explicitly selected Secrets Manager credential. Configure
+that secret for a dedicated, non-privileged database role with `SELECT` access
+to `dp_ingest_progress` and `dp_ingest_polls` and no write grants on either
+table. The runner refuses a pre-existing `DATABASE_URL`, privileged database
+roles, DML grants on those tables, or a connection that does not report
+`transaction_read_only=on`. The session setting is defense in depth; database
+grants are the authority boundary. The AWS role needs only the required RDS
+endpoint lookup, access to that selected database secret, and the evidence and
+source S3 reads. Do not give it the ingester's write credential for this task.
+
 This process holds no auditor signing key and never calls Cairn. A missing
 shipped period is retried in watch mode; an unhealthy or inconsistent journal
-stops the assembler for investigation. The independent auditor must still
-review source inventory, RDS output, and public status provenance before
-running `service.py sign` on `body.json`. For a period with completed polls,
-the supervisor journal remains review evidence in `candidate.json` and is not
+stops the assembler for investigation. It writes only the private local
+candidate directory. The independent auditor must still review source
+inventory, RDS output, and public status provenance before running
+`service.py sign` on `body.json`. For a period with completed polls, the
+supervisor journal remains review evidence in `candidate.json` and is not
 inside the signed Cairn artifact. Until the contract binds that journal, the
 auditor's approval is the public claim about continuous operation.
+
+The runner passes the selected database URL to the candidate collector in
+process memory and does not export it as `DATABASE_URL`; the AWS credential
+chain and its credential-provider subprocesses therefore do not inherit that
+database URL. `PGOPTIONS` supplies a session-level read-only safeguard for
+every PostgreSQL connection made by the candidate process. Keep the database
+role itself SELECT-only, since session options are not a privilege boundary.
 
 After the funder posts the objective, the independent auditor can place each
 signed `*.receipt.json` file in a private inbox for that replica's agent. The
