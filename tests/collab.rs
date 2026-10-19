@@ -177,6 +177,82 @@ fn unicode_positions_are_pinned_and_retries_do_not_duplicate_a_change() {
 }
 
 #[test]
+fn payload_identity_is_separate_from_the_signed_operation_and_binds_its_author() {
+    use cairn::lab::op::Op;
+
+    let dirs = [Temp::new()];
+    let people = [identity(1), identity(2)];
+    let mut lab = space(&dirs[0], &people);
+    let ws = workspace(&mut lab, &people[0]);
+    let change = edit!(
+        &mut lab,
+        &people[0],
+        &ws,
+        &one(&ws),
+        "algorithm.rs",
+        0,
+        0,
+        "A",
+        "first-write"
+    );
+    let first_op = lab.ops().last().unwrap().clone();
+    let duplicate_payload = Op::sign(
+        &people[0],
+        Some(lab.space()),
+        first_op.lamport + 1,
+        vec![first_op.id.clone()],
+        "2026-10-18T01:02:03Z".into(),
+        first_op.body.clone(),
+    )
+    .unwrap();
+    assert_ne!(first_op.id, duplicate_payload.id);
+    assert_eq!(first_op.body, duplicate_payload.body);
+    lab.ingest(duplicate_payload.clone()).unwrap();
+
+    let claimed_other_author = json!({
+        "type": "cairn.collab.change",
+        "version": 1,
+        "kind": "workspace",
+        "author": people[1].submitter_id(),
+        "request": "wrong-author",
+        "workspace": null,
+        "title": "must not project",
+        "parents": [],
+        "edits": []
+    });
+    let value = cairn::canonical::Value::from_json(&claimed_other_author.to_string()).unwrap();
+    let wrong_author = Op::sign(
+        &people[0],
+        Some(lab.space()),
+        duplicate_payload.lamport + 1,
+        vec![duplicate_payload.id],
+        "2026-10-18T01:02:04Z".into(),
+        Body::Doc {
+            doc: "cairn.collab/v1".into(),
+            fields: vec![Field {
+                key: value.digest(),
+                value,
+                pred: vec![],
+            }],
+        },
+    )
+    .unwrap();
+    lab.ingest(wrong_author).unwrap();
+
+    let graph = Graph::load(&lab).unwrap();
+    assert_eq!(graph.heads(&ws).unwrap(), one(&change));
+    assert_eq!(
+        graph.snapshot(&ws, None).unwrap().files["algorithm.rs"].text,
+        "A"
+    );
+    assert!(graph
+        .issues
+        .iter()
+        .any(|issue| issue.contains("mismatched author")));
+    assert_eq!(graph.workspaces().as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn thirty_agents_converge_after_partition_shuffle_duplicates_and_concurrent_replacements() {
     let dirs = (0..34).map(|_| Temp::new()).collect::<Vec<_>>();
     let people = (1..=30).map(identity).collect::<Vec<_>>();

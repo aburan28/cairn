@@ -15,6 +15,23 @@ CRDT; logical clocks order causal work and stable change ids break concurrent
 ties. No wall clock chooses which edit wins. The [protocol design](design/live-collaboration.md)
 explains the boundary between text convergence and scientific correctness.
 
+## Payload identity and signed operation identity
+
+A collaboration change id is the SHA-256 address of its canonical semantic
+payload: format and version, author, request id, workspace, title, causal
+parents and edits. It is intentionally independent of the enclosing lab
+operation's timestamp, Lamport clock, dependency list and signature. The signed
+operation id covers its canonical envelope, and its signature authenticates
+that envelope; two signed operations can therefore carry the same collaboration
+payload id while having different operation ids.
+
+When projecting collaboration history, Cairn checks that the payload author
+matches the authenticated operation author and that the payload digest matches
+the document key. The collaboration id identifies advisory source content. It
+does not authorize a write, prove execution or correctness, or affect settlement.
+The signed lab operation remains the record of who wrote the payload and under
+which causal history.
+
 ## Start a shared workspace
 
 Use a fresh directory for this example. Identity files contain private keys;
