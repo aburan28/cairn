@@ -2,7 +2,7 @@
 //! leave a marker if invoked, so an offline-looking startup cannot hide a curl
 //! or Tailscale invocation that merely failed.
 
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -56,15 +56,15 @@ fn scratch() -> PathBuf {
 }
 
 fn address() -> SocketAddr {
-    static USED: OnceLock<Mutex<BTreeSet<u16>>> = OnceLock::new();
-    let used = USED.get_or_init(|| Mutex::new(BTreeSet::new()));
+    static ISSUED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+    let issued = ISSUED.get_or_init(|| Mutex::new(HashSet::new()));
     loop {
+        // The child must bind this address after this listener is dropped.
+        // Never hand the same released ephemeral port to another parallel
+        // fixture while the first child is still starting.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        // The listener must close before the child binds. Under parallel CI,
-        // the OS sometimes reassigns that just-freed port to another test's
-        // child. Never hand out the same port twice within this test process.
-        let first_issue = used.lock().unwrap().insert(address.port());
+        let first_issue = issued.lock().unwrap().insert(address.port());
         drop(listener);
         if first_issue {
             return address;
@@ -137,6 +137,11 @@ fn start(
     bootstrap: Option<&Path>,
     configure: impl FnOnce(&mut Command),
 ) -> Node {
+    assert_ne!(
+        p2p.port(),
+        http.port(),
+        "P2P and HTTP fixtures must not reserve the same port"
+    );
     helpers(&dir);
     let mut cmd = daemon_command(&dir);
     cmd.args([
@@ -219,6 +224,18 @@ fn wait_for(
         "node did not become ready: {}",
         fs::read_to_string(node.dir.join("stderr")).unwrap()
     );
+}
+
+#[test]
+fn concurrent_fixture_addresses_are_unique_until_child_spawn() {
+    let workers = (0..8)
+        .map(|_| std::thread::spawn(|| (0..16).map(|_| address().port()).collect::<Vec<_>>()))
+        .collect::<Vec<_>>();
+    let ports = workers
+        .into_iter()
+        .flat_map(|worker| worker.join().unwrap())
+        .collect::<HashSet<_>>();
+    assert_eq!(ports.len(), 8 * 16);
 }
 
 #[test]
@@ -308,6 +325,55 @@ fn explicitly_bootstrapped_private_nodes_reach_each_other() {
     for node in [&mut first, &mut second] {
         let network = wait_for(node, "/network", |_| true);
         assert_eq!(network["node"]["peers_policy"]["allowed"], 1);
+        wait_for(node, "/sessions", |value| {
+            value["reached"].as_u64().is_some_and(|n| n > 0)
+        });
+        assert!(!node.dir.join("helper-invoked").exists());
+    }
+}
+
+#[test]
+fn a_private_bootstrap_ring_makes_progress_without_a_cross_node_lock_cycle() {
+    let dirs = [scratch(), scratch(), scratch()];
+    let addresses = [address(), address(), address()];
+    let bootstraps = [
+        identity(&dirs[0], addresses[0]),
+        identity(&dirs[1], addresses[1]),
+        identity(&dirs[2], addresses[2]),
+    ];
+    let peers: Vec<_> = bootstraps
+        .iter()
+        .map(|path| {
+            let value: Value = Value::from_json(&fs::read_to_string(path).unwrap()).unwrap();
+            let public = cairn::p2p::handshake::PeerPublic::from_bytes(
+                &cairn::hex::decode(value.get("public").unwrap().as_str().unwrap()).unwrap(),
+            )
+            .unwrap();
+            cairn::hex::encode(&public.id())
+        })
+        .collect();
+    let mut nodes = Vec::new();
+    for i in 0..3 {
+        // All three are named members; only the next member is bootstrapped.
+        // The predecessor must be authorized to complete its inbound session.
+        let allowed = peers
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, id)| id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        nodes.push(start(
+            dirs[i].clone(),
+            addresses[i],
+            address(),
+            Some(&bootstraps[(i + 1) % 3]),
+            |cmd| {
+                cmd.env("CAIRN_PEERS", allowed);
+            },
+        ));
+    }
+    for node in &mut nodes {
         wait_for(node, "/sessions", |value| {
             value["reached"].as_u64().is_some_and(|n| n > 0)
         });
