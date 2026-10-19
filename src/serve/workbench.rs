@@ -443,15 +443,13 @@ fn start_run(session: &Session, lab: &mut Lab, args: &Json) -> Result<Json, LabE
         .unwrap_or_default();
     let (_, offer) = sample_offer(session);
     if !requirements.matches(offer.cpu.as_ref())
-        || !offer
-            .cpus
-            .is_some_and(|cpus| cpus >= u64::from(request.cpus))
-        || !offer
+        || offer.cpus.is_none_or(|cpus| cpus < u64::from(request.cpus))
+        || offer
             .cpu_millis
-            .is_some_and(|quota| quota >= u64::from(request.cpus) * 1000)
-        || !offer
+            .is_none_or(|quota| quota < u64::from(request.cpus) * 1000)
+        || offer
             .memory_mb
-            .is_some_and(|memory| memory >= request.memory_mb)
+            .is_none_or(|memory| memory < request.memory_mb)
     {
         return Err(LabError::Unavailable("this machine cannot confirm the requested CPU/ISA/memory allocation; lower the allocation or use a compatible host".into()));
     }
@@ -583,15 +581,13 @@ fn start_replay(session: &Session, lab: &mut Lab, args: &Json) -> Result<Json, L
         return Err(LabError::Refused("this recipe exceeds the local GUI's isolation or resource limits; review it with the CLI, or use its command as a new bounded experiment".into()));
     }
     let (_, offer) = sample_offer(session);
-    if !offer
-        .cpus
-        .is_some_and(|cpus| cpus >= u64::from(request.cpus))
-        || !offer
+    if offer.cpus.is_none_or(|cpus| cpus < u64::from(request.cpus))
+        || offer
             .cpu_millis
-            .is_some_and(|quota| quota >= u64::from(request.cpus) * 1000)
-        || !offer
+            .is_none_or(|quota| quota < u64::from(request.cpus) * 1000)
+        || offer
             .memory_mb
-            .is_some_and(|memory| memory >= request.memory_mb)
+            .is_none_or(|memory| memory < request.memory_mb)
     {
         return Err(LabError::Unavailable(
             "this host cannot confirm the recorded allocation".into(),
