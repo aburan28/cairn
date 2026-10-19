@@ -50,6 +50,34 @@ final class CoordinationTests: XCTestCase {
         }
     }
 
+    func testJSONModeProvidersMayReturnStructuredObjects() throws {
+        let expected = try CoordinationWriter.parse(Self.reply, budget: 160)
+        var response = Self.reply
+        for field in ["artifact_schema_json", "good_artifact_json", "bad_artifact_json"] {
+            response[field] = try JSONSerialization.jsonObject(with: Data((response[field] as! String).utf8))
+        }
+        let actual = try CoordinationWriter.parse(response, budget: 160)
+        XCTAssertTrue(NSDictionary(dictionary: actual.artifactSchema).isEqual(to: expected.artifactSchema))
+        XCTAssertTrue(NSDictionary(dictionary: actual.good).isEqual(to: expected.good))
+        XCTAssertTrue(NSDictionary(dictionary: actual.bad).isEqual(to: expected.bad))
+        XCTAssertEqual(actual.reward, expected.reward)
+        // A mixed response is common after a provider repairs just one field.
+        response["bad_artifact_json"] = Self.reply["bad_artifact_json"]
+        XCTAssertNoThrow(try CoordinationWriter.parse(response, budget: 160))
+    }
+
+    func testStructuredObjectsKeepTheSameValidationGates() {
+        for value: Any in [
+            ["unit": 3, "square": 9.5], ["square": 9],
+            ["unit": 3, "square": 9, "padding": String(repeating: "x", count: 256_000)],
+            ["unit": 3, "square": Double.infinity], [3, 9], NSNull(),
+        ] {
+            let reply = Self.reply.merging(["good_artifact_json": value]) { _, new in new }
+            XCTAssertThrowsError(try CoordinationWriter.parse(reply, budget: 160))
+        }
+        XCTAssertThrowsError(try CoordinationWriter.parse(Self.reply.merging(["reward": 160]) { _, new in new }, budget: 160))
+    }
+
     func testBuilderPinsCheckerAndPreservesCheckedSpec() throws {
         let draft = try CoordinationWriter.parse(Self.reply, budget: 160)
         let built = try CoordinationBuilder.build(draft, root: root())

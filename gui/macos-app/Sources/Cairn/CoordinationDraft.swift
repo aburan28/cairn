@@ -102,9 +102,22 @@ enum CoordinationWriter {
         let reward = try integer(field("reward"), name: "Budget")
         guard budget == nil || reward == budget else { throw AIError("The generated spec changed your budget.") }
         guard price <= reward else { throw AIError("Payment per piece exceeds the budget.") }
-        let schema = try ChallengeBuilder.jsonObject(field("artifact_schema_json"), what: "Artifact schema")
-        let good = try ChallengeBuilder.jsonObject(field("good_artifact_json"), what: "Valid example")
-        let bad = try ChallengeBuilder.jsonObject(field("bad_artifact_json"), what: "Invalid example")
+        // JSON-mode providers can return nested objects even when asked for encoded
+        // strings. Both represent the same data; apply the same bounds and integer
+        // checks to either form instead of spending another request on re-encoding.
+        func jsonField(_ name: String, what: String) throws -> [String: Any] {
+            if let value = object[name] as? [String: Any] {
+                guard JSONSerialization.isValidJSONObject(value),
+                      try JSONSerialization.data(withJSONObject: value).count <= 256_000 else {
+                    throw AIError("The generated spec has an invalid \(name) field.")
+                }
+                return value
+            }
+            return try ChallengeBuilder.jsonObject(field(name), what: what)
+        }
+        let schema = try jsonField("artifact_schema_json", what: "Artifact schema")
+        let good = try jsonField("good_artifact_json", what: "Valid example")
+        let bad = try jsonField("bad_artifact_json", what: "Invalid example")
         for (name, value) in [("Artifact schema", schema), ("Valid example", good), ("Invalid example", bad)] {
             try ChallengeBuilder.requireIntegers(value, what: name)
         }
