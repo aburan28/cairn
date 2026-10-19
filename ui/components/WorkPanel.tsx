@@ -8,8 +8,23 @@ import { appBridge, exitWork, pauseWork, readWorkStatus, resumeWork, startWork, 
 import { Badge } from "@/components/ui";
 
 /** Process control is local to Cairn.app. The node supplies the worker's
- * reported search rate; the app supplies measured CPU for its process tree. */
-export function WorkPanel({ objective, base }: { objective: string; base: string }) {
+ * reported search rate; the app supplies measured CPU for its process tree.
+ *
+ * `embedded` is for a panel inside the Contribute sheet: no bottom margin
+ * (the sheet spaces its own children) and no link back to the page it is
+ * already on. `onChooseSolver` puts the app's solver sheet beside Start, so
+ * the two controls that set a worker up sit together. */
+export function WorkPanel({
+  objective,
+  base,
+  embedded = false,
+  onChooseSolver,
+}: {
+  objective: string;
+  base: string;
+  embedded?: boolean;
+  onChooseSolver?: () => void;
+}) {
   const [bridge, setBridge] = useState<Bridge | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const [worker, setWorker] = useState<ReportedWorker | null>(null);
@@ -76,7 +91,7 @@ export function WorkPanel({ objective, base }: { objective: string; base: string
   const roundRate = paused ? null : status?.rounds_per_minute;
 
   return (
-    <section className="box mb-5 p-4" aria-label="My work on this Mac">
+    <section className={`box p-4 ${embedded ? "" : "mb-5"}`} aria-label="My work on this Mac">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">
@@ -104,10 +119,12 @@ export function WorkPanel({ objective, base }: { objective: string; base: string
                 <button className="btn btn-sm" type="button" disabled={busy || draining} onClick={() => void act(paused || pausing ? "resume" : "pause")}>{paused || pausing ? "Resume" : "Pause"}</button>
                 <button className="btn btn-sm" type="button" disabled={busy || draining} onClick={() => void act("stop")}>{draining ? "Finishing safely…" : "Stop"}</button>
                 <button className="btn btn-sm" type="button" disabled={busy || status?.leaving} onClick={() => void act("exit")}>Exit task</button>
+                {onChooseSolver && <button className="btn btn-sm" type="button" disabled={busy} onClick={onChooseSolver}>Solver…</button>}
               </>
             ) : (
               <>
                 <button className="btn btn-primary btn-sm" type="button" disabled={busy || !objective || !supported} onClick={() => void act("start")}>Set up &amp; start</button>
+                {onChooseSolver && <button className="btn btn-sm" type="button" disabled={busy} onClick={onChooseSolver}>Solver…</button>}
                 {status?.state === "exited" && <button className="btn btn-sm" type="button" disabled={busy} onClick={() => void act("exit")}>Exit task</button>}
               </>
             )}
@@ -144,7 +161,7 @@ export function WorkPanel({ objective, base }: { objective: string; base: string
       {running && <p className="mt-2 text-[11.5px] text-ink-3">Offered resources: {status.threads ?? "default"} CPU threads · {status.gpus ? `GPU ${status.gpus}` : "CPU only"} · {status.hours_per_day && status.hours_per_day < 24 ? `${status.hours_per_day} h/day` : "no daily limit"}. The solver must honor the CPU and GPU offer. Stop and Exit finish pending reveals.</p>}
       {status?.state === "exited" && status.activity && <p className="mt-3 text-[12px] text-ink-2">Last activity: {status.activity}</p>}
       {error && <p className="mt-3 text-[12px] text-warn" role="alert">{error}</p>}
-      {!bridge && <Link href="/contribute#compute" className="mt-3 inline-block text-[12.5px] text-accent hover:underline">See ways to contribute →</Link>}
+      {!bridge && !embedded && <Link href="/contribute#compute" className="mt-3 inline-block text-[12.5px] text-accent hover:underline">See ways to contribute →</Link>}
       {running && !paused && !rate && <p className="mt-2 text-[11.5px] text-ink-3">Round rate counts completed solver runs. Search steps appear when the solver measures them.</p>}
     </section>
   );

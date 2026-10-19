@@ -242,7 +242,7 @@ export function Sheet({
   return (
     <dialog
       ref={dialog}
-      className="fixed inset-0 m-0 h-dvh max-h-none w-full max-w-none bg-transparent p-0 text-ink open:flex open:justify-end backdrop:bg-canvas/60 backdrop:backdrop-blur-sm"
+      className="fixed inset-0 m-0 h-dvh max-h-none w-full max-w-none bg-transparent p-0 text-ink open:flex open:justify-end backdrop:bg-canvas/45"
       aria-labelledby={titleId}
       onCancel={(event) => { event.preventDefault(); onClose(); }}
       onClick={(event) => {
