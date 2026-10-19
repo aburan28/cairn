@@ -25,6 +25,68 @@ class MissingEvidence(Exception):
     pass
 
 
+class IneligiblePeriod(ValueError):
+    def __init__(self, reason, journals):
+        self.reason = reason
+        self.journals = journals
+        super().__init__(f"period is ineligible: {reason}")
+
+
+def journal_reference(key, raw, version):
+    return {"s3_key": key, "sha256": hashlib.sha256(raw).hexdigest(),
+            "version_id": version}
+
+
+def ineligible_path(args):
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", args.replica_id):
+        raise ValueError("invalid replica id")
+    return private_directory(args.out_dir) / f"ineligible-{args.replica_id}-{args.period}.json"
+
+
+def record_ineligible(args, error):
+    path = ineligible_path(args)
+    record = {"schema": "cairn-dp-period-ineligible-v1", "replica_id": args.replica_id,
+              "period": args.period, "reason": error.reason, "journals": error.journals}
+    if path.is_symlink():
+        raise ValueError(f"{path}: ineligible marker must not be a symlink")
+    if path.exists():
+        if service.load_json(path) != record:
+            raise ValueError(f"{path}: ineligible marker changed; inspect before retry")
+        return path
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    with os.fdopen(os.open(path, flags, 0o600), "wb") as output:
+        output.write(service.canonical(record) + b"\n")
+    return path
+
+
+def previously_ineligible(args):
+    path = ineligible_path(args)
+    if not path.exists() and not path.is_symlink():
+        return False
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{path}: invalid ineligible marker")
+    record = service.load_json(path)
+    if (type(record) is not dict or record.get("schema") != "cairn-dp-period-ineligible-v1"
+            or record.get("replica_id") != args.replica_id
+            or record.get("period") != args.period
+            or record.get("reason") not in ("invalid_journal", "missing_before_status",
+                                             "missing_after_status")
+            or type(record.get("journals")) is not list
+            or len(record["journals"]) != (2 if record["reason"] == "missing_after_status" else 1)):
+        raise ValueError(f"{path}: malformed ineligible marker; inspect before retry")
+    for offset, journal in enumerate(record["journals"]):
+        if (type(journal) is not dict
+                or set(journal) != {"s3_key", "sha256", "version_id"}
+                or journal["s3_key"] != args.evidence_prefix + f"period-{args.period + offset}.json"
+                or type(journal["sha256"]) is not str
+                or not re.fullmatch(r"[0-9a-f]{64}", journal["sha256"])
+                or type(journal["version_id"]) is not str or not journal["version_id"]):
+            raise ValueError(f"{path}: malformed journal reference; inspect before retry")
+    return True
+
+
 def iso(seconds):
     return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -161,13 +223,20 @@ def assemble(args, s3=None, database_url=None):
     if not journal_version:
         raise ValueError(f"{key}: evidence bucket must return an immutable version id")
     journal = json.loads(raw)
-    snapshots = check_journal(journal, args.period, args.period_seconds, args.replica_id)
+    try:
+        snapshots = check_journal(journal, args.period, args.period_seconds, args.replica_id)
+    except ValueError as error:
+        # A completed, versioned journal that fails service checks cannot earn
+        # this period, but must not prevent review of later periods.
+        raise IneligiblePeriod("invalid_journal",
+                               [journal_reference(key, raw, journal_version)]) from error
     start = args.period * args.period_seconds
     end = start + args.period_seconds
     before = next((item for item in snapshots
                    if start - args.period_seconds <= utc_second(item["generated_at"]) <= start), None)
     if before is None:
-        raise ValueError(f"{key}: completed journal has no status generated before the period boundary")
+        raise IneligiblePeriod("missing_before_status",
+                               [journal_reference(key, raw, journal_version)])
     after = next((item for item in snapshots if end <= utc_second(item["generated_at"])), None)
     after_journal = None
     if after is None:
@@ -185,7 +254,9 @@ def assemble(args, s3=None, database_url=None):
                       if type(item) is dict and type(item.get("generated_at")) is str
                       and end <= utc_second(item["generated_at"]) <= end + args.period_seconds), None)
         if after is None:
-            raise ValueError(f"{next_key}: completed journal has no status generated after the period boundary")
+            raise IneligiblePeriod("missing_after_status", [
+                journal_reference(key, raw, journal_version),
+                journal_reference(next_key, next_raw, next_version)])
         if (not re.fullmatch(r"[0-9a-f]{64}", after.get("sha256", ""))
                 or after.get("file") != "status-" + after["sha256"] + ".json"):
             raise ValueError(f"{next_key}: after status reference is malformed")
@@ -274,10 +345,23 @@ def main(argv=None, database_url=None):
                 parser.error("period has not closed")
         else:
             args.period = period
+            if watching and previously_ineligible(args):
+                period += 1
+                continue
             try:
                 print(assemble(args, database_url=database_url))
                 period += 1
                 last_missing = None
+                if watching:
+                    continue
+            except IneligiblePeriod as error:
+                if not watching:
+                    raise
+                marker = record_ineligible(args, error)
+                print(f"ineligible service period: {marker}: {error.reason}", file=sys.stderr)
+                period += 1
+                last_missing = None
+                continue
             except MissingEvidence as error:
                 if not watching:
                     raise

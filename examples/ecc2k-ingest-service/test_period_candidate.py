@@ -128,8 +128,10 @@ class CandidateTests(unittest.TestCase):
     def test_restart_trace_is_refused_before_private_source_collection(self):
         self.journal["events"].append({"at": self.period * 60 + 20, "exit_code": 7})
         with patch.object(service, "collect", side_effect=AssertionError("reached RDS")):
-            with self.assertRaisesRegex(ValueError, "restart, error"):
+            with self.assertRaises(period_candidate.IneligiblePeriod) as caught:
                 period_candidate.assemble(self.args, self.s3())
+        self.assertEqual(caught.exception.reason, "invalid_journal")
+        self.assertIn("restart, error", str(caught.exception.__cause__))
         self.assertFalse(list((self.root / "candidates").glob("*/candidate.json")))
 
     def test_unversioned_evidence_cannot_become_a_candidate(self):
@@ -142,6 +144,43 @@ class CandidateTests(unittest.TestCase):
         with patch.object(service, "collect", side_effect=AssertionError("reached RDS")):
             with self.assertRaisesRegex(ValueError, "immutable version id"):
                 period_candidate.assemble(self.args, Unversioned(self.s3().objects))
+
+    def test_missing_boundary_status_is_recorded_without_a_candidate(self):
+        self.next_journal["snapshots"][0]["generated_at"] = period_candidate.iso(
+            self.period * 60)
+        with patch.object(service, "collect", side_effect=AssertionError("reached RDS")):
+            with self.assertRaises(period_candidate.IneligiblePeriod) as caught:
+                period_candidate.assemble(self.args, self.s3())
+        self.assertEqual(caught.exception.reason, "missing_after_status")
+        marker = period_candidate.record_ineligible(self.args, caught.exception)
+        record = service.load_json(marker)
+        self.assertEqual(len(record["journals"]), 2)
+        self.assertEqual(record["journals"][1]["version_id"], "v1")
+        self.assertTrue(period_candidate.previously_ineligible(self.args))
+        self.assertFalse(list((self.root / "candidates").glob("*/candidate.json")))
+
+    def test_watcher_advances_past_a_recorded_ineligible_period(self):
+        period_candidate.record_ineligible(self.args, period_candidate.IneligiblePeriod(
+            "missing_after_status", [
+                {"s3_key": self.prefix + f"period-{self.period}.json",
+                 "sha256": "a" * 64, "version_id": "v1"},
+                {"s3_key": self.prefix + f"period-{self.period + 1}.json",
+                 "sha256": "b" * 64, "version_id": "v1"}]))
+        attempted = []
+
+        def assemble(args):
+            attempted.append(args.period)
+            return self.root / "candidate"
+
+        argv = ["--bucket", self.args.bucket, "--evidence-prefix", self.prefix,
+                "--replica-id", self.args.replica_id, "--operator", self.args.operator,
+                "--period-seconds", "60", "--watch-from", str(self.period),
+                "--out-dir", str(self.args.out_dir)]
+        with patch.object(period_candidate, "assemble", side_effect=assemble), patch.object(
+                period_candidate.time, "sleep", side_effect=StopIteration):
+            with self.assertRaises(StopIteration):
+                period_candidate.main(argv)
+        self.assertEqual(attempted, [self.period + 1])
 
 
 if __name__ == "__main__":
