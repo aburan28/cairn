@@ -283,6 +283,7 @@ export function Box({
   children,
   className = "",
   flush = false,
+  id,
 }: {
   title?: React.ReactNode;
   aside?: React.ReactNode;
@@ -290,9 +291,11 @@ export function Box({
   className?: string;
   /** No body padding: for a table or tabs that draw their own. */
   flush?: boolean;
+  /** An anchor, for a link that jumps to this box. */
+  id?: string;
 }) {
   return (
-    <section className={`box ${className}`}>
+    <section id={id} className={`box ${className}`}>
       {title && (
         <div className="box-head">
           <span className="min-w-0 flex-1 truncate">{title}</span>

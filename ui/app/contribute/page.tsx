@@ -13,14 +13,16 @@ import {
   ROLES,
   ROLE_TOGGLE,
   type RoleId,
+  type OpenGoals,
   type RoleInfo,
+  afterRead,
   openSheet,
   setRole,
 } from "@/lib/contribute";
 import { type Bridge, appBridge } from "@/lib/draft";
 import { objectiveTitle } from "@/lib/title";
 import { AgentConnect } from "@/components/agents";
-import { WorkPanel } from "@/components/WorkPanel";
+import { OfferCompute } from "@/components/OfferCompute";
 import { useEvery, useNode } from "@/components/hooks";
 import { Badge, Box, Note, PageHeader, Sheet } from "@/components/ui";
 
@@ -40,10 +42,8 @@ import { Badge, Box, Note, PageHeader, Sheet } from "@/components/ui";
 export default function Page() {
   const base = useNode();
   const [network, setNetwork] = useState<NetworkResponse | null>(null);
-  const [objectives, setObjectives] = useState<Objective[]>([]);
-  /** Whether `/objectives` answered: `null` until the first read returns. A
-   * failed read is not an empty node, so the sheet must not say "no goal". */
-  const [objectivesLive, setObjectivesLive] = useState<boolean | null>(null);
+  const [goals, setGoals] = useState<OpenGoals>({ objectives: [], live: null });
+  const objectives = goals.objectives;
   const [underserved, setUnderserved] = useState<Underserved[]>([]);
   const [origin, setOrigin] = useState("");
   const [bridge, setBridge] = useState<Bridge | null>(null);
@@ -70,15 +70,14 @@ export default function Page() {
   // A failed read keeps the last good answer instead of blanking it.
   const read = useCallback(async () => {
     if (base === null) return;
-    const [net, feed, goals] = await Promise.all([
+    const [net, feed, scarce] = await Promise.all([
       fetchNetwork(base).catch(() => null),
       loadObjectives(base),
       fetchGoals(base).catch(() => null),
     ]);
     if (net) setNetwork(net);
-    if (goals) setUnderserved(goals.underserved ?? []);
-    if (feed.live) setObjectives(feed.objectives.filter((o) => o.open));
-    setObjectivesLive((before) => feed.live || before === true);
+    if (scarce) setUnderserved(scarce.underserved ?? []);
+    setGoals((previous) => afterRead(previous, feed));
   }, [base]);
   useEvery(read, 20, base !== null, base);
 
@@ -185,7 +184,7 @@ export default function Page() {
             <OfferCompute
               network={network}
               objectives={objectives}
-              live={objectivesLive}
+              live={goals.live}
               onRetry={() => void read()}
               requestedObjective={requestedObjective}
               underserved={underserved}
@@ -354,179 +353,6 @@ function RoleCard({ role, on, onOpen }: { role: RoleInfo; on: boolean; onOpen: (
       <p className="text-[12.5px] leading-relaxed text-ink-3">{role.payDetail}</p>
       <span className="mt-auto pt-1 text-[12.5px] font-medium text-accent">{ACTION[role.id]} →</span>
     </button>
-  );
-}
-
-// -- offer compute ---------------------------------------------------------------
-
-function OfferCompute({
-  network,
-  objectives,
-  live,
-  onRetry,
-  requestedObjective,
-  underserved,
-  origin,
-  bridge,
-  busy,
-  onShare,
-  onWork,
-}: {
-  network: NetworkResponse | null;
-  objectives: Objective[];
-  /** See `objectivesLive` on the page: `null` while the first read is out. */
-  live: boolean | null;
-  onRetry: () => void;
-  requestedObjective: string | null;
-  underserved: Underserved[];
-  origin: string;
-  bridge: Bridge | null;
-  busy: boolean;
-  onShare: () => void;
-  onWork: (objective?: string) => void;
-}) {
-  const [objective, setObjective] = useState("");
-
-  useEffect(() => {
-    // A goal that closed since it was chosen drops out of the list; fall back
-    // to a fresh pick rather than leave the select pointing at nothing.
-    if (objective && objectives.some((row) => row.id === objective)) return;
-    if (objectives.length === 0) {
-      if (objective) setObjective("");
-      return;
-    }
-    if (requestedObjective && objectives.some((row) => row.id === requestedObjective)) {
-      setObjective(requestedObjective);
-      return;
-    }
-    const scarce = underserved.flatMap((row) => row.objectives).find((id) => objectives.some((row) => row.id === id));
-    setObjective(scarce ?? objectives[0].id);
-  }, [objectives, underserved, objective, requestedObjective]);
-
-  const chosen = objectives.find((row) => row.id === objective) ?? null;
-  const scarce = new Set(underserved.flatMap((row) => row.objectives));
-
-  return (
-    <div className="flex flex-col gap-4 text-[13px]">
-      <p className="leading-relaxed text-ink-2">
-        Pick an open goal, then start a worker on this Mac. The worker takes a slice of the search, runs the solver you
-        chose in Cairn.app, and sends its answers for checking.
-      </p>
-
-      {chosen ? (
-        <>
-          <div>
-            <label className="label" htmlFor="offer-goal">
-              Goal to work on
-            </label>
-            <select id="offer-goal" className="field" value={objective} onChange={(event) => setObjective(event.target.value)}>
-              {objectives.map((row) => (
-                <option key={row.id} value={row.id}>
-                  {objectiveTitle(row)}
-                </option>
-              ))}
-            </select>
-            <GoalFacts objective={chosen} underserved={scarce.has(chosen.id)} />
-          </div>
-          <WorkPanel
-            objective={chosen.id}
-            base={origin}
-            embedded
-            onChooseSolver={bridge && !busy ? () => onWork(chosen.id) : undefined}
-          />
-        </>
-      ) : (
-        <NoGoal live={live} onRetry={onRetry} />
-      )}
-
-      {network?.node.reach && !network.node.reach.lan && (
-        <div className="rounded-lg border border-edge bg-surface-2 p-3 text-[12.5px] text-ink-2">
-          Other machines cannot reach this node yet.
-          {bridge && (
-            <button type="button" className="btn btn-sm mt-2 block" onClick={onShare} disabled={busy}>
-              Share this node on my network
-            </button>
-          )}
-        </div>
-      )}
-
-      {chosen && (
-        <p className="text-[12px] leading-relaxed text-ink-3">
-          CPU use is measured on this Mac. Search rate comes from worker reports and appears only when the solver measures
-          steps. Only checked answers are paid, never idle time.
-        </p>
-      )}
-    </div>
-  );
-}
-
-/** What the chosen goal pays and how much of it is left, under the select. */
-function GoalFacts({ objective, underserved }: { objective: Objective; underserved: boolean }) {
-  const piece = objective.piecework;
-  const left = piece?.units != null ? Math.max(0, piece.units - piece.paid_units) : null;
-  return (
-    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-ink-3">
-      {piece ? (
-        <span>
-          <span className="mono text-ink-2">{piece.unit_price.toLocaleString("en-US")}</span> per unit
-          {left != null && (
-            <>
-              {" "}· <span className="mono text-ink-2">{left.toLocaleString("en-US")}</span> of{" "}
-              {piece.units!.toLocaleString("en-US")} left
-            </>
-          )}
-        </span>
-      ) : (
-        <span>
-          Bounty <span className="mono text-ink-2">{objective.reward.toLocaleString("en-US")}</span>
-        </span>
-      )}
-      {underserved && <Badge tone="warn" title="Few workers are on this goal for what it pays">needs workers</Badge>}
-      <Link href={`/challenge?id=${encodeURIComponent(objective.id)}`} className="ml-auto text-accent hover:underline">
-        Details →
-      </Link>
-    </div>
-  );
-}
-
-/** The sheet with no goal to offer: still loading, unreadable, or empty. */
-function NoGoal({ live, onRetry }: { live: boolean | null; onRetry: () => void }) {
-  if (live === null) {
-    return (
-      <div className="rounded-lg border border-edge bg-surface-2 p-4 text-ink-3" aria-live="polite">
-        Reading open goals from this node…
-      </div>
-    );
-  }
-  if (!live) {
-    return (
-      <div className="rounded-lg border border-warn/40 bg-surface-2 p-4" role="status">
-        <div className="font-medium text-ink">Could not read this node&rsquo;s goals</div>
-        <p className="mt-1 leading-relaxed text-ink-2">
-          The node did not answer. It may still be starting; this panel tries again every 20 seconds.
-        </p>
-        <button type="button" className="btn btn-sm mt-3" onClick={onRetry}>
-          Try again now
-        </button>
-      </div>
-    );
-  }
-  return (
-    <div className="rounded-lg border border-edge bg-surface-2 p-4">
-      <div className="font-medium text-ink">No open goal on this node</div>
-      <p className="mt-1 leading-relaxed text-ink-2">
-        Goals arrive when someone funds one here, or when this node syncs the log from a peer that has them. If you
-        expected one, check that this node has peers.
-      </p>
-      <div className="mt-3 flex flex-wrap gap-2">
-        <Link href="/network" className="btn btn-sm">
-          Check peers
-        </Link>
-        <Link href="/submit" className="btn btn-sm btn-ghost">
-          Fund a question →
-        </Link>
-      </div>
-    </div>
   );
 }
 

@@ -10,10 +10,11 @@ import { Badge } from "@/components/ui";
 /** Process control is local to Cairn.app. The node supplies the worker's
  * reported search rate; the app supplies measured CPU for its process tree.
  *
- * `embedded` is for a panel inside the Contribute sheet: no bottom margin
- * (the sheet spaces its own children) and no link back to the page it is
- * already on. `onChooseSolver` puts the app's solver sheet beside Start, so
- * the two controls that set a worker up sit together. */
+ * The panel draws no outer margin; its caller spaces it. In a browser tab it
+ * links to Contribute with this goal already chosen, except where `embedded`
+ * says it is already inside that sheet. `onChooseSolver` puts the app's
+ * solver sheet beside Start, so the two controls that set a worker up sit
+ * together. */
 export function WorkPanel({
   objective,
   base,
@@ -91,7 +92,7 @@ export function WorkPanel({
   const roundRate = paused ? null : status?.rounds_per_minute;
 
   return (
-    <section className={`box p-4 ${embedded ? "" : "mb-5"}`} aria-label="My work on this Mac">
+    <section className="box p-4" aria-label="My work on this Mac">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">
@@ -161,7 +162,7 @@ export function WorkPanel({
       {running && <p className="mt-2 text-[11.5px] text-ink-3">Offered resources: {status.threads ?? "default"} CPU threads · {status.gpus ? `GPU ${status.gpus}` : "CPU only"} · {status.hours_per_day && status.hours_per_day < 24 ? `${status.hours_per_day} h/day` : "no daily limit"}. The solver must honor the CPU and GPU offer. Stop and Exit finish pending reveals.</p>}
       {status?.state === "exited" && status.activity && <p className="mt-3 text-[12px] text-ink-2">Last activity: {status.activity}</p>}
       {error && <p className="mt-3 text-[12px] text-warn" role="alert">{error}</p>}
-      {!bridge && !embedded && <Link href="/contribute#compute" className="mt-3 inline-block text-[12.5px] text-accent hover:underline">See ways to contribute →</Link>}
+      {!bridge && !embedded && <Link href={`/contribute?objective=${encodeURIComponent(objective)}#compute`} className="mt-3 inline-block text-[12.5px] text-accent hover:underline">Offer compute for this goal →</Link>}
       {running && !paused && !rate && <p className="mt-2 text-[11.5px] text-ink-3">Round rate counts completed solver runs. Search steps appear when the solver measures them.</p>}
     </section>
   );
