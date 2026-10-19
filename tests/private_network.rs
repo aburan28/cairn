@@ -2,11 +2,13 @@
 //! leave a marker if invoked, so an offline-looking startup cannot hide a curl
 //! or Tailscale invocation that merely failed.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use cairn::canonical::Value;
@@ -46,10 +48,20 @@ fn scratch() -> PathBuf {
 }
 
 fn address() -> SocketAddr {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
+    static ISSUED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+    let issued = ISSUED.get_or_init(|| Mutex::new(HashSet::new()));
+    loop {
+        // The child must bind this address after this listener is dropped.
+        // Never hand the same released ephemeral port to another parallel
+        // fixture while the first child is still starting.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let first_issue = issued.lock().unwrap().insert(address.port());
+        drop(listener);
+        if first_issue {
+            return address;
+        }
+    }
 }
 
 fn command(dir: &Path) -> Command {
@@ -117,6 +129,11 @@ fn start(
     bootstrap: Option<&Path>,
     configure: impl FnOnce(&mut Command),
 ) -> Node {
+    assert_ne!(
+        p2p.port(),
+        http.port(),
+        "P2P and HTTP fixtures must not reserve the same port"
+    );
     helpers(&dir);
     let mut cmd = daemon_command(&dir);
     cmd.args([
@@ -199,6 +216,18 @@ fn wait_for(
         "node did not become ready: {}",
         fs::read_to_string(node.dir.join("stderr")).unwrap()
     );
+}
+
+#[test]
+fn concurrent_fixture_addresses_are_unique_until_child_spawn() {
+    let workers = (0..8)
+        .map(|_| std::thread::spawn(|| (0..16).map(|_| address().port()).collect::<Vec<_>>()))
+        .collect::<Vec<_>>();
+    let ports = workers
+        .into_iter()
+        .flat_map(|worker| worker.join().unwrap())
+        .collect::<HashSet<_>>();
+    assert_eq!(ports.len(), 8 * 16);
 }
 
 #[test]
