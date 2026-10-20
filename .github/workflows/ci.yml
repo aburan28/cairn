@@ -537,6 +537,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --lib --target x86_64-pc-windows-msvc windows_objective_processes_require_a_supported_jail
       - run: 'cargo test --locked --lib --target x86_64-pc-windows-msvc ledger::tests::a_second_writer_is_refused_rather_than_allowed_to_fork_the_log'
+      - run: 'cargo test --locked --lib --target x86_64-pc-windows-msvc ledger::tests::a_hard_link_alias_cannot_open_a_second_writer'
       - run: 'cargo test --locked --lib --target x86_64-pc-windows-msvc canonical::'
       - run: 'cargo test --locked --lib --target x86_64-pc-windows-msvc crypto::'
       - run: cargo test --locked --bin cairn --target x86_64-pc-windows-msvc generated_nonce

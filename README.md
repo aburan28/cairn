@@ -79,14 +79,13 @@ whose subcommands (`run`, `mcp`, `p2p`, `serve`, `gen-bootstrap`, `seeds`,
 replace what used to ship as separate executables — to `~/.local/bin`.
 `--version` pins a release, `--bin-dir` picks somewhere else, and on Linux
 `--libc gnu` takes the dynamically-linked build instead of the static musl one.
-Linux amd64/arm64 and macOS Intel/Apple Silicon. There is no native Windows
-build, because the verifier sandbox is seatbelt and bubblewrap; on Windows,
-`irm https://github.com/aburan28/cairn/releases/latest/download/install.ps1 | iex`
+Linux amd64/arm64 and macOS Intel/Apple Silicon are supported by this script.
+For Windows, choose the native x64 portable ZIP or the PowerShell installer, which
 installs the Linux release inside WSL 2 (see [docs/install.md](docs/install.md)).
-Windows x64 also has a portable ZIP with `cairn.exe`, the embedded reader and
-a double-click launcher; it needs no Node.js, Rust toolchain or administrator
-access. On native Windows, external verifier programs require a qualified
-sandbox and return `Unavailable` when one is unavailable.
+The ZIP contains `cairn.exe`, the embedded reader and a double-click launcher; it
+needs no Node.js, Rust toolchain or administrator access. Native Windows external
+verifier programs require a qualified sandbox and return `Unavailable` when one
+is unavailable; WSL 2 provides the Linux sandbox path.
 
 Or a native package, from the
 [releases page](https://github.com/aburan28/cairn/releases/latest):

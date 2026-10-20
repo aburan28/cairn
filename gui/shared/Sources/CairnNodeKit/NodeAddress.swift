@@ -42,10 +42,13 @@ public enum NodeAddress {
     }
 
     private static func restriction(_ host: String) -> String? {
-        if host == "localhost" || host.hasSuffix(".localhost") || host.range(of: "^127(?:\\.[0-9]+){3}$", options: .regularExpression) != nil {
+        if host == "localhost" || host.hasSuffix(".localhost") {
             return "Local connection"
         }
-        if host == "0.0.0.0" { return "Not advertised" }
+        if let bytes = ipv4LiteralBytes(host) {
+            if bytes.allSatisfy({ $0 == 0 }) { return "Not advertised" }
+            if bytes.first == 127 { return "Local connection" }
+        }
         #if canImport(Darwin) || canImport(Glibc)
         var address = in6_addr()
         if host.withCString({ inet_pton(AF_INET6, $0, &address) }) == 1 {
@@ -59,5 +62,19 @@ public enum NodeAddress {
         }
         #endif
         return nil
+    }
+
+    /// `inet_aton` parses numeric IPv4 forms such as `127.1` and the single
+    /// integer `2130706433` without resolving hostnames. Those forms also
+    /// denote loopback, even though `inet_pton` correctly rejects them as
+    /// non-canonical literals.
+    private static func ipv4LiteralBytes(_ host: String) -> [UInt8]? {
+        #if canImport(Darwin) || canImport(Glibc)
+        var address = in_addr()
+        guard host.withCString({ inet_aton($0, &address) }) == 1 else { return nil }
+        return withUnsafeBytes(of: address.s_addr) { Array($0) }
+        #else
+        return nil
+        #endif
     }
 }

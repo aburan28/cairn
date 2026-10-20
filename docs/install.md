@@ -16,14 +16,11 @@ be to run them.
 | a Rust toolchain and an opinion | [source](../README.md#install) | wherever `cargo` puts it | no |
 
 All of them are on the [releases page](https://github.com/aburan28/cairn/releases/latest).
-There is no native Windows build, by decision, not oversight: the verifier
-sandbox is seatbelt and bubblewrap, and a node that runs objective-authored code
-without one is the configuration `CAIRN_REQUIRE_SANDBOX` exists to refuse. On
-Windows the Linux release runs inside WSL 2, which has a real Linux kernel and
-so the real jail. Native Windows packages include the node and web reader, but
-external verifier programs require a qualified sandbox; Windows reports
-`Unavailable` instead of executing them without confinement, even with
-`CAIRN_REQUIRE_SANDBOX=off`.
+Windows offers two routes: a native x64 portable ZIP for the node and embedded
+reader, or the Linux release inside WSL 2 when the real Linux verifier jail is
+needed. Native Windows external verifier programs require a qualified sandbox;
+Cairn reports `Unavailable` rather than running them without confinement, even
+with `CAIRN_REQUIRE_SANDBOX=off`.
 
 **Pick one route per machine.** They install to different directories, and your
 shell runs whichever comes first on `PATH` — see

@@ -361,6 +361,7 @@ jobs:
           name: ui-out
           path: ui/out
       - run: cargo test --locked --lib --target x86_64-pc-windows-msvc windows_objective_processes_require_a_supported_jail
+      - run: cargo test --locked --lib --target x86_64-pc-windows-msvc ledger::tests::a_hard_link_alias_cannot_open_a_second_writer
       - run: cargo build --release --locked --features ui --target x86_64-pc-windows-msvc
       - name: package
         shell: pwsh
