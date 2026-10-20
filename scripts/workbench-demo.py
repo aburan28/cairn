@@ -80,7 +80,10 @@ with tempfile.TemporaryDirectory(prefix="cairn-workbench-") as directory:
                 assert error.code == expected
         with socket.create_connection((url.hostname,url.port),timeout=5) as connection:
             connection.sendall(f"POST /api HTTP/1.1\r\nHost: {url.netloc}\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{{}}".encode())
-            assert connection.recv(4096).startswith(b"HTTP/1.1 400")
+            # TCP may split even a short response across reads; inspect the full
+            # status line instead of assuming one recv returns it all.
+            status_line = connection.makefile("rb").readline()
+            assert status_line.startswith(b"HTTP/1.1 400"), status_line
         created = api("create", {"title":"Shared algorithm", "request":"web-create"})
         workspace = created["workspace"]
         edit = {"workspace":workspace, "heads":created["heads"], "request":"web-edit",
