@@ -167,6 +167,11 @@ function Challenge({ id }: { id: string }) {
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {live && <LiveStamp at={readAt} error={error} />}
+            {!objective.settled && (
+              <a href="#join" className="btn btn-primary btn-sm">
+                Join
+              </a>
+            )}
             <button type="button" className="btn btn-sm" onClick={() => void load()}>Refresh</button>
             <Link href={`/workspace?objective=${objective.id}`} className="btn btn-sm">Workspaces</Link>
             <Link href={`/payouts?id=${encodeURIComponent(objective.id)}`} className="btn btn-sm btn-ghost">
@@ -536,7 +541,15 @@ function Activity({
         {roster.length === 0 ? (
           <p className="px-4 py-6 text-[13px] text-ink-2">
             Nobody has committed an answer yet.{" "}
-            {objective.settled ? null : <>Be the first: see <b>Join this challenge</b> below.</>}
+            {objective.settled ? null : (
+              <>
+                Be the first:{" "}
+                <a href="#join" className="text-accent hover:underline">
+                  join this challenge
+                </a>
+                .
+              </>
+            )}
           </p>
         ) : (
           <div className="overflow-x-auto">
@@ -739,7 +752,7 @@ function WorkOnThis({
   }
 
   return (
-    <Box title="Join this challenge">
+    <Box title="Join this challenge" className="scroll-mt-4" id="join">
       <div className="flex flex-col gap-4">
         <p className="text-[12.5px] text-ink-2">
           A worker takes a slice of this goal, runs the solver you choose in Cairn.app,
@@ -747,12 +760,7 @@ function WorkOnThis({
             ? "Different machines can work different slices at the same time."
             : "The checker decides whether an answer moves the result forward."}
         </p>
-        <WorkPanel objective={id} base={base ?? ""} />
-        {bridge && (
-          <button type="button" className="btn btn-sm self-start" onClick={configureWorker}>
-            Choose or change solver…
-          </button>
-        )}
+        <WorkPanel objective={id} base={base ?? ""} onChooseSolver={bridge ? configureWorker : undefined} />
         {appError && <p className="text-[12px] text-warn" role="alert">{appError}</p>}
         <div className="border-t border-edge pt-4">
           <h3 className="text-[13px] font-semibold text-ink">Solve with an agent</h3>

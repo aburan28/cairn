@@ -64,6 +64,10 @@ export function AgentConnect({ bridge }: { bridge: Bridge | null }) {
  * Conductor by hand, for a browser tab with no app to write the configs:
  * every workspace's agent shares this node over HTTP. In Cairn.app the
  * Connect Conductor… button does the same and restarts the node itself.
+ *
+ * Closed until asked for: the same three commands sit on the Network,
+ * challenge and Contribute pages, and open they outweighed everything else
+ * on all three.
  */
 function ConductorSetup() {
   const setup = conductorSetup();
@@ -102,9 +106,9 @@ export function AgentStatus({
   const attached = mcp?.serving && mcp.client;
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2 text-[13px]">
+      <div className="flex items-start gap-2 text-[13px]">
         <span
-          className={`h-2 w-2 rounded-full ${attached ? "bg-accent" : mcp?.serving ? "bg-warn" : "bg-ink-3"}`}
+          className={`mt-[0.45em] h-2 w-2 shrink-0 rounded-full ${attached ? "bg-accent" : mcp?.serving ? "bg-warn" : "bg-ink-3"}`}
           aria-hidden
         />
         <span className="text-ink">{describePresence(mcp)}</span>
