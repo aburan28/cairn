@@ -75,6 +75,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let updates = Updates()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        browser.onCoordination = { [node] request in
+            try CoordinationComposer.requireLocalNode(node)
+            switch request {
+            case .draftCoordination(let brief, let budget): return try node.coordination.generate(brief: brief, budget: budget)
+            case .coordinationStatus: return node.coordination.snapshot()
+            case .cancelCoordination: return try node.coordination.cancel()
+            case .launchCoordination(let id): return try node.coordination.launch(id)
+            default: throw AIError("This is not a coordination request.")
+            }
+        }
         browser.onDraftChallenge = { [node] brief in node.draftChallenge(fromPage: brief) }
         browser.onSetRole = { [node] role, on in node.setRole(fromPage: role, on: on) }
         browser.onOpen = { [node] sheet, objective in
