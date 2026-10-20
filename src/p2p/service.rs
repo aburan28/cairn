@@ -1149,34 +1149,17 @@ impl Service {
         inbound: transport::Inbound,
         node: &mut Node,
     ) -> Result<PeerId, ServiceError> {
-        self.serve_connection_once(self.complete_inbound(inbound)?, node)
+        let connection = self.authenticate_inbound(inbound)?;
+        self.serve_authenticated_once(connection, node)
     }
 
-    /// Finish the responder side of the handshake and apply the allowlist,
-    /// needing nothing but this node's identity -- and so, again, no lock.
-    ///
-    /// # Why the handshake is not done under the node lock
-    ///
-    /// The daemon's tick holds its node lock for the whole of an outbound
-    /// session, handshake included. Two nodes that dial each other in the same
-    /// tick -- two peers bootstrapped at each other and started together do it
-    /// every time -- each held their own lock waiting for the other's reply,
-    /// while each one's inbound thread had read the hello and was queued on
-    /// that same lock before answering it. Both dials ran out the handshake
-    /// timeout at the same instant, which put the next tick's dials back in
-    /// step, so the pair could stay apart indefinitely.
-    ///
-    /// Completing here, before the lock, means the dialler's handshake no
-    /// longer waits on this node's lock, and it gives the caller the
-    /// *authenticated* remote id while it still holds nothing -- which is what
-    /// it needs to see that the session holding its lock is a dial to this
-    /// very peer, and break the tie. A hello's key is only a claim until the
-    /// handshake proves it, so a stranger naming a peer cannot use it to make
-    /// this node drop or skip that peer.
-    pub fn complete_inbound(
+    /// Complete authentication and the peer allowlist check without a ledger
+    /// lock. A daemon can then arbitrate a busy node using the verified peer
+    /// identity, rather than blocking or trusting a claimed hello identity.
+    pub fn authenticate_inbound(
         &self,
         inbound: transport::Inbound,
-    ) -> Result<Connection, ServiceError> {
+    ) -> Result<transport::Connection, ServiceError> {
         let connection = inbound.complete(&self.identity)?;
         let remote = connection.remote();
         if !self.allows(&remote) {
@@ -1185,14 +1168,17 @@ impl Service {
         Ok(connection)
     }
 
-    /// [`Self::serve_inbound_once`] on a connection [`Self::complete_inbound`]
-    /// already authenticated and allowed.
-    pub fn serve_connection_once(
+    /// Serve a connection authenticated before acquiring the caller's node.
+    /// The allowlist is still checked here for callers using this entry point.
+    pub fn serve_authenticated_once(
         &self,
-        mut connection: Connection,
+        mut connection: transport::Connection,
         node: &mut Node,
     ) -> Result<PeerId, ServiceError> {
         let remote = connection.remote();
+        if !self.allows(&remote) {
+            return Err(ServiceError::NotAllowed(remote));
+        }
         let (_, wanted, said) = exchange_records_and_code(&mut connection, node, self.about())?;
         self.learn(remote, said);
         self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;
@@ -1230,15 +1216,14 @@ impl Service {
     where
         F: FnMut(&Node, &Candidate) -> Option<i64>,
     {
-        let connection = self.complete_inbound(inbound)?;
-        self.serve_connection_and_population(connection, node, population, limits, rescore)
+        let connection = self.authenticate_inbound(inbound)?;
+        self.serve_authenticated_and_population(connection, node, population, limits, rescore)
     }
 
-    /// [`Self::serve_inbound_and_population`] on a connection
-    /// [`Self::complete_inbound`] already authenticated and allowed.
-    pub fn serve_connection_and_population<F>(
+    /// Population rounds on a connection authenticated before the node lock.
+    pub fn serve_authenticated_and_population<F>(
         &self,
-        mut connection: Connection,
+        mut connection: transport::Connection,
         node: &mut Node,
         population: &mut Population,
         limits: PopLimits,
@@ -1248,6 +1233,9 @@ impl Service {
         F: FnMut(&Node, &Candidate) -> Option<i64>,
     {
         let remote = connection.remote();
+        if !self.allows(&remote) {
+            return Err(ServiceError::NotAllowed(remote));
+        }
         let (_, wanted, said) = exchange_records_and_code(&mut connection, node, self.about())?;
         self.learn(remote, said);
         self.exchange_dht_round(&mut connection, node, &wanted, self.dialable(&remote))?;

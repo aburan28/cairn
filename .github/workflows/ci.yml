@@ -185,6 +185,7 @@ jobs:
       # `exec` must refuse (exit 3), and an explicitly unconfined run must say
       # so in its receipt.
       - run: ./scripts/lab-demo.sh
+      - run: python3 ./scripts/collab-demo.py
       # The host agent against a node it shares nothing with: a probe of the
       # runner, a registration read back off GET /hosts and GET /network, a
       # queued job and an `exec` job with receipts naming their jail, and the
