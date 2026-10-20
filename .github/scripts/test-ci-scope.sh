@@ -25,12 +25,14 @@ check docs-only 'docs/design.md' ''
 check core 'src/canonical.rs' 'audit core examples interop jail msrv reference tla ui'
 check rust-toolchain '.cargo/config.toml' 'audit core examples interop jail msrv reference tla ui'
 check python-tools 'pyproject.toml' 'core examples interop'
+check ecc2k-ingest-service 'examples/ecc2k-ingest-service/period_candidate_runner.py' 'examples'
 check frozen-vectors 'conformance/vectors.json' 'interop reference'
 check launch-evidence 'launch/cairn.jsonl' 'interop ui'
 check ui 'ui/app/page.tsx' 'ui'
 check ios 'gui/ios/Cairn.swift' 'ios'
 check shared-native 'gui/shared/Sources/CairnNodeKit/Reports.swift' 'ios macos'
 check workflow '.github/workflows/ci.yml' "$all"
+check checkout-bytes '.gitattributes' "$all"
 check merge-group '' "$all" merge_group
 check missing-base 'docs/design.md' "$all" pull_request missing
 
@@ -70,9 +72,9 @@ ci_workflow="$script_dir/../workflows/ci.yml"
 ios_workflow="$script_dir/../workflows/ios-app.yml"
 seed_workflow="$script_dir/../workflows/seed-pod.yml"
 guard_count="$(grep -Fc "if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs." "$ci_workflow")"
-[[ "$guard_count" == 12 ]]
+[[ "$guard_count" == 13 ]]
 exact_false_count="$(grep -Fc " != 'false')" "$ci_workflow")"
-[[ "$exact_false_count" == 12 ]]
+[[ "$exact_false_count" == 13 ]]
 
 should_run_gate() {
   local result="$1" output="$2" cancelled="$3"

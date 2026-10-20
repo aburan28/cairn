@@ -40,6 +40,10 @@ enum PageSheet: String, CaseIterable {
 /// `ui/lib/contribute.ts` send it.
 enum PageRequest: Equatable {
     case draftChallenge(brief: String)
+    case draftCoordination(brief: String, budget: String)
+    case coordinationStatus
+    case cancelCoordination
+    case launchCoordination(draftID: String)
     case startDictation
     case stopDictation
     /// Turn a role on or off and restart the node with it.
@@ -53,6 +57,13 @@ enum PageRequest: Equatable {
     case resumeWork
     case stopWork
     case exitWork
+
+    var isCoordination: Bool {
+        switch self {
+        case .draftCoordination, .coordinationStatus, .cancelCoordination, .launchCoordination: return true
+        default: return false
+        }
+    }
 
     static func parse(_ body: Any) -> Result<PageRequest, AIError> {
         guard let object = body as? [String: Any], let kind = object["kind"] as? String else {
@@ -95,6 +106,24 @@ enum PageRequest: Equatable {
                 return .failure(AIError("An objective is named by its id, sha256:…."))
             }
             return .success(.open(sheet, objective: objective))
+        case "coordination-status":
+            return .success(.coordinationStatus)
+        case "cancel-coordination":
+            return .success(.cancelCoordination)
+        case "launch-coordination":
+            guard let id = object["draftId"] as? String, UUID(uuidString: id) != nil else {
+                return .failure(AIError("Choose a checked challenge spec to launch."))
+            }
+            return .success(.launchCoordination(draftID: id))
+        case "draft-coordination":
+            guard let brief = (object["brief"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  ChallengeWriter.isDraftable(brief), let budget = object["budget"] as? String else {
+                return .failure(AIError("Describe the task in 10 to 20,000 characters and use a whole-number budget."))
+            }
+            do {
+                let amount = try CoordinationWriter.budget(budget)
+                return .success(.draftCoordination(brief: brief, budget: amount.map(String.init) ?? ""))
+            } catch { return .failure(AIError(error.localizedDescription)) }
         case "draft-challenge":
             guard let brief = (object["brief"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                   ChallengeWriter.isDraftable(brief)

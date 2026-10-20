@@ -1,10 +1,12 @@
 export type SetupGuide = {
+  summary: string;
   description: string;
   commands: Array<{ label: string; text: string }>;
   footer: string;
 };
 
 const PUBLIC: SetupGuide = {
+  summary: "Start with local work. Sharing with other computers is optional; use advanced setup when you want to connect them.",
   description: "Four commands over Tailscale: HTTPS on your tailnet, the open internet behind a funnel, and peers that dial the p2p port directly. Result — https://<your-magicdns-name>:8443 for this reader and the API, your Tailscale IP and port 9000 for other nodes.",
   commands: [
     { label: "1 · run the node (p2p on the wildcard, HTTP on loopback)", text: "cairn run --listen 0.0.0.0:9000 --serve 127.0.0.1:8080" },
@@ -16,6 +18,7 @@ const PUBLIC: SetupGuide = {
 };
 
 const PRIVATE: SetupGuide = {
+  summary: "This is a private installation. Keep it on your approved network and ask your administrator to connect other computers.",
   description: "This is a private installation. Restore the existing internal or WireGuard connection with your network administrator. Use this node’s assigned internal address; 10.80.0.1 below is an example, and must already exist on its interface.",
   commands: [
     { label: "1 · start the leader on its configured private interface", text: "CAIRN_NETWORK=private cairn run --no-mcp --serve 10.80.0.1:8080" },

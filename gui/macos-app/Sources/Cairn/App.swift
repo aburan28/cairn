@@ -75,6 +75,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let updates = Updates()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        browser.onCoordination = { [node] request in
+            try CoordinationComposer.requireLocalNode(node)
+            switch request {
+            case .draftCoordination(let brief, let budget): return try node.coordination.generate(brief: brief, budget: budget)
+            case .coordinationStatus: return node.coordination.snapshot()
+            case .cancelCoordination: return try node.coordination.cancel()
+            case .launchCoordination(let id): return try node.coordination.launch(id)
+            default: throw AIError("This is not a coordination request.")
+            }
+        }
         browser.onDraftChallenge = { [node] brief in node.draftChallenge(fromPage: brief) }
         browser.onSetRole = { [node] role, on in node.setRole(fromPage: role, on: on) }
         browser.onOpen = { [node] sheet, objective in
@@ -224,10 +234,6 @@ private struct NodeDetails: View {
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 8) {
                 // Verbatim: as a localized key the port is a number to
                 // format, and 8080 reads "8,080".
-                row("Reader", url.host.map { "\($0):\(url.port ?? 80)" } ?? url.absoluteString)
-                if !node.isAttached, let listen = node.listenAddress {
-                    row("P2P", listen)
-                }
                 if let id = node.peerId {
                     row("Peer id", id)
                 }
@@ -247,6 +253,13 @@ private struct NodeDetails: View {
                 }
             }
             .font(.callout)
+
+            DisclosureGroup("Connection details") {
+                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 8) {
+                    row("Reader", url.host.map { "\($0):\(url.port ?? 80)" } ?? url.absoluteString)
+                    if !node.isAttached, let listen = node.listenAddress { row("P2P listener", listen) }
+                }.font(.callout)
+            }
 
             if AppVersion.differs(fromNode: node.binaryVersion) {
                 Label("The app and the cairn command are different versions.",
@@ -353,25 +366,29 @@ private struct Starting: View {
         VStack(spacing: 14) {
             ProgressView()
             Text(node.isAttached ? "Connecting…" : "Starting a node…").font(.title3)
-            if node.isAttached, let url = node.settings.attachURL {
-                Text(url.absoluteString)
-                    .font(.callout.monospaced())
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            } else {
-                Text(node.dataDir.path)
-                    .font(.callout.monospaced())
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
-            if let last = node.lines.last(where: { !$0.isEmpty }) {
-                Text(last)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 560)
-            }
+            Text(node.isAttached ? "Connecting to your node." : "Preparing your workspace.")
+                .foregroundStyle(.secondary)
+            DisclosureGroup("Startup details") {
+                if node.isAttached, let url = node.settings.attachURL {
+                    Text(url.absoluteString)
+                        .font(.callout.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                } else {
+                    Text(node.dataDir.path)
+                        .font(.callout.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                if let last = node.lines.last(where: { !$0.isEmpty }) {
+                    Text(last)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 560)
+                }
+            }.frame(maxWidth: 560)
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

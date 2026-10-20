@@ -609,6 +609,14 @@ pub struct Access {
     pub open: bool,
 }
 
+impl Access {
+    fn permits(&self, lab: &Lab, remote: &str) -> bool {
+        self.open
+            || self.allow.contains(remote)
+            || super::state::State::of(lab).roster.peers().contains(remote)
+    }
+}
+
 /// Serve a lab to peers until the listener fails. One thread per session.
 pub fn serve(
     lab_root: &Path,
@@ -659,12 +667,7 @@ fn session(
             .lock()
             .map_err(|_| LabError::Io("lab lock poisoned".into()))?;
         guard.refresh()?;
-        let allowed = access.open
-            || access.allow.contains(&remote)
-            || super::state::State::of(&guard)
-                .roster
-                .peers()
-                .contains(&remote);
+        let allowed = access.permits(&guard, &remote);
         if !allowed {
             let refusal = Value::object([
                 ("ok", Value::Bool(false)),
@@ -701,6 +704,23 @@ fn session(
             .lock()
             .map_err(|_| LabError::Io("lab lock poisoned".into()))?;
         guard.refresh()?;
+        // A live watcher keeps this session for hours. Recheck after refresh:
+        // a peer revoked since the handshake must lose read access too.
+        if !access.permits(&guard, &remote) {
+            let refusal = Value::object([
+                ("ok", Value::Bool(false)),
+                (
+                    "error",
+                    Value::string("peer is no longer allowed by the space"),
+                ),
+            ]);
+            connection
+                .send(&refusal.canonical_bytes(), CONTEXT)
+                .map_err(|e| LabError::Io(e.to_string()))?;
+            return Err(LabError::Refused(
+                "peer is no longer allowed by the space".into(),
+            ));
+        }
         let answer = match handle(
             &mut guard,
             method,

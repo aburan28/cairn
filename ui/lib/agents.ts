@@ -99,13 +99,13 @@ export function slashCommand(prompt: string): string {
 
 /** One line about who is attached, for a status row. */
 export function describePresence(mcp: McpPresence | undefined): string {
-  if (!mcp) return "This node is older than the MCP status report.";
+  if (!mcp) return "Agent status is not reported by this older node.";
   if (!mcp.serving) {
-    return "Not serving MCP: this node was started without it, so agents attach by launching a node of their own on the same data.";
+    return "Agent connections are off. Open Manual agent setup to connect one.";
   }
-  if (!mcp.client) return "Serving MCP on stdio; no agent has said hello yet.";
+  if (!mcp.client) return "Ready for an agent. No agent connected yet.";
   const version = mcp.client.version ? ` ${mcp.client.version}` : "";
-  return `${mcp.client.name}${version} is attached over MCP`;
+  return `${mcp.client.name}${version} is connected`;
 }
 
 export type PromptDefinition = {

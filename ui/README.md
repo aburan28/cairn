@@ -17,8 +17,8 @@ Routes, in the sidebar's order:
   one reads *Approach N · tag* and every one opens to say what it is about)
   and `/submit` (post a challenge) under it;
 * `/coordination` — launch a coordinated task from a plain description,
-  through the node's `coordinate_task` prompt and the operator's agent, and
-  watch the running ones; `?id=…` is one divided search's slices, machines
+  with background AI spec generation, checker tests and launch in Cairn for Mac,
+  and watch the running ones; `?id=…` is one divided search's slices, machines
   and task leases, and `/task?id=…` its settled-versus-reported progress;
 * `/workspace` — opt-in published labs; `?space=…` opens causal history,
   conflicts and pinned candidate runs with distinct replay/reapply actions;

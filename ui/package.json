@@ -12,7 +12,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:browser": "node scripts/ux-smoke.mjs",
+    "test:browser": "node scripts/ux-smoke.mjs && node scripts/coordination-smoke.mjs",
     "test:private-browser": "node scripts/private-network-smoke.mjs"
   },
   "dependencies": {

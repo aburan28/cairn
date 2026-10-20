@@ -91,7 +91,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
@@ -99,8 +99,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use hmac::{Hmac, KeyInit, Mac};
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Map, Value as Json};
+use sha2::Sha256;
 
 use crate::canonical::Value;
 use crate::crypto::identity::Identity;
@@ -432,9 +434,11 @@ pub(crate) fn start_shared_http(
     spend: Arc<Mutex<SpendCeiling>>,
     addr: &str,
 ) -> Result<(), String> {
+    let mut access = HttpAccess::from_env()?;
     let identity = identity_path.map(load_identity).transpose()?;
     let cipher = pending_cipher(log, key_path)?;
-    let server = Server::new_shared(state, identity, cipher).with_shared_spend_ceiling(&spend);
+    let server =
+        Server::new_shared(Arc::clone(&state), identity, cipher).with_shared_spend_ceiling(&spend);
     let listener = bind_http(addr)?;
     eprintln!(
         "cairn mcp {SERVER_VERSION}: sharing daemon ledger {}, Streamable HTTP on {}",
@@ -444,10 +448,13 @@ pub(crate) fn start_shared_http(
             .map_or_else(|_| addr.to_string(), |bound| bound.to_string())
     );
     report_identity(&server, "--mcp-identity");
-    let hub = Arc::new(Mutex::new(HttpHub::new(server)));
+    let mut hubs = vec![Arc::new(Mutex::new(HttpHub::new(server)))];
+    load_http_agent_profiles(&mut access, &mut hubs, &state, &spend, log, key_path)?;
+    let access = Arc::new(access);
+    let hubs = Arc::new(hubs);
     thread::Builder::new()
         .name(String::from("cairn-mcp-http"))
-        .spawn(move || accept_loop(listener, hub))
+        .spawn(move || accept_loop(listener, hubs, access))
         .map_err(|error| format!("cannot start HTTP thread: {error}"))?;
     Ok(())
 }
@@ -690,9 +697,225 @@ impl HttpHub {
     }
 }
 
+const MCP_HTTP_TOKEN_ENV: &str = "CAIRN_MCP_HTTP_TOKEN";
+const MCP_HTTP_PUBLIC_HOST_ENV: &str = "CAIRN_MCP_HTTP_PUBLIC_HOST";
+const MCP_HTTP_AGENTS_FILE_ENV: &str = "CAIRN_MCP_HTTP_AGENTS_FILE";
+const MCP_HTTP_TOKEN_DOMAIN: &[u8] = b"cairn/mcp/http-token/v1";
+
+struct HttpAccess {
+    public_host: Option<String>,
+    token_digests: Vec<[u8; 32]>,
+}
+
+impl HttpAccess {
+    fn from_env() -> Result<Self, String> {
+        let token = std::env::var(MCP_HTTP_TOKEN_ENV)
+            .map(Some)
+            .or_else(|error| match error {
+                std::env::VarError::NotPresent => Ok(None),
+                _ => Err(format!("{MCP_HTTP_TOKEN_ENV} must be UTF-8")),
+            })?;
+        let public_host = std::env::var(MCP_HTTP_PUBLIC_HOST_ENV)
+            .map(Some)
+            .or_else(|error| match error {
+                std::env::VarError::NotPresent => Ok(None),
+                _ => Err(format!("{MCP_HTTP_PUBLIC_HOST_ENV} must be UTF-8")),
+            })?;
+        Self::new(token.as_deref(), public_host.as_deref())
+    }
+
+    fn new(token: Option<&str>, public_host: Option<&str>) -> Result<Self, String> {
+        let token_digests = token
+            .map(|value| Self::parse_token(value, MCP_HTTP_TOKEN_ENV).map(|digest| vec![digest]))
+            .transpose()?
+            .unwrap_or_default();
+        if public_host.is_some() && token_digests.is_empty() {
+            return Err(format!(
+                "{MCP_HTTP_PUBLIC_HOST_ENV} requires {MCP_HTTP_TOKEN_ENV}"
+            ));
+        }
+        if public_host.is_some_and(|value| !valid_mcp_public_host(value)) {
+            return Err(format!(
+                "{MCP_HTTP_PUBLIC_HOST_ENV} must be a DNS host with an optional port"
+            ));
+        }
+        Ok(Self {
+            public_host: public_host.map(str::to_string),
+            token_digests,
+        })
+    }
+
+    fn parse_token(value: &str, label: &str) -> Result<[u8; 32], String> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(format!("{label} needs 64 lowercase hexadecimal characters"));
+        }
+        let bytes = crate::hex::decode(value)
+            .ok_or_else(|| format!("{label} needs 64 lowercase hexadecimal characters"))?;
+        Ok(Self::digest(&bytes))
+    }
+
+    fn add_token(&mut self, token: &str) -> Result<(), String> {
+        if self.token_digests.is_empty() {
+            return Err(format!(
+                "{MCP_HTTP_AGENTS_FILE_ENV} requires {MCP_HTTP_TOKEN_ENV}"
+            ));
+        }
+        let digest = Self::parse_token(token, MCP_HTTP_AGENTS_FILE_ENV)?;
+        if self.token_digests.contains(&digest) {
+            return Err("duplicate MCP HTTP agent token".to_string());
+        }
+        self.token_digests.push(digest);
+        Ok(())
+    }
+
+    fn digest(value: &[u8]) -> [u8; 32] {
+        let mut mac = Hmac::<Sha256>::new_from_slice(MCP_HTTP_TOKEN_DOMAIN)
+            .expect("HMAC accepts any key length");
+        mac.update(value);
+        mac.finalize().into_bytes().into()
+    }
+
+    #[cfg(test)]
+    fn authorized(&self, header: Option<&str>) -> bool {
+        self.profile(header).is_some()
+    }
+
+    fn profile(&self, header: Option<&str>) -> Option<usize> {
+        if self.token_digests.is_empty() {
+            return Some(0);
+        }
+        let raw = header.and_then(|value| value.strip_prefix("Bearer "))?;
+        if raw.len() != 64 {
+            return None;
+        }
+        let bytes = crate::hex::decode(raw)?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(MCP_HTTP_TOKEN_DOMAIN)
+            .expect("HMAC accepts any key length");
+        mac.update(&bytes);
+        self.token_digests
+            .iter()
+            .position(|expected| mac.clone().verify_slice(expected).is_ok())
+    }
+}
+
+/// Each bearer selects its own signing server and session table, while all
+/// servers use the daemon's single ledger and spend ceiling.
+fn load_http_agent_profiles(
+    access: &mut HttpAccess,
+    hubs: &mut Vec<Arc<Mutex<HttpHub>>>,
+    state: &Arc<Mutex<crate::daemon::State>>,
+    spend: &Arc<Mutex<SpendCeiling>>,
+    log: &Path,
+    key_path: &Path,
+) -> Result<(), String> {
+    let path = match std::env::var(MCP_HTTP_AGENTS_FILE_ENV) {
+        Ok(path) => path,
+        Err(std::env::VarError::NotPresent) => return Ok(()),
+        Err(_) => return Err(format!("{MCP_HTTP_AGENTS_FILE_ENV} must be UTF-8")),
+    };
+    let path = Path::new(&path);
+    let contents = crate::secret_file::read_to_string(path)
+        .map_err(|error| format!("cannot read {MCP_HTTP_AGENTS_FILE_ENV}: {error}"))?;
+    let config: Json = serde_json::from_str(&contents)
+        .map_err(|_| format!("{MCP_HTTP_AGENTS_FILE_ENV} must be JSON"))?;
+    if config.get("schema").and_then(Json::as_str) != Some("cairn-mcp-agent-profiles-v1") {
+        return Err(format!("{MCP_HTTP_AGENTS_FILE_ENV}: unknown schema"));
+    }
+    let agents = config
+        .get("agents")
+        .and_then(Json::as_array)
+        .ok_or_else(|| format!("{MCP_HTTP_AGENTS_FILE_ENV}: agents must be an array"))?;
+    if agents.len() > 32 {
+        return Err(format!("{MCP_HTTP_AGENTS_FILE_ENV}: too many agents"));
+    }
+    let mut names = BTreeSet::new();
+    let mut identities = BTreeSet::new();
+    if let Some(identity) = hubs[0]
+        .lock()
+        .map_err(|_| "MCP hub lock poisoned")?
+        .server
+        .identity
+        .as_ref()
+    {
+        identities.insert(identity.submitter_id());
+    }
+    for agent in agents {
+        let name = agent
+            .get("name")
+            .and_then(Json::as_str)
+            .filter(|name| {
+                !name.is_empty()
+                    && name.len() <= 64
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            })
+            .ok_or_else(|| format!("{MCP_HTTP_AGENTS_FILE_ENV}: invalid agent name"))?;
+        if !names.insert(name.to_string()) {
+            return Err(format!("{MCP_HTTP_AGENTS_FILE_ENV}: duplicate agent name"));
+        }
+        let token = agent
+            .get("token")
+            .and_then(Json::as_str)
+            .ok_or_else(|| format!("{MCP_HTTP_AGENTS_FILE_ENV}: agent needs token"))?;
+        let identity_path = agent
+            .get("identity")
+            .and_then(Json::as_str)
+            .map(Path::new)
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| {
+                format!("{MCP_HTTP_AGENTS_FILE_ENV}: agent needs absolute identity path")
+            })?;
+        let identity = load_identity(identity_path)?;
+        if !identities.insert(identity.submitter_id()) {
+            return Err(format!(
+                "{MCP_HTTP_AGENTS_FILE_ENV}: duplicate signing identity"
+            ));
+        }
+        access.add_token(token)?;
+        let cipher = pending_cipher(log, key_path)?;
+        // One sidecar per signer: otherwise the next agent to save its
+        // commitments would erase the first agent's unrevealed nonces.
+        let pending_path = log.with_extension(format!("pending-agent-{name}.json"));
+        let server = Server::new_shared_profile(Arc::clone(state), identity, cipher, pending_path)
+            .with_shared_spend_ceiling(spend);
+        hubs.push(Arc::new(Mutex::new(HttpHub::new(server))));
+        eprintln!("cairn mcp: enrolled agent {name}");
+    }
+    Ok(())
+}
+
+fn valid_mcp_public_host(value: &str) -> bool {
+    let (host, port) = value.rsplit_once(':').unwrap_or((value, ""));
+    if value.contains(':') && !port.parse::<u16>().is_ok_and(|port| port > 0) {
+        return false;
+    }
+    if host.len() > 253
+        || !host.contains('.')
+        || host.parse::<IpAddr>().is_ok()
+        || host.eq_ignore_ascii_case("localhost")
+    {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label.as_bytes()[0].is_ascii_alphanumeric()
+            && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
+}
+
 /// Serve Streamable HTTP MCP instead of stdio. Returns only on a startup
 /// failure the operator has to fix.
 fn serve_http(server: Server, addr: &str) -> i32 {
+    let access = Arc::new(HttpAccess::from_env().unwrap_or_else(|why| fail(&why)));
     let listener = match bind_http(addr) {
         Ok(listener) => listener,
         Err(error) => fail(&error),
@@ -703,7 +926,11 @@ fn serve_http(server: Server, addr: &str) -> i32 {
             .local_addr()
             .map_or_else(|_| addr.to_string(), |bound| bound.to_string())
     );
-    accept_loop(listener, Arc::new(Mutex::new(HttpHub::new(server))));
+    accept_loop(
+        listener,
+        Arc::new(vec![Arc::new(Mutex::new(HttpHub::new(server)))]),
+        access,
+    );
     // The accept loop never returns; this is for the type, not the control flow.
     0
 }
@@ -723,7 +950,11 @@ fn bind_http(addr: &str) -> Result<TcpListener, String> {
     TcpListener::bind(socket).map_err(|error| format!("cannot listen on {addr}: {error}"))
 }
 
-fn accept_loop(listener: TcpListener, hub: Arc<Mutex<HttpHub>>) {
+fn accept_loop(
+    listener: TcpListener,
+    hubs: Arc<Vec<Arc<Mutex<HttpHub>>>>,
+    access: Arc<HttpAccess>,
+) {
     let live = Arc::new(Mutex::new(0u64));
     for stream in listener.incoming() {
         let mut stream = match stream {
@@ -748,11 +979,12 @@ fn accept_loop(listener: TcpListener, hub: Arc<Mutex<HttpHub>>) {
             );
             continue;
         }
-        let hub = Arc::clone(&hub);
+        let hubs = Arc::clone(&hubs);
+        let access = Arc::clone(&access);
         let live = Arc::clone(&live);
         thread::spawn(move || {
             let _guard = ConnectionGuard { live };
-            let _ = handle_http_conn(&mut stream, &hub);
+            let _ = handle_http_conn(&mut stream, &hubs, &access);
             http_linger(&mut stream);
         });
     }
@@ -780,9 +1012,14 @@ struct HttpRequest {
     session: Option<String>,
     host: Option<String>,
     origin: Option<String>,
+    authorization: Option<String>,
 }
 
-fn handle_http_conn(stream: &mut TcpStream, hub: &Arc<Mutex<HttpHub>>) -> io::Result<()> {
+fn handle_http_conn(
+    stream: &mut TcpStream,
+    hubs: &[Arc<Mutex<HttpHub>>],
+    access: &HttpAccess,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(MCP_REQUEST_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let request = match read_http_request(&mut reader) {
@@ -801,12 +1038,24 @@ fn handle_http_conn(stream: &mut TcpStream, hub: &Arc<Mutex<HttpHub>>) -> io::Re
         request.host.as_deref(),
         request.origin.as_deref(),
         local_port,
+        access.public_host.as_deref(),
     ) {
         let frame =
             error_response(Json::Null, code::INVALID_REQUEST, "untrusted HTTP origin").to_string();
         http_respond(stream, 403, "application/json", frame.as_bytes(), &[])?;
         return Ok(());
     }
+    let Some(profile) = access.profile(request.authorization.as_deref()) else {
+        http_respond(
+            stream,
+            401,
+            "application/json",
+            br#"{"error":"unauthorized"}"#,
+            &[],
+        )?;
+        return Ok(());
+    };
+    let hub = &hubs[profile];
     // One request per connection: like `serve.rs`, this answers once and
     // closes, so there is no keep-alive state to get wrong.
     match (request.method.as_str(), request.path.as_str()) {
@@ -955,6 +1204,7 @@ fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, S
     let mut session = None;
     let mut host = None;
     let mut origin = None;
+    let mut authorization = None;
     let mut headers = 0usize;
     let mut header_bytes = 0usize;
     let mut length_seen = false;
@@ -1032,6 +1282,11 @@ fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, S
                         return Err("multiple Origin headers are not supported".into());
                     }
                 }
+                "authorization" => {
+                    if authorization.replace(value.to_string()).is_some() {
+                        return Err("multiple Authorization headers are not supported".into());
+                    }
+                }
                 "transfer-encoding" => {
                     return Err(
                         "transfer encodings are not supported; send content-length".to_string()
@@ -1060,16 +1315,25 @@ fn read_http_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, S
         session,
         host,
         origin,
+        authorization,
     })
 }
 
-fn http_authority_allowed(host: Option<&str>, origin: Option<&str>, port: u16) -> bool {
+fn http_authority_allowed(
+    host: Option<&str>,
+    origin: Option<&str>,
+    port: u16,
+    public_host: Option<&str>,
+) -> bool {
     if origin.is_some() {
         return false;
     }
     let Some(host) = host else {
         return false;
     };
+    if public_host.is_some_and(|expected| host.eq_ignore_ascii_case(expected)) {
+        return true;
+    }
     if host.eq_ignore_ascii_case(&format!("localhost:{port}")) {
         return true;
     }
@@ -1107,6 +1371,7 @@ fn http_respond(
         200 => "OK",
         202 => "Accepted",
         204 => "No Content",
+        401 => "Unauthorized",
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
@@ -1337,7 +1602,10 @@ struct PendingStore {
 
 impl PendingStore {
     fn load(log: &std::path::Path, cipher: Option<crate::store::atrest::Cipher>) -> PendingStore {
-        let path = log.with_extension("pending.json");
+        Self::load_at(log.with_extension("pending.json"), cipher)
+    }
+
+    fn load_at(path: PathBuf, cipher: Option<crate::store::atrest::Cipher>) -> PendingStore {
         // Loud on anything but a missing file. The entries here are the only
         // copies of live nonces -- the agent deliberately has none -- so a
         // sidecar that cannot be read means every open commitment is stranded,
@@ -1669,13 +1937,39 @@ impl Server {
         Self::new_with_source(NodeSource::Shared(node), identity, pending_cipher)
     }
 
+    fn new_shared_profile(
+        node: Arc<Mutex<crate::daemon::State>>,
+        identity: Identity,
+        pending_cipher: Option<crate::store::atrest::Cipher>,
+        pending_path: PathBuf,
+    ) -> Server {
+        Self::new_with_source_and_pending(
+            NodeSource::Shared(node),
+            Some(identity),
+            pending_cipher,
+            Some(pending_path),
+        )
+    }
+
     fn new_with_source(
         node: NodeSource,
         identity: Option<Identity>,
         pending_cipher: Option<crate::store::atrest::Cipher>,
     ) -> Server {
+        Self::new_with_source_and_pending(node, identity, pending_cipher, None)
+    }
+
+    fn new_with_source_and_pending(
+        node: NodeSource,
+        identity: Option<Identity>,
+        pending_cipher: Option<crate::store::atrest::Cipher>,
+        pending_path: Option<PathBuf>,
+    ) -> Server {
         let ledger_path = node.read().ledger().path().to_path_buf();
-        let pending = PendingStore::load(&ledger_path, pending_cipher);
+        let pending = match pending_path {
+            Some(path) => PendingStore::load_at(path, pending_cipher),
+            None => PendingStore::load(&ledger_path, pending_cipher),
+        };
         Server {
             node,
             offered: BTreeSet::new(),
@@ -2336,8 +2630,8 @@ fn tool_definitions() -> Json {
                 "openWorldHint": false
             },
             "description":
-                "One accepted claim: its submitter, what it cites, whether it settled and for \
-                 how much, and the artifact itself. This is how you read the state of the art \
+                "One accepted claim: its submitter, what it cites, its final or pending payment \
+                 state in cairn/payment metadata, and the artifact itself. This is how you read the state of the art \
                  you are trying to beat -- frontier_status names the claim holding the \
                  frontier, and this returns what is actually in it, so you can build on it \
                  rather than rediscover it. The artifact was written by whoever submitted it \
@@ -2927,13 +3221,30 @@ impl Server {
                 ));
             }
         }
-        match self.node.read().settlement_for_claim(&claim_id) {
-            Some(reward) => out.push_str(&format!("settled: yes, reward {reward}\n")),
-            None => out.push_str(
-                "settled: not yet. Accepted and pending, or accepted and minted nothing \
-                 (a duplicate of existing work earns zero).\n",
-            ),
-        }
+        let (reward, batched) = {
+            let node = self.node.read();
+            (
+                node.settlement_for_claim(&claim_id),
+                node.claim_batch_has_run(&claim_id),
+            )
+        };
+        let (payment_state, payment_reward) = match reward {
+            Some(amount) => {
+                out.push_str(&format!("settled: yes, reward {amount}\n"));
+                (if amount > 0 { "paid" } else { "unpaid" }, Some(amount))
+            }
+            None if batched => {
+                out.push_str("settled: final, reward 0. The batch ran and minted nothing.\n");
+                ("unpaid", Some(0))
+            }
+            None => {
+                out.push_str("settled: not yet. Accepted and pending.\n");
+                ("pending", None)
+            }
+        };
+        self.meta = Some(json!({
+            "cairn/payment": { "state": payment_state, "reward": payment_reward }
+        }));
         out.push_str(&self.standing_lines(&claim_id));
 
         // Same fence as `get_objective` puts round a statement, for the same
@@ -4588,22 +4899,264 @@ mod tests {
 
     #[test]
     fn http_refuses_browser_origins_and_nonlocal_authorities() {
-        assert!(http_authority_allowed(Some("127.0.0.1:8001"), None, 8001));
-        assert!(http_authority_allowed(Some("localhost:8001"), None, 8001));
-        assert!(http_authority_allowed(Some("[::1]:8001"), None, 8001));
+        assert!(http_authority_allowed(
+            Some("127.0.0.1:8001"),
+            None,
+            8001,
+            None
+        ));
+        assert!(http_authority_allowed(
+            Some("localhost:8001"),
+            None,
+            8001,
+            None
+        ));
+        assert!(http_authority_allowed(Some("[::1]:8001"), None, 8001, None));
         assert!(!http_authority_allowed(
             Some("attacker.example:8001"),
             None,
-            8001
+            8001,
+            None
         ));
-        assert!(!http_authority_allowed(Some("127.0.0.1:8002"), None, 8001));
+        assert!(!http_authority_allowed(
+            Some("127.0.0.1:8002"),
+            None,
+            8001,
+            None
+        ));
         assert!(!http_authority_allowed(
             Some("127.0.0.1:8001"),
             Some("https://attacker.example"),
-            8001
+            8001,
+            None
         ));
-        assert!(!http_authority_allowed(None, None, 8001));
+        assert!(!http_authority_allowed(None, None, 8001, None));
         assert!(bind_http("0.0.0.0:0").is_err());
+    }
+
+    #[test]
+    fn http_public_host_requires_strong_token_and_authenticates_before_routes() {
+        let secret = "7a".repeat(32);
+        let host = "cairn-hub.tail9039f7.ts.net:10000";
+        assert!(HttpAccess::new(None, Some(host)).is_err());
+        for bad in ["", "x", "7g", "7a7a"] {
+            assert!(HttpAccess::new(Some(bad), Some(host)).is_err());
+        }
+        for bad in [
+            "localhost",
+            "127.0.0.1:10000",
+            "x..y:10000",
+            "x.y:0",
+            "x.y:",
+        ] {
+            assert!(HttpAccess::new(Some(&secret), Some(bad)).is_err());
+        }
+        let access = HttpAccess::new(Some(&secret), Some(host)).unwrap();
+        assert!(!access.authorized(None));
+        assert!(!access.authorized(Some("Basic abc")));
+        assert!(!access.authorized(Some(&format!("Bearer {}", "7b".repeat(32)))));
+        assert!(access.authorized(Some(&format!("Bearer {secret}"))));
+        assert!(http_authority_allowed(Some(host), None, 1234, Some(host)));
+        assert!(!http_authority_allowed(
+            Some("other.example:10000"),
+            None,
+            1234,
+            Some(host)
+        ));
+        assert!(!http_authority_allowed(
+            Some(host),
+            Some("https://cairn-hub.tail9039f7.ts.net"),
+            1234,
+            Some(host)
+        ));
+
+        let probe = |authorization: Option<&str>| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let hub = Arc::new(Mutex::new(HttpHub::new(server())));
+            let secret = secret.clone();
+            let worker = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let access = HttpAccess::new(Some(&secret), Some(host)).unwrap();
+                handle_http_conn(&mut stream, &[hub], &access).unwrap();
+            });
+            let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let auth = authorization
+                .map_or_else(String::new, |value| format!("Authorization: {value}\r\n"));
+            client
+                .write_all(format!("GET / HTTP/1.1\r\nHost: {host}\r\n{auth}\r\n").as_bytes())
+                .unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            worker.join().unwrap();
+            response
+        };
+        assert!(probe(None).starts_with("HTTP/1.1 401"));
+        assert!(probe(Some(&format!("Bearer {secret}"))).starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn http_agent_tokens_select_distinct_signers_and_sessions() {
+        let operator_token = "31".repeat(32);
+        let agent_token = "42".repeat(32);
+        let mut access = HttpAccess::new(Some(&operator_token), None).unwrap();
+        access.add_token(&agent_token).unwrap();
+        assert!(access.add_token(&agent_token).is_err());
+        assert!(access.add_token(&operator_token).is_err());
+        assert_eq!(
+            access.profile(Some(&format!("Bearer {operator_token}"))),
+            Some(0)
+        );
+        assert_eq!(
+            access.profile(Some(&format!("Bearer {agent_token}"))),
+            Some(1)
+        );
+        assert_eq!(access.profile(None), None);
+
+        let mut operator = server();
+        operator.identity = Some(Identity::from_secret_bytes([1; 32]));
+        let mut agent = server();
+        agent.identity = Some(Identity::from_secret_bytes([2; 32]));
+        assert_ne!(
+            operator.identity.as_ref().unwrap().submitter_id(),
+            agent.identity.as_ref().unwrap().submitter_id()
+        );
+        let mut hubs = [HttpHub::new(operator), HttpHub::new(agent)];
+        let session = http_open(&mut hubs[0]);
+        let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}).to_string();
+        assert_eq!(hubs[0].handle(Some(&session), &list).status, 200);
+        assert_eq!(hubs[1].handle(Some(&session), &list).status, 404);
+    }
+
+    #[test]
+    fn http_agent_profiles_require_bearers_and_isolate_sessions_on_the_wire() {
+        let operator_token = "31".repeat(32);
+        let agent_token = "42".repeat(32);
+        let unknown_token = "53".repeat(32);
+        let mut operator = server();
+        operator.identity = Some(Identity::from_secret_bytes([1; 32]));
+        let mut agent = server();
+        agent.identity = Some(Identity::from_secret_bytes([2; 32]));
+        assert_ne!(
+            operator.identity.as_ref().unwrap().submitter_id(),
+            agent.identity.as_ref().unwrap().submitter_id()
+        );
+        let hubs = Arc::new(vec![
+            Arc::new(Mutex::new(HttpHub::new(operator))),
+            Arc::new(Mutex::new(HttpHub::new(agent))),
+        ]);
+
+        let probe = |authorization: Option<&str>, session: Option<&str>, body: &str| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let hubs = Arc::clone(&hubs);
+            let operator_token = operator_token.clone();
+            let agent_token = agent_token.clone();
+            let worker = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut access = HttpAccess::new(Some(&operator_token), None).unwrap();
+                access.add_token(&agent_token).unwrap();
+                handle_http_conn(&mut stream, &hubs, &access).unwrap();
+            });
+            let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let auth = authorization
+                .map_or_else(String::new, |value| format!("Authorization: {value}\r\n"));
+            let session =
+                session.map_or_else(String::new, |value| format!("Mcp-Session-Id: {value}\r\n"));
+            client
+                .write_all(
+                    format!(
+                        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{auth}{session}\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            worker.join().unwrap();
+            response
+        };
+        let session_id = |response: &str| {
+            response
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("Mcp-Session-Id")
+                        .then(|| value.trim().to_string())
+                })
+                .expect("successful initialize returns a session id")
+        };
+
+        let init = http_init();
+        assert!(probe(None, None, &init).starts_with("HTTP/1.1 401"));
+        assert!(probe(Some(&format!("Bearer {unknown_token}")), None, &init)
+            .starts_with("HTTP/1.1 401"));
+
+        let operator = probe(Some(&format!("Bearer {operator_token}")), None, &init);
+        let agent = probe(Some(&format!("Bearer {agent_token}")), None, &init);
+        assert!(operator.starts_with("HTTP/1.1 200"), "{operator}");
+        assert!(agent.starts_with("HTTP/1.1 200"), "{agent}");
+        let operator_session = session_id(&operator);
+        let agent_session = session_id(&agent);
+        assert_ne!(operator_session, agent_session);
+
+        let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}).to_string();
+        assert!(probe(
+            Some(&format!("Bearer {operator_token}")),
+            Some(&operator_session),
+            &list
+        )
+        .starts_with("HTTP/1.1 200"));
+        assert!(probe(
+            Some(&format!("Bearer {agent_token}")),
+            Some(&agent_session),
+            &list
+        )
+        .starts_with("HTTP/1.1 200"));
+        assert!(probe(
+            Some(&format!("Bearer {agent_token}")),
+            Some(&operator_session),
+            &list
+        )
+        .starts_with("HTTP/1.1 404"));
+        assert!(probe(
+            Some(&format!("Bearer {operator_token}")),
+            Some(&agent_session),
+            &list
+        )
+        .starts_with("HTTP/1.1 404"));
+    }
+
+    #[test]
+    fn http_agent_pending_nonces_survive_other_agent_writes() {
+        let dir = std::env::temp_dir().join(format!("cairn-mcp-pending-{}", fresh_nonce()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a_path = dir.join("log.pending-agent-a.json");
+        let b_path = dir.join("log.pending-agent-b.json");
+        let mut a = PendingStore::load_at(a_path.clone(), None);
+        let mut b = PendingStore::load_at(b_path.clone(), None);
+        let entry = |submitter: &str| Pending {
+            objective_id: "objective".to_string(),
+            submitter: submitter.to_string(),
+            artifact_digest: "sha256:artifact".to_string(),
+            nonce: format!("nonce-{submitter}"),
+            epoch: 1,
+        };
+        a.remember(entry("a"));
+        a.save();
+        b.remember(entry("b"));
+        b.save();
+        assert_eq!(
+            PendingStore::load_at(a_path, None).entries[0].nonce,
+            "nonce-a"
+        );
+        assert_eq!(
+            PendingStore::load_at(b_path, None).entries[0].nonce,
+            "nonce-b"
+        );
     }
 
     #[test]
@@ -4630,6 +5183,7 @@ mod tests {
             "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Type: text/plain\r\n\r\n",
             "POST /mcp HTTP/1.1\r\nHost: localhost\r\nMCP-Session-Id: a\r\nMCP-Session-Id: b\r\n\r\n",
             "POST /mcp HTTP/1.1\r\nHost: localhost\r\nOrigin: a\r\nOrigin: b\r\n\r\n",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer a\r\nAuthorization: Bearer b\r\n\r\n",
             "POST /mcp HTTP/1.1\r\nHost: localhost\r\n folded: value\r\n\r\n",
             "POST /mcp HTTP/1.1\r\nHost: localhost\r\nNo-Colon\r\n\r\n",
             "POST /mcp HTTP/1.1\r\nHost: localhost\r\nX-Test: a\0b\r\n\r\n",
@@ -5198,6 +5752,60 @@ mod tests {
         let out = call(&mut s, "get_claim", json!({ "claim_id": claim_id }));
         assert!(out.contains("\"n\":42"), "artifact not rendered: {out}");
         assert!(out.contains("rival"), "submitter not rendered: {out}");
+    }
+
+    #[test]
+    fn a_batched_duplicate_is_final_unpaid_in_get_claim() {
+        const COMMIT_AT: &str = "2026-07-28T00:30:00+00:00";
+        const REVEAL_AT: &str = "2026-07-28T00:40:00+00:00";
+        let artifact = Value::object([("n", Value::Int(42))]);
+        let (mut server, first_id) = server_with_accepted_claim(artifact.clone());
+        let objective_id = server
+            .node
+            .read()
+            .objectives()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let duplicate = crate::records::Claim::new(
+            &objective_id,
+            "copycat",
+            artifact.clone(),
+            "n2",
+            REVEAL_AT,
+            Vec::new(),
+        )
+        .unwrap();
+        let hash = crate::records::commitment_hash(&objective_id, "copycat", &artifact, "n2");
+        server
+            .node
+            .write()
+            .commit(
+                &crate::records::Commitment::new(&objective_id, "copycat", hash, COMMIT_AT),
+                COMMIT_AT,
+            )
+            .unwrap();
+        server.node.write().reveal(&duplicate, REVEAL_AT).unwrap();
+
+        let (paid, paid_meta) =
+            call_with_meta(&mut server, "get_claim", json!({ "claim_id": first_id }));
+        assert!(paid.contains("settled: yes, reward 1000"), "{paid}");
+        assert_eq!(
+            paid_meta["cairn/payment"],
+            json!({"state": "paid", "reward": 1000})
+        );
+
+        let (unpaid, unpaid_meta) = call_with_meta(
+            &mut server,
+            "get_claim",
+            json!({ "claim_id": duplicate.id() }),
+        );
+        assert!(unpaid.contains("settled: final, reward 0"), "{unpaid}");
+        assert_eq!(
+            unpaid_meta["cairn/payment"],
+            json!({"state": "unpaid", "reward": 0})
+        );
     }
 
     #[test]

@@ -19,6 +19,10 @@ const mount = async () => {
 };
 
 beforeEach(() => {
+  // jsdom has no modal top layer; real focus/inert/Escape behavior is checked
+  // against Chromium in the Windows executable browser acceptance.
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value() { this.setAttribute("open", ""); } });
+  Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value() { this.removeAttribute("open"); } });
   Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
   window.localStorage.clear();
   document.head.innerHTML = "";

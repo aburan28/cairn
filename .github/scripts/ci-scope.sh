@@ -43,7 +43,7 @@ while IFS= read -r path; do
   [[ -n "$path" ]] || continue
 
   # Workflow edits can change what a gate means, so all gates re-evaluate.
-  if [[ "$path" == .github/workflows/* || "$path" == .github/scripts/* ]]; then
+  if [[ "$path" == .github/workflows/* || "$path" == .github/scripts/* || "$path" == .gitattributes ]]; then
     all_scopes
     exit 0
   fi
