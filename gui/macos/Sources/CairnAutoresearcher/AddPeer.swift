@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CairnNodeKit
 import UniformTypeIdentifiers
 
 /// Adding a peer, both halves of it.
@@ -150,7 +151,7 @@ struct AddPeerSheet: View {
                 }
                 GridRow {
                     Text("Address").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                    Text(model.p2pAddress).font(.body.monospaced()).textSelection(.enabled)
+                    Text(NodeAddress.label(model.p2pAddress)).font(.body.monospaced()).textSelection(.enabled)
                 }
                 GridRow {
                     Text("Submitter").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
@@ -160,12 +161,12 @@ struct AddPeerSheet: View {
             }
             HStack {
                 Button("Copy peer id and address") {
-                    guard let id = model.discovery.peerId else { return }
+                    guard let id = model.discovery.peerId, let address = NodeAddress.shareable(model.p2pAddress) else { return }
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString("\(id) \(model.p2pAddress)", forType: .string)
+                    NSPasteboard.general.setString("\(id) \(address)", forType: .string)
                     model.infoMessage = "Copied"
                 }
-                .disabled(model.discovery.peerId == nil)
+                .disabled(model.discovery.peerId == nil || NodeAddress.shareable(model.p2pAddress) == nil)
             }
             if model.p2pAddress.hasPrefix("127.") || model.p2pAddress.hasPrefix("localhost") {
                 Label("This node listens on loopback, so only this Mac can reach it. Give it a LAN or public address in Settings before handing the pair out.",

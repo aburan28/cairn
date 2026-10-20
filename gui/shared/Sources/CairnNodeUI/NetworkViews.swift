@@ -25,11 +25,16 @@ public struct SessionsPanel: View {
                 if let seconds = report.reached_within_seconds { Text("Reached within \(seconds) seconds; these are observations, not open sockets.").font(.caption).foregroundStyle(.secondary) }
                 ForEach(report.peers) { peer in
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("\(peer.status) · \(peer.addr ?? "address not reported")").font(.callout.weight(.medium))
+                        Text("\(peer.status) · \(NodeAddress.label(peer.addr))").font(.callout.weight(.medium))
                         Text(peer.peer_id).font(.caption.monospaced()).textSelection(.enabled)
                         Text("\(peer.last_direction) · in \(peer.inbound_ok) · out \(peer.outbound_ok) · failures \(peer.failures) · last success \(peer.age_seconds.map { "\($0)s ago" } ?? "never")")
                             .font(.caption).foregroundStyle(.secondary)
-                        if let error = peer.last_error { Text(error).font(.caption).foregroundStyle(.orange) }
+                        if let error = peer.last_error {
+                            DisclosureGroup("Connection details") {
+                                if let address = peer.addr { Text(address).font(.caption.monospaced()).textSelection(.enabled) }
+                                Text(error).font(.caption).foregroundStyle(.orange)
+                            }
+                        }
                     }.padding(.vertical, 4)
                 }
                 if report.peers.isEmpty { Text("No peer sessions observed by this process.").foregroundStyle(.secondary) }

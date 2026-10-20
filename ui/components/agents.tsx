@@ -22,7 +22,7 @@ import { type Bridge } from "@/lib/draft";
 import { openSheet } from "@/lib/contribute";
 import { type NodeEvent } from "@/lib/journal";
 import { ago } from "@/lib/events";
-import { Badge, Command, Hash } from "@/components/ui";
+import { Badge, Command, Disclosure, Hash } from "@/components/ui";
 
 /** Connect through the app, which knows the local node and key paths. */
 export function AgentConnect({ bridge }: { bridge: Bridge | null }) {
@@ -51,7 +51,7 @@ export function AgentConnect({ bridge }: { bridge: Bridge | null }) {
         </div>
       ) : (
         <>
-          <p className="text-[12.5px] text-ink-2">Open this node in Cairn.app to connect an agent. The app sets up the connection for this computer.</p>
+          <p className="text-[12.5px] text-ink-2">Connect an agent using the setup below, or use the desktop app to configure it for this computer.</p>
           <ConductorSetup />
         </>
       )}
@@ -72,28 +72,23 @@ export function AgentConnect({ bridge }: { bridge: Bridge | null }) {
 function ConductorSetup() {
   const setup = conductorSetup();
   return (
-    <details className="rounded-lg border border-edge bg-surface-2 px-3 py-2">
-      <summary className="cursor-pointer text-[12.5px] font-medium text-ink select-none">
-        Set up Conductor by hand
-      </summary>
-      <div className="mt-2 flex flex-col gap-2">
-        <p className="text-[12.5px] text-ink-2">
-          <span className="text-ink">Conductor</span> runs Claude Code and Codex side by side, one
-          workspace each. Start this node with the agents&rsquo; port, then point both at it once:
-        </p>
-        <Command text={setup.serve} />
-        <Command text={setup.claude} />
-        <Command text={setup.codex} />
-        <p className="hint">
-          Each session gets its own connection to this one node, so workspaces can work at once
-          &mdash; a node of their own each would be refused the log&rsquo;s lock. The port is
-          loopback only, and any program on this computer can act as this node through it. Have
-          each workspace pass its own <span className="mono">node_id</span> to{" "}
-          <span className="mono">work_assignment</span> (<span className="mono">$CONDUCTOR_WORKSPACE_NAME</span>),
-          or two of them search the same slice.
-        </p>
-      </div>
-    </details>
+    <Disclosure summary="Manual agent setup"><div className="flex flex-col gap-2">
+      <p className="text-[12.5px] text-ink-2">
+        <span className="text-ink">Conductor</span> runs Claude Code and Codex side by side, one
+        workspace each. Start this node with the agents&rsquo; port, then point both at it once:
+      </p>
+      <Command text={setup.serve} />
+      <Command text={setup.claude} />
+      <Command text={setup.codex} />
+      <p className="hint">
+        Each session gets its own connection to this one node, so workspaces can work at once
+        &mdash; a node of their own each would be refused the log&rsquo;s lock. The port is
+        loopback only, and any program on this computer can act as this node through it. Have
+        each workspace pass its own <span className="mono">node_id</span> to{" "}
+        <span className="mono">work_assignment</span> (<span className="mono">$CONDUCTOR_WORKSPACE_NAME</span>),
+        or two of them search the same slice.
+      </p>
+    </div></Disclosure>
   );
 }
 
