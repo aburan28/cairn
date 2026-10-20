@@ -2,14 +2,14 @@
 //! leave a marker if invoked, so an offline-looking startup cannot hide a curl
 //! or Tailscale invocation that merely failed.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use cairn::canonical::Value;
@@ -18,11 +18,17 @@ use cairn::p2p::handshake::PeerIdentity;
 struct Node {
     child: Child,
     dir: PathBuf,
+    /// The fixture addresses this node answers at; see [`address`].
+    p2p: SocketAddr,
     http: SocketAddr,
+    /// Which start this is, so a node dropped after its successor started
+    /// cannot unhook the successor from the addresses they share.
+    start: u64,
 }
 
 impl Drop for Node {
     fn drop(&mut self) {
+        self.unhook();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -30,9 +36,42 @@ impl Drop for Node {
 
 impl Node {
     fn stop(&mut self) {
+        self.unhook();
         self.child.kill().unwrap();
         self.child.wait().unwrap();
     }
+
+    /// Before the kill, never after. Once the node is gone its port is free
+    /// for anyone to bind, and a dial still forwarded there could reach a
+    /// stranger: a trap listener, say, that then reports a policy violation
+    /// nobody committed.
+    fn unhook(&self) {
+        for address in [self.p2p, self.http] {
+            let target = forward(address);
+            let mut target = target.lock().unwrap();
+            if target.is_some_and(|(start, _)| start == self.start) {
+                *target = None;
+            }
+        }
+    }
+}
+
+/// Where a fixture address forwards to: the start that owns it, and the port
+/// that node bound. `None` while no node answers there.
+type Target = Arc<Mutex<Option<(u64, SocketAddr)>>>;
+
+fn forwards() -> &'static Mutex<HashMap<SocketAddr, Target>> {
+    static FORWARDS: OnceLock<Mutex<HashMap<SocketAddr, Target>>> = OnceLock::new();
+    FORWARDS.get_or_init(Default::default)
+}
+
+fn forward(address: SocketAddr) -> Target {
+    let forwards = forwards().lock().unwrap();
+    Arc::clone(
+        forwards
+            .get(&address)
+            .expect("a node's addresses come from `address()`"),
+    )
 }
 
 fn scratch() -> PathBuf {
@@ -55,30 +94,65 @@ fn scratch() -> PathBuf {
     }
 }
 
-fn unique_listener() -> TcpListener {
-    static ISSUED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
-    let issued = ISSUED.get_or_init(|| Mutex::new(HashSet::new()));
-    loop {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        // Reserve every fixture port in one process-wide set, including trap
-        // listeners that stay bound. Otherwise a later trap can take a node's
-        // released address while that node is still starting, making the test
-        // report a false peer-policy violation (or Address already in use).
-        let first_issue = issued
-            .lock()
-            .unwrap()
-            .insert(listener.local_addr().unwrap().port());
-        if first_issue {
-            return listener;
+/// A fixture address: a port this process binds and holds until it exits,
+/// forwarding to whichever node answers there now. Nodes bind port 0 and say
+/// which port they got ([`start`]).
+///
+/// Never a port bound, read and let go for the node to bind again. Between
+/// the release and the node's bind, any bind to port 0 in any process may be
+/// handed the same port, and so may the gap between a node's stop and its
+/// restart. On CI that killed nodes on three branches, `main` among them,
+/// with `Address already in use` before their tests checked anything; once
+/// the thief was a sibling test's trap listener. The process-wide set of
+/// issued ports that came before this closed the gap only for binds that
+/// asked the set.
+///
+/// Nodes cannot simply be left on their own ports either. Bootstrap files are
+/// mutual, so each node names the other's address before either has started,
+/// and a restarted node must come back where its peers and its members
+/// already point. A forward is the deployment those files describe anyway: a
+/// bootstrap address is only a dial hint, and a node behind NAT hands out one
+/// a router forwards.
+fn address() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let target = Target::default();
+    forwards()
+        .lock()
+        .unwrap()
+        .insert(address, Arc::clone(&target));
+    std::thread::spawn(move || {
+        for client in listener.incoming() {
+            let Ok(client) = client else { continue };
+            // Dialled under the lock, so that once `Node::unhook` has run no
+            // connection can still be on its way to the port the node let go.
+            let server = {
+                let target = target.lock().unwrap();
+                target.and_then(|(_, port)| {
+                    TcpStream::connect_timeout(&port, Duration::from_secs(2)).ok()
+                })
+            };
+            // With no node here the client is closed, which its dialler
+            // handles as it would a refusal: one failed attempt, retried on
+            // the next tick.
+            if let Some(server) = server {
+                splice(client, server);
+            }
         }
-    }
+    });
+    address
 }
 
-fn address() -> SocketAddr {
-    let listener = unique_listener();
-    let address = listener.local_addr().unwrap();
-    drop(listener);
-    address
+fn splice(client: TcpStream, server: TcpStream) {
+    for (mut from, mut to) in [
+        (client.try_clone().unwrap(), server.try_clone().unwrap()),
+        (server, client),
+    ] {
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut from, &mut to);
+            let _ = to.shutdown(Shutdown::Write);
+        });
+    }
 }
 
 fn command(dir: &Path) -> Command {
@@ -146,29 +220,68 @@ fn start(
     bootstrap: Option<&Path>,
     configure: impl FnOnce(&mut Command),
 ) -> Node {
+    static STARTS: AtomicU64 = AtomicU64::new(0);
     assert_ne!(
-        p2p.port(),
-        http.port(),
-        "P2P and HTTP fixtures must not reserve the same port"
+        p2p, http,
+        "a node's P2P and HTTP sides need an address each"
     );
     helpers(&dir);
     let mut cmd = daemon_command(&dir);
-    cmd.args([
-        "--listen",
-        &p2p.to_string(),
-        "--serve",
-        &format!("0.0.0.0:{}", http.port()),
-    ]);
+    // Port 0 on both, so no port is ever released for the node to take back;
+    // see `address`. HTTP stays on the wildcard, which is what makes the public
+    // profile probe its optional tailnet integration.
+    cmd.args(["--listen", "127.0.0.1:0", "--serve", "0.0.0.0:0"]);
     if let Some(file) = bootstrap {
         cmd.arg("--bootstrap").arg(file);
     }
     configure(&mut cmd);
     cmd.stdout(Stdio::null())
         .stderr(fs::File::create(dir.join("stderr")).unwrap());
-    Node {
+    let mut node = Node {
         child: cmd.spawn().unwrap(),
         dir,
+        p2p,
         http,
+        start: STARTS.fetch_add(1, Ordering::Relaxed),
+    };
+    let (bound_p2p, bound_http) = bound(&mut node);
+    for (address, port) in [
+        (p2p, bound_p2p),
+        (http, SocketAddr::from(([127, 0, 0, 1], bound_http.port()))),
+    ] {
+        *forward(address).lock().unwrap() = Some((node.start, port));
+    }
+    node
+}
+
+/// The ports a starting node bound, as it reports them once both are bound.
+fn bound(node: &mut Node) -> (SocketAddr, SocketAddr) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let stderr = fs::read_to_string(node.dir.join("stderr")).unwrap();
+        // Whole lines only: a line still being written could end mid-port and
+        // parse as some other port.
+        let reported = |said: &str| {
+            stderr
+                .split_inclusive('\n')
+                .filter_map(|line| line.strip_suffix('\n'))
+                .find_map(|line| line.split_once(said)?.1.trim().parse().ok())
+        };
+        if let (Some(p2p), Some(http)) = (
+            reported("cairn::daemon listening on "),
+            reported("cairn::daemon serving HTTP on "),
+        ) {
+            return (p2p, http);
+        }
+        assert!(
+            node.child.try_wait().unwrap().is_none(),
+            "node exited: {stderr}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "node never reported its ports: {stderr}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -236,15 +349,20 @@ fn wait_for(
 }
 
 #[test]
-fn concurrent_fixture_addresses_are_unique_until_child_spawn() {
-    let workers = (0..8)
-        .map(|_| std::thread::spawn(|| (0..16).map(|_| address().port()).collect::<Vec<_>>()))
-        .collect::<Vec<_>>();
-    let ports = workers
-        .into_iter()
-        .flat_map(|worker| worker.join().unwrap())
-        .collect::<HashSet<_>>();
-    assert_eq!(ports.len(), 8 * 16);
+fn a_fixture_address_stays_taken_while_no_node_answers_there() {
+    // Before a node's first start and between a stop and its restart, which
+    // is exactly when a released port used to be taken by somebody else.
+    let address = address();
+    assert_eq!(
+        TcpListener::bind(address).unwrap_err().kind(),
+        std::io::ErrorKind::AddrInUse
+    );
+    // And a dial there reaches nothing: it is closed, as a refusal would be.
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    assert!(!matches!(stream.read(&mut [0; 1]), Ok(n) if n > 0));
 }
 
 #[test]
@@ -610,7 +728,9 @@ fn explicit_local_seeds_dial_only_allowed_identities() {
     let (first_p2p, second_p2p) = (address(), address());
     let first_bootstrap = identity(&first_dir, first_p2p);
     let second_bootstrap = identity(&second_dir, second_p2p);
-    let trap = unique_listener();
+    // Bound by the kernel's choice and held: no fixture address can be this
+    // port, and a node's port is unhooked before the node lets go of it.
+    let trap = TcpListener::bind("127.0.0.1:0").unwrap();
     trap.set_nonblocking(true).unwrap();
     let stranger_bootstrap = identity(&stranger_dir, trap.local_addr().unwrap());
     let entry = |file: &Path, name: &str| {
