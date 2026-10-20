@@ -119,11 +119,11 @@ function Overview() {
   const objectives = value?.objectives ?? null;
   const network = value?.network ?? null;
 
-  const running = useMemo(
-    () =>
-      coordinatedObjectives(objectives ?? []),
-    [objectives],
-  );
+  const tasks = useMemo(() => coordinatedObjectives(objectives ?? []), [objectives]);
+  // A settled task is history, not work in progress: listing it under
+  // "Running" beside a "Settled" pill said two things at once.
+  const running = tasks.filter((objective) => !objective.settled);
+  const finished = tasks.filter((objective) => objective.settled);
   const live = useMemo(() => {
     const by = new Map<string, number>();
     for (const row of network?.compute.objectives ?? []) by.set(row.objective_id, row.live);
@@ -151,7 +151,7 @@ function Overview() {
         </div>
       )}
       {objectives && running.length === 0 && (
-        <EmptyState title="No coordinated task yet">
+        <EmptyState title={finished.length ? "Nothing running now" : "No coordinated task yet"}>
           Describe one above and Cairn will prepare its challenge spec. Any challenge with a{" "}
           <span className="mono">piecework</span> block appears here once it is posted.
         </EmptyState>
@@ -162,6 +162,18 @@ function Overview() {
             <TaskCard key={objective.id} objective={objective} live={live.get(objective.id) ?? 0} />
           ))}
         </ul>
+      )}
+      {finished.length > 0 && (
+        <>
+          <h2 className="mt-7 mb-3 text-[13px] font-semibold tracking-[0.06em] text-ink-2 uppercase">
+            Finished <span className="mono ml-1 text-ink-3">{finished.length}</span>
+          </h2>
+          <ul className="grid gap-3 md:grid-cols-2">
+            {finished.map((objective) => (
+              <TaskCard key={objective.id} objective={objective} live={live.get(objective.id) ?? 0} />
+            ))}
+          </ul>
+        </>
       )}
     </>
   );

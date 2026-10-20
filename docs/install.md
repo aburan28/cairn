@@ -11,12 +11,15 @@ be to run them.
 | Debian 11+, Ubuntu 22.04+ | the [`.deb`](#debian-and-ubuntu-the-deb) | `/usr/bin/cairn` | yes |
 | Fedora, RHEL / Alma / Rocky 9+ | the [`.rpm`](#fedora-and-the-rhel-family-the-rpm) | `/usr/bin/cairn` | yes |
 | any Linux or macOS, or no root | the [install script](#anything-else-the-install-script) | `~/.local/bin/cairn` | no |
+| Windows 10 2004+ or 11 | the [PowerShell script](#windows-through-wsl-2), which uses WSL 2 | `~/.local/bin/cairn` inside WSL | no |
 | a Rust toolchain and an opinion | [source](../README.md#install) | wherever `cargo` puts it | no |
 
 All of them are on the [releases page](https://github.com/aburan28/cairn/releases/latest).
-Windows is absent by decision, not oversight: the verifier sandbox is seatbelt
-and bubblewrap, and a node that runs objective-authored code without one is the
-configuration `CAIRN_REQUIRE_SANDBOX` exists to refuse.
+There is no native Windows build, by decision, not oversight: the verifier
+sandbox is seatbelt and bubblewrap, and a node that runs objective-authored code
+without one is the configuration `CAIRN_REQUIRE_SANDBOX` exists to refuse. On
+Windows the Linux release runs inside WSL 2, which has a real Linux kernel and
+so the real jail.
 
 **Pick one route per machine.** They install to different directories, and your
 shell runs whichever comes first on `PATH` — see
@@ -197,6 +200,35 @@ for Alpine, Arch, NixOS, a machine you do not administer, and a CI job. To
 remove: `rm ~/.local/bin/cairn`.
 
 On Linux it tells you if `bubblewrap` is missing; it cannot install it for you.
+
+## Windows, through WSL 2
+
+```powershell
+irm https://github.com/aburan28/cairn/releases/latest/download/install.ps1 | iex
+```
+
+Needs Windows 10 version 2004 or newer, or Windows 11. It finds a WSL 2 Linux
+distribution (your default one, or `CAIRN_WSL_DISTRO`), runs the Linux
+[install script](#anything-else-the-install-script) inside it, installs
+`bubblewrap` as root so there is no `sudo` prompt, checks that the jail can be
+created, and offers to start a node with `CAIRN_REQUIRE_SANDBOX=1`. The reader
+is then a normal browser tab at <http://127.0.0.1:8080/ui/>; WSL 2 forwards
+`localhost` to Windows.
+
+If WSL has no distribution, run `wsl --install -d Ubuntu` in an Administrator
+PowerShell (the script offers to when it is elevated), restart if asked, finish
+Ubuntu's first-run setup, and run the command again. A WSL 1 distribution is
+refused: it has no namespaces to jail verifiers in
+(`wsl --set-version <name> 2`). `CAIRN_VERSION` pins a release and
+`CAIRN_START=no` installs without starting.
+
+Start it again later with
+`wsl -d Ubuntu --cd ~ -- env CAIRN_REQUIRE_SANDBOX=1 .local/bin/cairn run`. The
+node's state is in the distribution's home directory (`~/.local`, and the key at
+`~/.cairn/key`), not under `C:\`; it is reachable from Explorer at
+`\\wsl.localhost\Ubuntu\home`. Removing is `wsl -d Ubuntu -- rm ~/.local/bin/cairn`.
+The node is not a Windows service: it runs while that window is open, and WSL
+may stop an idle distribution.
 
 ## A cloud workspace: install it and dial the seed
 
