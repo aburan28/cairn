@@ -919,25 +919,14 @@ fn two_replicas_sync_over_the_encrypted_transport_and_strangers_are_turned_away(
     .expect("init");
     write(&mut a, &alice, "shared.md", "over the wire");
 
-    let port = {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        probe.local_addr().expect("addr").port()
-    };
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
+    // Bound here and handed over, never probed and released: a port let go
+    // for the server to bind again is a port any parallel test can take first.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
     let root = a.root().to_path_buf();
     std::thread::spawn(move || {
-        let _ = sync::serve(&root, server_peer, addr, sync::Access::default());
+        let _ = sync::serve_on(&root, server_peer, listener, sync::Access::default());
     });
-    // Wait for the listener.
-    let mut ready = false;
-    for _ in 0..100 {
-        if std::net::TcpStream::connect(addr).is_ok() {
-            ready = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(ready, "server did not start");
 
     let dir = temp("net-client");
     Lab::create_empty(&dir, a.space()).expect("empty");

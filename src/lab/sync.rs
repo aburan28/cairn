@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -625,6 +625,20 @@ pub fn serve(
     access: Access,
 ) -> Result<(), LabError> {
     let listener = transport::listen(listen).map_err(|e| LabError::Io(e.to_string()))?;
+    serve_on(lab_root, identity, listener, access)
+}
+
+/// [`serve`], on a listener the caller already bound. Tests use this to get
+/// an ephemeral port without racing for one.
+pub fn serve_on(
+    lab_root: &Path,
+    identity: PeerIdentity,
+    listener: TcpListener,
+    access: Access,
+) -> Result<(), LabError> {
+    let listen = listener
+        .local_addr()
+        .map_err(|e| LabError::Io(e.to_string()))?;
     let identity = Arc::new(identity);
     let lab = Arc::new(Mutex::new(Lab::open(lab_root)?));
     eprintln!(

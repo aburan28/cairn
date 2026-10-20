@@ -1131,21 +1131,31 @@ pub fn run(config: Config) -> Result<(), String> {
             format!("listen: {e}")
         }
     })?;
-    log::info!("listening on {}", config.listen);
+    // What was bound, which is `--listen` and `--serve` unless they named port
+    // 0. Then this is the only place the port exists, and a roster, journal or
+    // router mapping that repeated the 0 would tell nobody how to dial in.
+    // The Mac app takes the p2p address from any line saying `listening on`,
+    // so the HTTP line must not say it. `tests/private_network.rs` reads both.
+    let listen = listener.local_addr().map_err(|e| format!("listen: {e}"))?;
+    log::info!("listening on {listen}");
+    let http_bound = http
+        .as_ref()
+        .and_then(|(listener, _, _)| listener.local_addr().ok());
+    if let Some(addr) = http_bound {
+        log::info!("serving HTTP on {addr}");
+    }
     sessions
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .identify(service.identity(), config.listen);
+        .identify(service.identity(), listen);
     crate::journal::note(
         &journal,
         crate::journal::Kind::Node,
         crate::journal::Tone::Good,
         &format!(
             "Node started: peers reach it at {}{}{}",
-            config.listen,
-            config
-                .serve
-                .as_deref()
+            listen,
+            http_bound
                 .map(|addr| format!(", its reader and workers at http://{addr}"))
                 .unwrap_or_default(),
             if config.mcp {
@@ -1170,7 +1180,7 @@ pub fn run(config: Config) -> Result<(), String> {
         } else {
             p2p_portmap.as_deref()
         },
-        config.listen.ip(),
+        listen.ip(),
         !matches!(service.proxy(), crate::p2p::proxy::Proxy::Direct),
     );
     if let Some(note) = &decision.note {
@@ -1193,10 +1203,10 @@ pub fn run(config: Config) -> Result<(), String> {
                 mode.as_str(),
                 crate::p2p::reach::ENV,
                 mode.as_str(),
-                config.listen.port()
+                listen.port()
             );
             let roster = Arc::clone(&sessions);
-            let port = config.listen.port();
+            let port = listen.port();
             thread::spawn(move || {
                 crate::p2p::reach::run(mode, port, move |report| {
                     roster
