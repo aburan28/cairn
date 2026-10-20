@@ -315,6 +315,11 @@ jobs:
       - run: cargo test --locked --lib verifiers
         env:
           CAIRN_EXPECT_SANDBOX: sandbox-exec
+      # Published native solvers must execute their known-answer cases and
+      # reach the objective checker, as they do in the Linux jail job.
+      - run: cargo test --locked --test solver -- --nocapture
+        env:
+          CAIRN_EXPECT_SANDBOX: sandbox-exec
 
   msrv:
     # The crate claims rust-version 1.89 (`File::try_lock` stabilized there).

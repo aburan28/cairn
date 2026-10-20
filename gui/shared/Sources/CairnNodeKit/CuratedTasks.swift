@@ -27,11 +27,13 @@ public enum CuratedTasks {
             title: "ECC2K-130 — paid orbits",
             detail: """
             Pays for each distinguished orbit contributed to the shared search for \
-            Certicom's ECC2K-130 key. Work it with a GPU client and submit batches; \
-            uploading campaign points to S3 needs AWS keys in Secrets.
+            Certicom's ECC2K-130 key. Share this Mac… walks it on the CPU threads \
+            you offer; a GPU client is faster, and uploading campaign points to S3 \
+            needs AWS keys in Secrets.
             """,
             objectives: ["examples/certicom-ecdlp/objective-ecc2k130-orbit-batch.json"],
-            docPath: "examples/certicom-ecdlp/ECC2K130-CAMPAIGN.md"
+            docPath: "examples/certicom-ecdlp/ECC2K130-CAMPAIGN.md",
+            solvers: ["examples/certicom-ecdlp/solvers/ecc2k130-orbit"]
         ),
         CuratedTask(
             id: "ecc2k130-frontier",
