@@ -454,7 +454,7 @@ struct SettingsView: View {
                 Text("The node dials peers and nothing dials it. Enough to sync; not enough to be a peer others reach.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                Text("Binds 0.0.0.0 on the P2P port. Hand out this Mac's LAN or public address with the peer id below — never put a cloud public IP in the listen field; it is not on any local interface.")
+                Text("Accepts peer connections on this Mac's network interfaces. Share a reachable LAN or public address with your peer id; listener details are available below.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -468,15 +468,17 @@ struct SettingsView: View {
                     .truncationMode(.middle)
                     .foregroundStyle(node.peerId == nil ? .secondary : .primary)
             }
-            if let listen = node.listenAddress {
-                LabeledContent("Listening") {
-                    Text(listen).font(.callout.monospaced()).textSelection(.enabled)
-                }
-            } else {
-                LabeledContent("Will listen") {
-                    Text("\(current.p2pHost):9000 (or next free)")
-                        .font(.callout.monospaced())
-                        .foregroundStyle(.secondary)
+            DisclosureGroup("Advanced connection details") {
+                if let listen = node.listenAddress {
+                    LabeledContent("Listening") {
+                        Text(listen).font(.callout.monospaced()).textSelection(.enabled)
+                    }
+                } else {
+                    LabeledContent("Will listen") {
+                        Text("\(current.p2pHost):9000 (or next free)")
+                            .font(.callout.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             HStack {
@@ -486,13 +488,12 @@ struct SettingsView: View {
                     NSPasteboard.general.setString(id, forType: .string)
                 }
                 .disabled(node.peerId == nil)
-                Button("Copy peer id and listen address") {
-                    guard let id = node.peerId else { return }
-                    let addr = node.listenAddress ?? "\(current.p2pHost):9000"
+                Button("Copy peer id and shareable address") {
+                    guard let id = node.peerId, let addr = node.shareablePeerAddress else { return }
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString("\(id) \(addr)", forType: .string)
                 }
-                .disabled(node.peerId == nil)
+                .disabled(node.peerId == nil || node.shareablePeerAddress == nil)
             }
             .font(.callout)
 

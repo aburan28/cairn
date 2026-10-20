@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Command } from "@/components/ui";
+import { Command, Disclosure } from "@/components/ui";
+import { useModalDialog } from "@/components/hooks";
+import type { SetupGuide } from "@/lib/deployment";
 import { networkSetup } from "@/lib/deployment";
 
 /**
@@ -52,41 +54,50 @@ export function GetOnline({
     onClose?.();
   };
 
+  return <OnlineDialog guide={guide} onClose={close} />;
+}
+
+function OnlineDialog({ guide, onClose }: { guide: SetupGuide; onClose: () => void }) {
+  const dialog = useModalDialog();
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center"
+    <dialog ref={dialog}
+      className="fixed inset-0 m-0 h-dvh max-h-none w-full max-w-none bg-transparent p-4 text-ink open:flex open:items-end open:justify-center sm:open:items-center backdrop:bg-black/40"
       role="dialog"
       aria-modal="true"
       aria-label="Get this node online"
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
       onClick={(event) => {
-        if (event.target === event.currentTarget) close();
+        if (event.target === event.currentTarget) onClose();
       }}
     >
-      <section className="box w-full max-w-xl bg-surface">
+      <section className="box max-h-[85dvh] w-full max-w-xl overflow-y-auto bg-surface">
         <div className="box-head">
           <span className="min-w-0 flex-1 truncate">Get this node online</span>
-          <button type="button" className="btn btn-sm btn-ghost" onClick={close} aria-label="Close">
+          <button type="button" className="btn btn-sm btn-ghost" onClick={onClose} aria-label="Close">
             ✕
           </button>
         </div>
         <div className="box-body">
           <p className="text-[13px] leading-relaxed text-ink-2">
-            {guide.description}
+            {guide.summary}
           </p>
-          <div className="mt-3 flex flex-col gap-3">
-            {guide.commands.map((command) => (
-              <div key={command.text}>
-                <div className="mb-1 text-[11.5px] text-ink-3">{command.label}</div>
-                <Command text={command.text} />
-              </div>
-            ))}
-          </div>
-          <p className="mt-3 text-[11.5px] leading-relaxed text-ink-3">
-            {guide.footer}
-          </p>
+          <Disclosure summary="Advanced network setup">
+            <p className="text-[13px] leading-relaxed text-ink-2">{guide.description}</p>
+            <div className="mt-3 flex flex-col gap-3">
+              {guide.commands.map((command) => (
+                <div key={command.text}>
+                  <div className="mb-1 text-[11.5px] text-ink-3">{command.label}</div>
+                  <Command text={command.text} />
+                </div>
+              ))}
+            </div>
+            <p className="mt-3 text-[11.5px] leading-relaxed text-ink-3">
+              {guide.footer}
+            </p>
+          </Disclosure>
         </div>
       </section>
-    </div>
+    </dialog>
   );
 }
 

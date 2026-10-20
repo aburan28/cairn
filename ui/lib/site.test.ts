@@ -61,7 +61,10 @@ describe("node labels", () => {
   it("keeps local transport addresses out of human-facing labels", () => {
     expect(readableNode("http://127.0.0.1:8080", "http://127.0.0.1:8080")).toBe("this node");
     expect(readableNode("http://localhost:8080", "http://localhost:8080")).toBe("this node");
-    expect(readableNode("https://node.example", "https://reader.example")).toBe("https://node.example");
+    expect(readableNode("https://node.example", "https://reader.example")).toBe("the connected node");
+    expect(readableNode("http://192.168.1.20:8080")).toBe("the connected node");
+    expect(readableNode("http://[::1]:8080")).toBe("this node");
+    expect(readableNode("http://0.0.0.0:8080")).toBe("this node");
   });
 
   it("recognizes same-origin nodes without exposing the origin", () => {

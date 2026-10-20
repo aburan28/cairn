@@ -9,6 +9,29 @@ Most of it is a self-inflicted wound. **The coordination problem is downstream
 of the payment structure**, and fixing the payment structure removes most of the
 coordination requirement rather than automating it.
 
+## Launching from Cairn for Mac
+
+On **Coordination**, describe the task, optionally enter a total budget, and choose
+**Generate challenge spec**. Cairn calls the provider and model configured in
+**Settings → AI** in the background. The page receives the finished spec, its
+piece count and payment per piece, and the check results. There is no prompt to
+copy into another agent.
+
+The app builds an objective with `piecework` and a hash-pinned certificate checker.
+It admits that objective to a disposable log and tests a valid, incorrect, and
+empty artifact through `cairn propose --dry-run`, with the verifier sandbox
+required. An invalid spec gets one automatic repair attempt. Missing inputs,
+provider errors, or an unavailable verifier are shown without enabling launch.
+These example checks do not establish that the checker fully captures the task;
+the statement and assumptions remain part of the review.
+
+**Launch challenge** confirms the actual checked spec and budget in a native
+alert, then publishes those exact files through the app's existing posting path.
+The page cannot submit replacement JSON or paths. A reload recovers the pending
+operation and links to its exact objective id. The app supports both its child
+node and its own local background service; other attached nodes and ordinary
+browser tabs need the Cairn app that manages the node. API keys stay in the app.
+
 ## The hoarding trap
 
 A winner-take-all bounty gives every participant a reason to hide their work. If

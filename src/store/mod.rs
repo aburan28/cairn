@@ -419,6 +419,11 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME")
         .ok()
         .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("USERPROFILE")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
         .map(PathBuf::from)
 }
 

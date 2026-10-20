@@ -66,6 +66,7 @@ BASE="https://github.com/$REPO/releases/download/$TAG"
 asset() { printf '%s\n' "$assets" | grep -E "$1" | head -n 1 || true; }
 
 DMG="$(asset '^cairn-.*-macos-universal\.dmg$')"
+WINDOWS="$(asset '^cairn-.*-x86_64-pc-windows-msvc\.zip$')"
 DEB_AMD64="$(asset '^cairn_.*_amd64\.deb$')"
 DEB_ARM64="$(asset '^cairn_.*_arm64\.deb$')"
 RPM_X86="$(asset '^cairn-.*\.x86_64\.rpm$')"
@@ -75,6 +76,7 @@ INSTALLER="$(asset '^install\.sh$')"
 missing=""
 note_missing() { missing="$missing${missing:+, }$1"; }
 [ -n "$DMG" ]       || note_missing "the macOS disk image"
+[ -n "$WINDOWS" ]   || note_missing "the Windows x64 ZIP"
 [ -n "$DEB_AMD64" ] || note_missing "the amd64 .deb"
 [ -n "$DEB_ARM64" ] || note_missing "the arm64 .deb"
 [ -n "$RPM_X86" ]   || note_missing "the x86_64 .rpm"
@@ -94,6 +96,7 @@ install_notes() {
     echo "| you have | download | then |"
     echo "|---|---|---|"
     row "**macOS** — Apple Silicon or Intel" "$DMG" "open it and run *Install Cairn.pkg*, then open **Cairn** from Applications"
+    row "**Windows 10/11** — x64" "$WINDOWS" "extract the ZIP and open *Start Cairn.cmd*"
     row "**Debian 11+, Ubuntu 22.04+** — amd64" "$DEB_AMD64" "\`sudo apt install ./$DEB_AMD64\`"
     row "**Debian 11+, Ubuntu 22.04+** — arm64" "$DEB_ARM64" "\`sudo apt install ./$DEB_ARM64\`"
     row "**Fedora, RHEL / Alma / Rocky 9+** — x86_64" "$RPM_X86" "\`sudo dnf install ./$RPM_X86\`"

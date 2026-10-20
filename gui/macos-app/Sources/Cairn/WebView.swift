@@ -14,6 +14,7 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     /// What to do when the reader's Post a challenge page hands over a
     /// description: open New Challenge… with it, or return why not.
     var onDraftChallenge: (@MainActor (String) -> String?)?
+    var onCoordination: (@MainActor (PageRequest) throws -> [String: Any])?
     /// The Contribute page turning a role on or off, once the person has
     /// confirmed it natively: apply it and restart the node, or say why not.
     var onSetRole: (@MainActor (PageRole, Bool) -> String?)?
@@ -121,6 +122,12 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
         return isNode(url)
     }
 
+    fileprivate var isLocalCoordinationPage: Bool {
+        guard let nodeHost = nodeOrigin?.host else { return false }
+        return ["localhost", "127.0.0.1", "::1"].contains(nodeHost)
+            && view.url?.lastPathComponent == "coordination"
+    }
+
     fileprivate var isLocalChallengePage: Bool {
         guard let nodeHost = nodeOrigin?.host else { return false }
         return ["localhost", "127.0.0.1", "::1"].contains(nodeHost)
@@ -211,6 +218,15 @@ final class PageBridge: NSObject, WKScriptMessageHandlerWithReply {
         switch PageRequest.parse(message.body) {
         case .failure(let refusal):
             return (nil, refusal.message)
+        case .success(let request) where request.isCoordination:
+            guard browser.isLocalCoordinationPage, let handle = browser.onCoordination else {
+                return (nil, "Open Coordination in the Cairn app that manages this node.")
+            }
+            do { return (try handle(request), nil) }
+            catch { return (nil, error.localizedDescription) }
+        case .success(.draftCoordination), .success(.coordinationStatus),
+             .success(.cancelCoordination), .success(.launchCoordination):
+            return (nil, "Coordination is unavailable.")
         case .success(.draftChallenge(let brief)):
             guard let open = browser.onDraftChallenge else { return (nil, "New Challenge is not available.") }
             if let refusal = open(brief) { return (nil, refusal) }

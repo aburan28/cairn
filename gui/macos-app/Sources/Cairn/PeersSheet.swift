@@ -175,18 +175,24 @@ struct PeersSheet: View {
                 }
                 GridRow {
                     Text("Address").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                    Text(handOutAddress)
+                    Text(handOutAddress ?? "No shareable address reported")
                         .font(.body.monospaced()).textSelection(.enabled)
                 }
             }
             HStack {
-                Button("Copy peer id and address") {
+                Button("Copy peer id") {
                     guard let id = node.peerId else { return }
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString("\(id) \(handOutAddress)", forType: .string)
+                    NSPasteboard.general.setString(id, forType: .string)
+                    info = "Copied peer id"
+                }.disabled(node.peerId == nil)
+                Button("Copy peer id and address") {
+                    guard let id = node.peerId, let address = handOutAddress else { return }
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString("\(id) \(address)", forType: .string)
                     info = "Copied"
                 }
-                .disabled(node.peerId == nil)
+                .disabled(node.peerId == nil || handOutAddress == nil)
             }
             if node.settings.listensLocallyOnly && !node.isAttached {
                 Label("This node listens on loopback, so only this Mac can reach it. Accept inbound in Settings before handing the pair out.",
@@ -196,17 +202,10 @@ struct PeersSheet: View {
         }
     }
 
-    /// Prefer a concrete listen address; fall back to the settings host with
-    /// the usual port so a stopped node still has something to copy.
-    private var handOutAddress: String {
-        if let listen = node.listenAddress, !listen.hasPrefix("0.0.0.0") {
-            return listen
-        }
-        if let listen = node.listenAddress, listen.hasPrefix("0.0.0.0"),
-           let port = listen.split(separator: ":").last {
-            return "<this-Mac-LAN-or-public>:\(port)"
-        }
-        return "\(node.settings.p2pHost):9000"
+    /// Never invent an address from a wildcard or copy loopback as a peer hint.
+    /// A stopped/local-only node can still share its identity separately.
+    private var handOutAddress: String? {
+        node.shareablePeerAddress
     }
 }
 

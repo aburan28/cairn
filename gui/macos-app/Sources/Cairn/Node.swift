@@ -33,6 +33,10 @@ final class Node: ObservableObject {
     /// node has said so; never invented by the app.
     @Published private(set) var peerId: String?
     @Published private(set) var listenAddress: String?
+    var shareablePeerAddress: String? {
+        guard case .running = state else { return nil }
+        return NodeAddress.forListener(listenAddress, localHosts: isAttached ? [] : LocalNetwork.ipv4().map(\.address))
+    }
     /// Where this node answers agents over MCP, when Settings asked it to:
     /// `http://127.0.0.1:<port>/mcp`. Nil when it does not, and when this
     /// window is attached to a node it did not start with that flag.
@@ -61,6 +65,7 @@ final class Node: ObservableObject {
     private(set) var workObjective: String?
     /// The one `cairn work` this app runs, against this node or another.
     let worker = Worker()
+    lazy var coordination = CoordinationComposer(node: self)
     /// What New Challenge… opens with: the description the reader's Post a
     /// challenge page handed over, or nil from the Node menu.
     private(set) var challengeBrief: String?
@@ -750,8 +755,8 @@ final class Node: ObservableObject {
         if attached || process === p {
             state = .failed(
                 attached
-                    ? "Did not reach \(url.absoluteString) within 15s.\n\nIs that node up, and does the URL point at its reader (/ui/)?"
-                    : "The node started but did not serve \(url.absoluteString) within a minute."
+                    ? "Could not connect to the node within 15 seconds. Check that it is running, or review the connection in Settings."
+                    : "The node started, but its reader was not ready within a minute. Open the node log for startup details."
             )
         }
     }
