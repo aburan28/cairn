@@ -43,6 +43,7 @@ USAGE
     cairn lab [--lab DIR] <command> [options]
 
 SPACE
+    web --identity FILE [--listen 127.0.0.1:0]  local collaboration editor and experiments
     init --name NAME --identity FILE [--policy FILE] [--member KEY:ROLES[:PEER,...]]...
     clone --space ID (--dir PATH | --peer ID@HOST:PORT --peer-identity FILE | --bundle FILE)
     status [--json]                 space, ops, heads, members, conflicts, exclusions
@@ -319,6 +320,7 @@ fn run(args: Vec<String>, out: &mut dyn io::Write) -> Result<i32, CliError> {
         "commit" => cmd_commit(&dir, &mut args, out),
         "changes" => cmd_changes(&dir, &mut args, out),
         "collab" => cmd_collab(&dir, &mut args, out),
+        "web" => cmd_web(&dir, &mut args, out),
         "doc" => cmd_doc(&dir, &mut args, out),
         "claim" => cmd_claim(&dir, &mut args, out),
         "release" => cmd_release(&dir, &mut args, out),
@@ -1747,6 +1749,35 @@ fn collab_heads(path: &str, field: &str) -> Result<serde_json::Value, CliError> 
     Ok(heads)
 }
 
+fn cmd_web(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32, CliError> {
+    let parsed = args.rest(&["listen", "identity"])?;
+    parsed.reject_unknown(&["help"])?;
+    if parsed.has("help") {
+        say(out, "cairn lab web --identity FILE [--listen 127.0.0.1:0]\nLocal authenticated source editor, experiment runner and compute estimates.\nCAIRN_AGENT_RATE_CARD names an optional operator-reviewed JSON rate card.");
+        return Ok(0);
+    }
+    if !parsed.positional.is_empty() || !parsed.trailing.is_empty() {
+        return usage("lab web [--listen 127.0.0.1:0] --identity FILE");
+    }
+    let address: SocketAddr = parsed
+        .one("listen")
+        .unwrap_or("127.0.0.1:0")
+        .parse()
+        .map_err(|_| CliError::Usage("--listen needs a loopback IP:port".into()))?;
+    let server = crate::serve::workbench::Workbench::bind(
+        dir,
+        load_identity(parsed.one("identity"))?,
+        address,
+    )?;
+    say(
+        out,
+        format!("Local collaboration workbench: {}", server.url()),
+    );
+    let _ = out.flush();
+    server.serve()?;
+    Ok(0)
+}
+
 fn cmd_collab(dir: &Path, args: &mut Args, out: &mut dyn io::Write) -> Result<i32, CliError> {
     use serde_json::{json, Value as Json};
     let command = args.next().unwrap_or_else(|| "help".into());
@@ -1759,6 +1790,8 @@ integrate WORKSPACE --base TARGET.json --source SOURCE.json --request ID --ident
 feed WORKSPACE [--cursor FEED.json] [--limit 128] [--watch --interval-ms 250]\n\
 checkpoint WORKSPACE --base SNAPSHOT.json --identity FILE\n\
 checkout WORKSPACE NEW_DIRECTORY [--base SNAPSHOT.json]\n\
+compact WORKSPACE NEW_LAB --base SNAPSHOT.json --identity FILE\n\
+recover NEW_DIRECTORY              recover this generation's signed source archive\n\
 request-id\n\
 Keep the same request ID through retries. Editing uses exactly the supplied base.\n\
 Run lab sync --watch for encrypted continuous replication between machines.");
@@ -1783,6 +1816,8 @@ Run lab sync --watch for encrypted continuous replication between machines.");
         "edit" => (&["base", "edits", "request", "identity"], &[], 1),
         "integrate" => (&["base", "source", "request", "identity"], &[], 1),
         "checkpoint" => (&["base", "identity"], &[], 1),
+        "compact" => (&["base", "identity"], &[], 2),
+        "recover" => (&[], &[], 1),
         "feed" => (&["cursor", "limit", "interval-ms", "rounds"], &["watch"], 1),
         _ => {
             return usage(format!(
@@ -1811,6 +1846,36 @@ Run lab sync --watch for encrypted continuous replication between machines.");
         return Ok(0);
     }
     let mut lab = Lab::open(dir)?;
+    if command == "recover" {
+        let result = super::collab::compact::recover(
+            &lab,
+            Path::new(parsed.positional(0, "NEW_DIRECTORY")?),
+        )?;
+        say(out, result.to_string());
+        return Ok(0);
+    }
+    if command == "compact" {
+        let json = collab_heads(parsed.need("base")?, "heads")?;
+        let heads = json
+            .as_array()
+            .expect("heads array")
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| CliError::Usage("heads must be strings".into()))
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let result = super::collab::compact::rollover(
+            &mut lab,
+            &load_identity(parsed.one("identity"))?,
+            parsed.positional(0, "WORKSPACE")?,
+            &heads,
+            Path::new(parsed.positional(1, "NEW_LAB")?),
+        )?;
+        say(out, result.to_string());
+        return Ok(0);
+    }
     let mut params = json!({});
     if !matches!(command.as_str(), "list" | "create") {
         params["workspace"] = json!(parsed.positional(0, "WORKSPACE")?);

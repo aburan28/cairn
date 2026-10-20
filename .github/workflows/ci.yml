@@ -186,6 +186,7 @@ jobs:
       # so in its receipt.
       - run: ./scripts/lab-demo.sh
       - run: python3 ./scripts/collab-demo.py
+      - run: python3 ./scripts/workbench-demo.py
       # The host agent against a node it shares nothing with: a probe of the
       # runner, a registration read back off GET /hosts and GET /network, a
       # queued job and an `exec` job with receipts naming their jail, and the
@@ -489,6 +490,7 @@ jobs:
       # proved -- a checkpoint compared in the wrong units passed both.
       - run: npm test
         working-directory: ui
+      - run: node scripts/workbench-model.test.mjs
       # No reader links to github.com -- the native apps as well as ui/,
       # which site.test.ts covers alone. Here rather than in gui-macos
       # because it is about every reader and needs no Swift to read one.
@@ -502,6 +504,11 @@ jobs:
         working-directory: ui
       - name: exercise the embedded reader with an isolated node
         run: python3 scripts/reader-ux.py
+      - name: exercise local collaboration with an isolated lab
+        run: python3 scripts/workbench-demo.py
+        env:
+          RUST_BIN: target/debug/cairn
+          CAIRN_WORKBENCH_BROWSER: "1"
       # The iOS reader ships the same fallback the site does. A copy that
       # drifted would teach the phone a different launch log than the page
       # that says they are the same file.

@@ -82,6 +82,8 @@ use crate::secrets;
 use crate::swarm_calls;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub mod workbench;
+
 /// Largest request body accepted, in bytes.
 ///
 /// A submission is a claim or a commitment: a few kilobytes of JSON. The cap
@@ -1984,6 +1986,9 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<Request, String> {
                 authorization = Some(value.to_string());
             }
             if name == "origin" {
+                if origin.is_some() {
+                    return Err("multiple Origin headers are not supported".into());
+                }
                 origin = Some(value.to_string());
             }
             if name == "cookie" {

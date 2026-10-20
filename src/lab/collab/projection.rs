@@ -116,30 +116,44 @@ impl Graph {
             }
         }
         graph.requests = requests;
-        while !raw.is_empty() {
-            let mut progress = false;
-            let ids = raw.keys().cloned().collect::<Vec<_>>();
-            for id in ids {
-                let (change, sources) = &raw[&id];
-                if change.parents.iter().any(|p| raw.contains_key(p)) {
-                    continue;
-                }
-                let (change, sources) = (change.clone(), sources.clone());
-                raw.remove(&id);
-                progress = true;
-                match graph.admit(lab, change, sources) {
-                    Ok(()) => {}
-                    Err(e) => graph.issues.push(format!("{id}: {e}")),
+        // A long causal chain used to rescan every remaining change until
+        // its parent happened to precede it in hash order. A ready set visits
+        // each edge once and keeps the same deterministic causal semantics.
+        let mut waiting = BTreeMap::new();
+        let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut ready = BTreeSet::new();
+        for (id, (change, _)) in &raw {
+            let mut count = 0;
+            for parent in &change.parents {
+                if raw.contains_key(parent) {
+                    count += 1;
+                    children.entry(parent.clone()).or_default().push(id.clone());
                 }
             }
-            if !progress {
-                for id in raw.keys() {
-                    graph
-                        .issues
-                        .push(format!("{id}: cyclic collaboration parents"));
-                }
-                break;
+            waiting.insert(id.clone(), count);
+            if count == 0 {
+                ready.insert(id.clone());
             }
+        }
+        while let Some(id) = ready.pop_first() {
+            let (change, sources) = raw.remove(&id).expect("ready change exists");
+            if let Err(error) = graph.admit(lab, change, sources) {
+                graph.issues.push(format!("{id}: {error}"));
+            }
+            if let Some(children) = children.remove(&id) {
+                for child in children {
+                    let count = waiting.get_mut(&child).expect("child exists");
+                    *count -= 1;
+                    if *count == 0 {
+                        ready.insert(child);
+                    }
+                }
+            }
+        }
+        for id in raw.keys() {
+            graph
+                .issues
+                .push(format!("{id}: cyclic collaboration parents"));
         }
         graph.issues.sort();
         Ok(graph)

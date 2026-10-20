@@ -639,6 +639,10 @@ For live source editing, [collaboration workspaces](docs/live-collaboration.md)
 add Unicode text CRDTs, isolated task lanes, explicit causal integration and
 immutable experiment checkpoints. CLI and MCP agents use the same protocol;
 continuous encrypted sync carries edits between replicas without Git.
+`cairn lab web --identity author.json` opens a local graphical workbench for
+protected drafts, explicit conflict resolution, pinned experiments and ISA-aware
+compute estimates. [Generation rollover](docs/collaboration-workbench.md#compact-a-workspace)
+starts a fresh text graph while retaining a verifiable archive of the old one.
 
 What all of this looks like while it runs is the reader's **Network** and
 **Coordination** pages (`/ui/network`, `/ui/coordination?id=…`): whom this

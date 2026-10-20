@@ -4,6 +4,7 @@
 //! combined program is correct. Checkpoints are pinned inputs for the existing
 //! runner and replay tools, never execution proofs or settlement authority.
 
+pub mod compact;
 mod model;
 mod projection;
 
@@ -388,13 +389,13 @@ pub fn call(
     args: &Json,
 ) -> Result<Json, LabError> {
     lab.refresh()?;
+    if matches!(command, "list" | "read" | "feed") {
+        return Graph::load(lab)?.query(command, args);
+    }
     let allowed: &[&str] = match command {
-        "list" => &[],
         "create" => &["title", "base", "request"],
-        "read" => &["workspace", "heads", "contents"],
         "edit" => &["workspace", "heads", "edits", "request"],
         "integrate" => &["workspace", "heads", "source", "request"],
-        "feed" => &["workspace", "cursor", "limit"],
         "checkpoint" => &["workspace", "heads"],
         _ => return Err(invalid(format!("unknown collaboration command {command}"))),
     };
@@ -406,10 +407,6 @@ pub fn call(
         })
     };
     match command {
-        "list" => {
-            let graph = Graph::load(lab)?;
-            Ok(json!({"workspaces":graph.workspaces(),"issues":graph.issues}))
-        }
         "create" => {
             let base = args
                 .get("base")
@@ -424,20 +421,6 @@ pub fn call(
                 &model::text(args, "request")?,
             )?;
             Ok(json!({"workspace":id,"heads":[id]}))
-        }
-        "read" => {
-            let heads = args.get("heads").map(model::heads).transpose()?;
-            let contents = match args.get("contents") {
-                None => true,
-                Some(Json::Bool(v)) => *v,
-                _ => return Err(invalid("contents must be boolean")),
-            };
-            let graph = Graph::load(lab)?;
-            let mut result = graph
-                .snapshot(&workspace()?, heads.as_ref())?
-                .to_json(contents);
-            result["issues"] = json!(graph.issues);
-            Ok(result)
         }
         "edit" => {
             let edits = args["edits"]
@@ -462,19 +445,6 @@ pub fn call(
             // only head: another process may have written concurrently.
             Ok(json!({"change":id,"heads":[id]}))
         }
-        "feed" => {
-            let cursor = args
-                .get("cursor")
-                .map(model::heads)
-                .transpose()?
-                .unwrap_or_default();
-            let limit = if args.get("limit").is_some() {
-                model::number(args, "limit")?
-            } else {
-                128
-            };
-            Graph::load(lab)?.feed(&workspace()?, &cursor, limit)
-        }
         "integrate" => {
             let id = integrate(
                 lab,
@@ -493,6 +463,52 @@ pub fn call(
             &model::heads(&args["heads"])?,
         ),
         _ => unreachable!(),
+    }
+}
+
+impl Graph {
+    /// Read-only CLI/MCP/web boundary over a fixed authenticated op set. A
+    /// caller caching this index must invalidate it on EVERY new lab op,
+    /// including membership changes, not only collaboration edits.
+    pub fn query(&self, command: &str, args: &Json) -> Result<Json, LabError> {
+        let allowed: &[&str] = match command {
+            "list" => &[],
+            "read" => &["workspace", "heads", "contents"],
+            "feed" => &["workspace", "cursor", "limit"],
+            _ => return Err(invalid("not a read-only collaboration query")),
+        };
+        model::only(args, allowed)?;
+        let workspace = || model::address(&model::text(args, "workspace")?);
+        match command {
+            "list" => Ok(json!({"workspaces":self.workspaces(),"issues":self.issues})),
+            "read" => {
+                let heads = args.get("heads").map(model::heads).transpose()?;
+                let contents = match args.get("contents") {
+                    None => true,
+                    Some(Json::Bool(value)) => *value,
+                    _ => return Err(invalid("contents must be boolean")),
+                };
+                let mut result = self
+                    .snapshot(&workspace()?, heads.as_ref())?
+                    .to_json(contents);
+                result["issues"] = json!(self.issues);
+                Ok(result)
+            }
+            "feed" => {
+                let cursor = args
+                    .get("cursor")
+                    .map(model::heads)
+                    .transpose()?
+                    .unwrap_or_default();
+                let limit = if args.get("limit").is_some() {
+                    model::number(args, "limit")?
+                } else {
+                    128
+                };
+                self.feed(&workspace()?, &cursor, limit)
+            }
+            _ => unreachable!(),
+        }
     }
 }
 
