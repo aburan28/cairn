@@ -64,27 +64,36 @@ export function AgentConnect({ bridge }: { bridge: Bridge | null }) {
  * Conductor by hand, for a browser tab with no app to write the configs:
  * every workspace's agent shares this node over HTTP. In Cairn.app the
  * Connect Conductor… button does the same and restarts the node itself.
+ *
+ * Closed until asked for: the same three commands sit on the Network,
+ * challenge and Contribute pages, and open they outweighed everything else
+ * on all three.
  */
 function ConductorSetup() {
   const setup = conductorSetup();
   return (
-    <div className="flex flex-col gap-2">
-      <p className="text-[12.5px] text-ink-2">
-        <span className="text-ink">Conductor</span> runs Claude Code and Codex side by side, one
-        workspace each. Start this node with the agents&rsquo; port, then point both at it once:
-      </p>
-      <Command text={setup.serve} />
-      <Command text={setup.claude} />
-      <Command text={setup.codex} />
-      <p className="hint">
-        Each session gets its own connection to this one node, so workspaces can work at once
-        &mdash; a node of their own each would be refused the log&rsquo;s lock. The port is
-        loopback only, and any program on this computer can act as this node through it. Have
-        each workspace pass its own <span className="mono">node_id</span> to{" "}
-        <span className="mono">work_assignment</span> (<span className="mono">$CONDUCTOR_WORKSPACE_NAME</span>),
-        or two of them search the same slice.
-      </p>
-    </div>
+    <details className="rounded-lg border border-edge bg-surface-2 px-3 py-2">
+      <summary className="cursor-pointer text-[12.5px] font-medium text-ink select-none">
+        Set up Conductor by hand
+      </summary>
+      <div className="mt-2 flex flex-col gap-2">
+        <p className="text-[12.5px] text-ink-2">
+          <span className="text-ink">Conductor</span> runs Claude Code and Codex side by side, one
+          workspace each. Start this node with the agents&rsquo; port, then point both at it once:
+        </p>
+        <Command text={setup.serve} />
+        <Command text={setup.claude} />
+        <Command text={setup.codex} />
+        <p className="hint">
+          Each session gets its own connection to this one node, so workspaces can work at once
+          &mdash; a node of their own each would be refused the log&rsquo;s lock. The port is
+          loopback only, and any program on this computer can act as this node through it. Have
+          each workspace pass its own <span className="mono">node_id</span> to{" "}
+          <span className="mono">work_assignment</span> (<span className="mono">$CONDUCTOR_WORKSPACE_NAME</span>),
+          or two of them search the same slice.
+        </p>
+      </div>
+    </details>
   );
 }
 
@@ -102,9 +111,9 @@ export function AgentStatus({
   const attached = mcp?.serving && mcp.client;
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2 text-[13px]">
+      <div className="flex items-start gap-2 text-[13px]">
         <span
-          className={`h-2 w-2 rounded-full ${attached ? "bg-accent" : mcp?.serving ? "bg-warn" : "bg-ink-3"}`}
+          className={`mt-[0.45em] h-2 w-2 shrink-0 rounded-full ${attached ? "bg-accent" : mcp?.serving ? "bg-warn" : "bg-ink-3"}`}
           aria-hidden
         />
         <span className="text-ink">{describePresence(mcp)}</span>
