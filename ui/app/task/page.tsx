@@ -273,7 +273,11 @@ function Dashboard({
         </div>
       )}
 
-      {!progress.settled && <WorkPanel objective={id} base={base} />}
+      {!progress.settled && (
+        <div className="mb-5">
+          <WorkPanel objective={id} base={base} />
+        </div>
+      )}
 
       <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
         <Stat

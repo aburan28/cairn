@@ -12,6 +12,7 @@
  */
 
 import type { Bridge } from "./draft";
+import type { Objective } from "./site";
 
 export type RoleId = "experimenter" | "compute" | "validator" | "relay" | "funder";
 
@@ -184,3 +185,54 @@ export const PAY_LABEL: Record<Pay, string> = {
   unpaid: "Not paid",
   pays: "You pay",
 };
+
+// -- offer compute -------------------------------------------------------------
+
+/**
+ * The goal the Offer compute sheet shows selected. Keep the reader's choice
+ * while it is still open; otherwise the one a link asked for, then the first
+ * underserved goal (few workers for what it pays), then the first open one.
+ * `""` when nothing is open. A goal that closed since it was chosen falls
+ * through to a fresh pick rather than leave the select pointing at nothing.
+ */
+export function pickGoal(
+  open: readonly Pick<Objective, "id">[],
+  current: string,
+  requested: string | null,
+  underserved: readonly string[],
+): string {
+  const ids = new Set(open.map((row) => row.id));
+  if (current && ids.has(current)) return current;
+  if (requested && ids.has(requested)) return requested;
+  return underserved.find((id) => ids.has(id)) ?? open[0]?.id ?? "";
+}
+
+/** What a goal pays, as the sheet prints it under the select. */
+export type GoalPay =
+  | { kind: "bounty"; reward: number }
+  | { kind: "piecework"; unitPrice: number; units: number | null; left: number | null };
+
+export function goalPay(objective: Pick<Objective, "reward" | "piecework">): GoalPay {
+  const piece = objective.piecework;
+  if (!piece) return { kind: "bounty", reward: objective.reward };
+  const units = piece.units ?? null;
+  return {
+    kind: "piecework",
+    unitPrice: piece.unit_price,
+    units,
+    left: units == null ? null : Math.max(0, units - piece.paid_units),
+  };
+}
+
+/**
+ * The page's open goals after one read of `/objectives`. `live` is `null`
+ * until a read returns. A failed read is not an empty node: it keeps the last
+ * good list, and once any read has succeeded the sheet keeps showing it rather
+ * than flipping to "could not read" on one missed poll.
+ */
+export type OpenGoals = { objectives: Objective[]; live: boolean | null };
+
+export function afterRead(previous: OpenGoals, feed: { live: boolean; objectives: Objective[] }): OpenGoals {
+  if (!feed.live) return { objectives: previous.objectives, live: previous.live === true };
+  return { objectives: feed.objectives.filter((row) => row.open), live: true };
+}
