@@ -626,12 +626,14 @@ impl Ledger {
     /// fork it silently and `audit` reports the damage afterwards, which is
     /// too late for the writes that already landed.
     ///
-    /// Advisory, on the log file itself: `flock` semantics via
-    /// [`std::fs::File::try_lock`], released when the handle drops or the
-    /// process exits — including on a crash, so a killed node leaves no stale
-    /// lock to clear by hand. It binds processes on one machine, which is the
-    /// failure this guards; two machines sharing a log over NFS are outside
-    /// what any advisory lock promises and outside Stage 0.
+    /// On Unix this is advisory on the log file. On Windows it is an exclusive
+    /// byte-range lock on the same file, outside the range used by log readers
+    /// and appenders; using the file itself also makes hard-link aliases share
+    /// the lock. Both locks are released when the handle drops or the process
+    /// exits — including on a crash, so a killed node leaves no stale lock to
+    /// clear by hand. It binds processes on one machine, which is the failure
+    /// this guards; two machines sharing a log over NFS are outside what any
+    /// advisory lock promises and outside Stage 0.
     ///
     /// Readers ([`Ledger::open`]) take no lock: reading a log somebody else is
     /// appending to is safe here, since an append never rewrites an existing
@@ -655,15 +657,33 @@ impl Ledger {
         // `create(true).append(true)` rather than `write`: taking the lock must
         // not truncate a log that already exists, and must still work before
         // the first append has created one.
+        #[cfg(not(windows))]
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .map_err(|e| io_error(format!("opening {} for writing", path.display()), e))?;
+        // A sidecar named from the path cannot distinguish hard links: each
+        // alias gets a different lock while naming the same ledger. On Windows
+        // lock one byte beyond any representable practical log size on the
+        // ledger file itself. Windows locks are range-based, so readers and
+        // append-only writes at EOF remain available; hard links share the
+        // underlying file lock regardless of their names.
+        #[cfg(windows)]
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| io_error(format!("opening {} for writer lock", path.display()), e))?;
         // Held by somebody else, or the platform/filesystem cannot lock. Both
         // are refusals: a lock that silently does nothing is worse than no
         // lock, because it reads as a guarantee.
-        if file.try_lock().is_err() {
+        #[cfg(not(windows))]
+        let locked = file.try_lock().is_ok();
+        #[cfg(windows)]
+        let locked = try_windows_writer_lock(&file);
+        if !locked {
             return Err(LedgerError::Locked {
                 path: path.display().to_string(),
             });
@@ -1033,6 +1053,60 @@ impl Ledger {
             expected_prev = Some(entry.hash.as_str());
         }
         problems
+    }
+}
+
+#[cfg(windows)]
+fn try_windows_writer_lock(file: &std::fs::File) -> bool {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct Overlapped {
+        internal: usize,
+        internal_high: usize,
+        offset: u32,
+        offset_high: u32,
+        event: *mut c_void,
+    }
+
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        fn LockFileEx(
+            file: *mut c_void,
+            flags: u32,
+            reserved: u32,
+            bytes_low: u32,
+            bytes_high: u32,
+            overlapped: *mut Overlapped,
+        ) -> i32;
+    }
+
+    // Keep the sentinel range outside plausible file sizes, while remaining a
+    // valid signed file offset for Windows filesystems.
+    const LOCK_OFFSET: u64 = i64::MAX as u64 - 1;
+    const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x1;
+    const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x2;
+    let mut overlapped = Overlapped {
+        internal: 0,
+        internal_high: 0,
+        offset: LOCK_OFFSET as u32,
+        offset_high: (LOCK_OFFSET >> 32) as u32,
+        event: std::ptr::null_mut(),
+    };
+    // SAFETY: `file` stays alive for the whole call and is retained in
+    // `Ledger::_lock` after success. The OVERLAPPED is initialized and points
+    // to a one-byte range; no asynchronous flag is set, so the call completes
+    // before it returns.
+    unsafe {
+        LockFileEx(
+            file.as_raw_handle().cast(),
+            LOCKFILE_FAIL_IMMEDIATELY | LOCKFILE_EXCLUSIVE_LOCK,
+            0,
+            1,
+            0,
+            &mut overlapped,
+        ) != 0
     }
 }
 
@@ -2011,6 +2085,29 @@ mod tests {
             .append("note", Value::object([("i", Value::Int(1))]), "t")
             .expect("second writer appends");
         assert_eq!(second.len(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_hard_link_alias_cannot_open_a_second_writer() {
+        let dir = TempDir::new("ledger-hardlink-lock");
+        let path = dir.path.join("log.jsonl");
+        let alias = dir.path.join("alias.jsonl");
+        let mut first = Ledger::open_exclusive(&path).expect("first writer takes the lock");
+        first
+            .append("note", Value::object([("i", Value::Int(0))]), "t")
+            .expect("first writer appends");
+        fs::hard_link(&path, &alias).expect("create a second name for the same file");
+
+        match Ledger::open_exclusive(&alias) {
+            Err(LedgerError::Locked { .. }) => {}
+            other => panic!("writer opened through a hard-link alias: {other:?}"),
+        }
+
+        // The lock covers only the sentinel byte range; normal readers through
+        // either name remain able to observe the append-only log.
+        let reader = Ledger::open(&alias).expect("hard-link readers are not locked out");
+        assert_eq!(reader.len(), 1);
     }
 
     #[test]

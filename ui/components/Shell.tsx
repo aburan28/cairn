@@ -32,6 +32,7 @@ export const ROUTES = [
   { href: "/payouts", label: "External bounties", hint: "See attributed shares and plan a payment outside Cairn" },
   { href: "/task", label: "Task progress", hint: "A divided search: what is settled, who is working it, how far along" },
   { href: "/peers", label: "Address book", hint: "Every node that announced an address in the log" },
+  { href: "/diagnostics", label: "Diagnostics", hint: "Advanced connection details, listener addresses and troubleshooting" },
   { href: "/how-it-works", label: "How it works", hint: "The network in plain words, and its limits" },
 ] as const;
 
@@ -151,7 +152,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
                 <SearchIcon />
               </span>
               Jump to…
-              <span className="kbd ml-auto">⌘K</span>
+              <span className="kbd ml-auto"><Shortcut /></span>
             </button>
             <div className="flex items-center justify-between gap-2 px-1">
               <NodeStatus />
@@ -232,34 +233,39 @@ export function Shell({ children }: { children: React.ReactNode }) {
  * a node, and GitHub Pages — and on the second there is no node at all. A
  * visitor who does not know that reads every fallback figure as live.
  */
+function Shortcut() {
+  const [mac, setMac] = useState(false);
+  useEffect(() => setMac(/Mac|iPhone|iPad/.test(navigator.platform)), []);
+  return <>{mac ? "⌘K" : "Ctrl K"}</>;
+}
+
 function NodeStatus() {
   const base = useNode();
   const [state, setState] = useState<"checking" | "live" | "down">("checking");
-  const target = base || "this origin";
 
   useEvery(async () => {
     if (base !== null) setState(await nodeAnswers(base) ? "live" : "down");
-  }, 30, base !== null);
+  }, 30, base !== null, base);
 
   const tone =
     state === "live" ? "bg-accent" : "bg-ink-3";
   const text = state === "live" ? "node live" : state === "down" ? "no node" : "checking";
 
   return (
-    <span
+    <Link href="/diagnostics" aria-label={`Connection: ${text}. Open diagnostics`}
       className="inline-flex items-center gap-1.5 rounded-md border border-edge bg-surface px-2 py-1
                  text-[11.5px] text-ink-2"
       title={
         state === "live"
-          ? `A node answered at ${target}.`
+          ? "Connected to a node. Open diagnostics for connection details."
           : state === "down"
-            ? `Nothing answered at ${target}. Pages fall back to the settled log that ships in the repository, and say so.`
+            ? "No node is answering. Pages label any bundled snapshot data. Open diagnostics to troubleshoot."
             : "Looking for a node…"
       }
     >
       <span className={`h-1.5 w-1.5 rounded-full ${tone}`} />
       {text}
-    </span>
+    </Link>
   );
 }
 
@@ -423,6 +429,7 @@ function Footer() {
     <footer className="shell-footer site-only border-t border-edge">
       <div className="shell-gutter flex max-w-[90rem] flex-wrap items-center gap-x-5 gap-y-2 py-5 text-[12.5px] lg:px-8">
         <Link href="/how-it-works" className="text-accent hover:underline">How it works</Link>
+        <Link href="/diagnostics" className="text-ink-2 hover:underline">Diagnostics</Link>
         <span className="text-ink-2" title="LICENSE in the repository.">
           Apache-2.0
         </span>

@@ -185,6 +185,8 @@ jobs:
       # `exec` must refuse (exit 3), and an explicitly unconfined run must say
       # so in its receipt.
       - run: ./scripts/lab-demo.sh
+      - run: python3 ./scripts/collab-demo.py
+      - run: python3 ./scripts/workbench-demo.py
       # The host agent against a node it shares nothing with: a probe of the
       # runner, a registration read back off GET /hosts and GET /network, a
       # queued job and an `exec` job with receipts naming their jail, and the
@@ -488,6 +490,7 @@ jobs:
       # proved -- a checkpoint compared in the wrong units passed both.
       - run: npm test
         working-directory: ui
+      - run: node scripts/workbench-model.test.mjs
       # No reader links to github.com -- the native apps as well as ui/,
       # which site.test.ts covers alone. Here rather than in gui-macos
       # because it is about every reader and needs no Swift to read one.
@@ -501,10 +504,68 @@ jobs:
         working-directory: ui
       - name: exercise the embedded reader with an isolated node
         run: python3 scripts/reader-ux.py
+      - name: exercise local collaboration with an isolated lab
+        run: python3 scripts/workbench-demo.py
+        env:
+          RUST_BIN: target/debug/cairn
+          CAIRN_WORKBENCH_BROWSER: "1"
       # The iOS reader ships the same fallback the site does. A copy that
       # drifted would teach the phone a different launch log than the page
       # that says they are the same file.
       - run: cmp -s ui/lib/snapshot.json gui/ios/Sources/CairnKit/Resources/snapshot.json
+
+  windows:
+    name: Windows executable
+    needs: changes
+    if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.core != 'false' || needs.changes.outputs.ui != 'false' || needs.changes.outputs.packaging != 'false')
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+      CAIRN_REQUIRE_SANDBOX: "off"
+      CAIRN_WINDOWS_BROWSER: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
+      - run: npx playwright install chromium
+        working-directory: ui
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --lib --target x86_64-pc-windows-msvc windows_objective_processes_require_a_supported_jail
+      - run: 'cargo test --locked --lib --target x86_64-pc-windows-msvc ledger::tests::a_second_writer_is_refused_rather_than_allowed_to_fork_the_log'
+      - run: 'cargo test --locked --lib --target x86_64-pc-windows-msvc ledger::tests::a_hard_link_alias_cannot_open_a_second_writer'
+      - run: 'cargo test --locked --lib --target x86_64-pc-windows-msvc canonical::'
+      - run: 'cargo test --locked --lib --target x86_64-pc-windows-msvc crypto::'
+      - run: cargo test --locked --bin cairn --target x86_64-pc-windows-msvc generated_nonce
+      - run: cargo build --release --locked --features ui --target x86_64-pc-windows-msvc
+      - name: package the standalone executable
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -Binary target/x86_64-pc-windows-msvc/release/cairn.exe -Version 0.0.0-ci.${{ github.run_id }} -OutputDirectory dist
+      - name: the unpacked Windows package runs
+        shell: pwsh
+        run: |
+          Expand-Archive -Path dist/*.zip -DestinationPath unpacked
+          python scripts/windows-smoke.py unpacked/cairn.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cairn-windows-x64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
 
   gui-macos:
     # The macOS launcher in gui/macos, and Cairn.app in gui/macos-app, compiled. No other job builds Swift and
@@ -570,6 +631,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
+      # The ECC2K auditor tools have a Python-only unit suite. Its only external
+      # test dependency is cryptography; AWS SDK and PostgreSQL calls are mocked.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Test ECC2K ingest service in an isolated Python environment
+        run: |
+          python3 -m venv .scratch/ci-ecc2k-venv
+          .scratch/ci-ecc2k-venv/bin/python -m pip install --disable-pip-version-check --no-input 'cryptography==48.0.0'
+          .scratch/ci-ecc2k-venv/bin/python -m unittest discover -s examples/ecc2k-ingest-service -p 'test_*.py'
       - run: ./scripts/check-examples.sh
       # The rho piecework checkers pin a *job document* besides their own
       # source, and `check-examples.sh` only follows pins inside the verifier

@@ -45,7 +45,13 @@ const go = async (route) => {
   // Measure the loaded data, not a skeleton. Track the reader's actual fetch
   // and body promises: browser lifecycle events can miss an aborted/coalesced
   // health request and leave networkidle unset after the reads have finished.
-  await page.waitForFunction(() => window.__uxReads === 0 && performance.now() - window.__uxLastRead > 250);
+  try {
+    await page.waitForFunction(() => window.__uxReads === 0 && performance.now() - window.__uxLastRead > 250);
+  } catch (error) {
+    const state = await page.evaluate(() => ({ url: location.href, reads: window.__uxReads,
+      sinceRead: performance.now() - window.__uxLastRead, text: document.body.innerText.slice(0, 1800) }));
+    throw new Error(`Reader did not settle: ${JSON.stringify({ ...state, errors })}`, { cause: error });
+  }
 };
 const inDialog = () => page.evaluate(() => Boolean(document.activeElement?.closest("dialog[open]")));
 
@@ -61,7 +67,7 @@ try {
   }
   const detail = await (await page.request.get(`${reader.origin}/objective/${objective.id}`)).json();
   const routes = ["", "objectives/", "coordination/", "network/", "log/", "knowledge/", "goals/",
-    "contribute/", "submit/", "submission/", "workspace/", "payouts/", "peers/", "how-it-works/",
+    "contribute/", "submit/", "submission/", "workspace/", "payouts/", "peers/", "diagnostics/", "how-it-works/",
     `challenge/?id=${objective.id}`, `frontier/?id=${objective.id}`, `task/?id=${objective.id}`];
   if (objective.piecework) routes.push(`coordination/?id=${objective.id}`);
   if (fixture) routes.push(`workspace/?space=${fixture.space}`);
@@ -74,6 +80,38 @@ try {
     console.log(`PASS route layout at ${width}px`);
   }
   console.log(`PASS ${routes.length} routes at 320, 360 and 1280px`);
+
+  // Presentation fixtures alter only reads in this browser. Keep usable peer
+  // IPs visible while proving bind/loopback endpoints moved to Diagnostics.
+  const addressNetwork = await (await page.request.get(`${reader.origin}/network`)).json();
+  const addressSessions = JSON.parse(await readFile(new URL("../../gui/shared/Tests/CairnNodeKitTests/Fixtures/sessions.json", import.meta.url), "utf8"));
+  addressNetwork.node.reach = { ...addressNetwork.node.reach, bound: "0.0.0.0:8080", lan: true, urls: ["http://192.168.1.90:8080"] };
+  addressNetwork.peers.this_node = { ...addressSessions.this_node, listen: "0.0.0.0:9000" };
+  addressSessions.this_node.listen = "0.0.0.0:9000";
+  const sample = addressSessions.peers[0];
+  addressSessions.peers = ["192.168.1.23:9000", "127.0.0.1:9000", "0.0.0.0:9000"].map((addr, i) => ({ ...sample, peer_id: `sha256:${String(i + 1).repeat(64)}`, addr, last_error: null }));
+  const addressBook = { peers: addressSessions.peers.map((peer, i) => ({ addr: peer.addr, identity: String(i + 1).repeat(64), transport: peer.peer_id, seq: 1, created_at: "2026-10-19T00:00:00Z" })), note: "Browser presentation fixture" };
+  await page.route(`${reader.origin}/network`, (route) => route.fulfill({ json: addressNetwork }));
+  await page.route(`${reader.origin}/sessions`, (route) => route.fulfill({ json: addressSessions }));
+  await page.route(`${reader.origin}/peers`, (route) => route.fulfill({ json: addressBook }));
+  for (const width of [320, 360, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const route of ["network/", "peers/"]) {
+      await go(route);
+      const text = await page.locator("body").innerText();
+      assert(text.includes("192.168.1.23:9000"), `${route} lost a useful peer IP`);
+      assert(!text.includes("127.0.0.1") && !text.includes("0.0.0.0"), `${route} displays a local/bind placeholder`);
+      assert(text.includes("Local connection") && text.includes("Not advertised"), `${route} lost non-shareable peer identities`);
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${route} address layout overflows at ${width}px`);
+    }
+  }
+  await go("diagnostics/");
+  assert((await page.locator("body").innerText()).includes("0.0.0.0:8080"), "Diagnostics lost the actual reader listener");
+  assert((await page.locator("body").innerText()).includes("127.0.0.1:9000"), "Diagnostics lost the local peer endpoint");
+  await page.unroute(`${reader.origin}/network`);
+  await page.unroute(`${reader.origin}/sessions`);
+  await page.unroute(`${reader.origin}/peers`);
+  console.log("PASS real peer IPs, hidden local/bind endpoints and Diagnostics at three widths");
 
   await go("contribute/");
   const opener = page.getByRole("button", { name: /Offer compute/ }).first();
@@ -223,7 +261,7 @@ try {
   await seedPage.route(`${reader.origin}/health`, (route) => route.fulfill({ contentType: "text/html", body: "<html>Static host</html>" }));
   await seedPage.route("**/seeds.json", (route) => route.fulfill({ json: { version: 1, seeds: [{ http: seed.origin }] } }));
   await seedPage.goto(url("submit/"));
-  await seedPage.locator(`span[title="A node answered at ${seed.origin}."]`).first().waitFor();
+  await seedPage.getByRole("link", { name: "Connection: node live. Open diagnostics", exact: true }).first().waitFor();
   await seedPage.getByRole("link", { name: "Open this node’s challenge form →" }).waitFor();
   assert.equal(await seedPage.getByRole("link", { name: "Open this node’s challenge form →" }).getAttribute("href"), `${seed.origin}/ui/submit/`);
   assert(await seedPage.getByRole("button", { name: "Canonicalize", exact: true }).isDisabled());

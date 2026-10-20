@@ -51,7 +51,7 @@ use crate::gossip::{Candidate, Population};
 use crate::ledger::Ledger;
 use crate::node::Node;
 use crate::p2p::discovery::{peer_id_string, Endpoint};
-use crate::p2p::handshake::{PeerIdentity, PeerPublic};
+use crate::p2p::handshake::{PeerId, PeerIdentity, PeerPublic};
 use crate::p2p::multicast;
 
 /// Moves the LAN beacon port, or `off` disables beacons. See `run` in this
@@ -78,6 +78,21 @@ const BEACONS_PER_TICK: usize = 64;
 /// Seconds between sync rounds.
 pub const TICK_SECONDS: u64 = 5;
 
+fn inbound_guard<'a, T>(
+    state: &'a Mutex<T>,
+    local: &PeerId,
+    remote: &PeerId,
+) -> Option<std::sync::MutexGuard<'a, T>> {
+    match state.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) if local <= remote => None,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            Some(state.lock().unwrap_or_else(|error| error.into_inner()))
+        }
+    }
+}
+
 /// Ticks between LAN beacon announcements.
 const BEACON_EVERY_TICKS: u64 = multicast::INTERVAL_SECONDS.div_ceil(TICK_SECONDS);
 
@@ -97,49 +112,13 @@ impl Drop for InFlight {
     }
 }
 
-/// Which peer the tick is dialling under the node lock, and which peers have
-/// an authenticated inbound session waiting for (or holding) that lock.
-///
-/// # Why this exists
-///
-/// An outbound session holds this node's lock until the peer has answered,
-/// and an inbound session needs the same lock before it can answer. When two
-/// nodes dial each other at once -- two peers bootstrapped at each other and
-/// started together do it on their first tick -- each dial waits for the
-/// other's inbound session, which waits for the lock that dial holds. Both
-/// dials then ran out the handshake timeout (with the handshake outside the
-/// lock, it would be the session timeout instead) and released at the same
-/// instant, which put the next tick's dials back in step: two private nodes
-/// started together missed each other about half the time, and could keep
-/// missing for as long as they ran. Linux reports the dial as `EAGAIN` and
-/// the inbound reply, written after the dialler gave up, as `EPIPE`.
-///
-/// The cycle is broken by dropping exactly one of the two connections, and
-/// each node can decide which on its own because both know both ids: the dial
-/// from the lower id survives. The lower node drops its inbound session from
-/// the higher one, the higher node's dial fails at once and releases its
-/// lock, and its inbound session from the lower node goes ahead. The higher
-/// node needs no rule of its own. That is a session lost, not a peer lost:
-/// either session reconciles both ways, and the one kept is a whole round.
-/// The higher node cannot tell that reset from any other, so it logs and
-/// counts that one dial as failed; its inbound session succeeds alongside it.
-///
-/// Both halves of the check share one mutex, because each alone has a gap: an
-/// inbound session that found nobody dialling and is about to queue on the
-/// lock, while the tick takes it and dials the same peer, is the same cycle.
-/// So the tick, holding the lock, also skips a peer whose inbound session is
-/// already queued -- that session is about to run and do the same work, and it
-/// discharges any DHT hop the skipped dial was chosen for, because a round
-/// asks the peer for whatever is outstanding on it whichever side dialled.
-///
-/// Pairwise only. A longer cycle (A dials B, B dials C, C dials A, all in one
-/// tick) still waits out a session timeout; it needs three nodes in step, and
-/// a rule that dropped an inbound session whenever *any* dial was in flight
-/// would fail healthy dials all over a busy network to prevent it.
+/// Tracks a same-peer inbound session queued behind the state lock so the tick
+/// can avoid starting a redundant outbound round. The authenticated peer-ID
+/// admission rule below remains responsible for breaking cycles across peers.
 #[derive(Default)]
 struct Crossing {
-    dialing: Option<crate::p2p::handshake::PeerId>,
-    queued: BTreeMap<crate::p2p::handshake::PeerId, usize>,
+    dialing: Option<PeerId>,
+    queued: BTreeMap<PeerId, usize>,
 }
 
 impl Crossing {
@@ -149,10 +128,8 @@ impl Crossing {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Mark a dial to `peer`, for a caller already holding the node lock.
-    /// `None` when an inbound session from `peer` is queued on that lock.
-    fn dial(shared: &Arc<Mutex<Crossing>>, peer: crate::p2p::handshake::PeerId) -> Option<Dialing> {
-        let mut crossing = Crossing::lock(shared);
+    fn dial(shared: &Arc<Mutex<Crossing>>, peer: PeerId) -> Option<Dialing> {
+        let mut crossing = Self::lock(shared);
         if crossing.queued.contains_key(&peer) {
             return None;
         }
@@ -160,15 +137,8 @@ impl Crossing {
         Some(Dialing(Arc::clone(shared)))
     }
 
-    /// Queue an inbound session from `remote` for the node lock. `None` when
-    /// the lock is held by this node's own dial to `remote` and that dial is
-    /// the one to keep.
-    fn queue(
-        shared: &Arc<Mutex<Crossing>>,
-        local: crate::p2p::handshake::PeerId,
-        remote: crate::p2p::handshake::PeerId,
-    ) -> Option<Queued> {
-        let mut crossing = Crossing::lock(shared);
+    fn queue(shared: &Arc<Mutex<Crossing>>, local: PeerId, remote: PeerId) -> Option<Queued> {
+        let mut crossing = Self::lock(shared);
         if crossing.dialing == Some(remote) && local < remote {
             return None;
         }
@@ -177,7 +147,6 @@ impl Crossing {
     }
 }
 
-/// Clears [`Crossing::dialing`] however the dial ends.
 struct Dialing(Arc<Mutex<Crossing>>);
 
 impl Drop for Dialing {
@@ -186,8 +155,7 @@ impl Drop for Dialing {
     }
 }
 
-/// Removes one queued inbound session from [`Crossing`] however it ends.
-struct Queued(Arc<Mutex<Crossing>>, crate::p2p::handshake::PeerId);
+struct Queued(Arc<Mutex<Crossing>>, PeerId);
 
 impl Drop for Queued {
     fn drop(&mut self) {
@@ -1495,13 +1463,10 @@ pub fn run(config: Config) -> Result<(), String> {
                 }
                 return;
             }
-            // The handshake, too, before the lock: see `Crossing` for the
-            // deadlock this was, and `Service::complete_inbound` for why the
-            // id it yields can be trusted to break it.
-            let connection = match accept_service.complete_inbound(inbound) {
+            let connection = match accept_service.authenticate_inbound(inbound) {
                 Ok(connection) => connection,
                 Err(error) => {
-                    log::warn!("inbound session: {error}");
+                    log::warn!("inbound authentication: {error}");
                     accept_sessions
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1513,17 +1478,27 @@ pub fn run(config: Config) -> Result<(), String> {
             let Some(_queued) =
                 Crossing::queue(&accept_crossing, accept_service.identity(), remote)
             else {
-                // Not counted as a failure: the peer is reachable, and the
-                // dial this node is running to it right now is the session.
                 log::info!(
                     "inbound session: {} dialled us while we dialled it; keeping our dial",
                     peer_id_string(&remote)
                 );
                 return;
             };
-            let mut guard = accept_state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // A cycle of outbound callers can each hold its own ledger while
+            // every inbound worker waits on those same locks. Under contention,
+            // admit waiting edges only from lower to higher authenticated peer
+            // ids. Every finite cycle has a minimum id, so one connection is
+            // closed, its dialler releases the lock, and the remaining session
+            // proceeds. An idle node accepts either direction: asymmetric
+            // bootstrap still works. This is scheduling, never record ordering.
+            let mut guard = match inbound_guard(&accept_state, &accept_service.identity(), &remote)
+            {
+                Some(guard) => guard,
+                None => {
+                    log::debug!("inbound sync deferred: node busy; peer may retry");
+                    return;
+                }
+            };
             let State {
                 node, population, ..
             } = &mut *guard;
@@ -1534,7 +1509,7 @@ pub fn run(config: Config) -> Result<(), String> {
                 Some(_) => {
                     let mut scorer = RoundScorer::new(accept_registry.clone());
                     accept_service
-                        .serve_connection_and_population(
+                        .serve_authenticated_and_population(
                             connection,
                             node,
                             population,
@@ -1543,7 +1518,7 @@ pub fn run(config: Config) -> Result<(), String> {
                         )
                         .map(|(remote, _)| remote)
                 }
-                None => accept_service.serve_connection_once(connection, node),
+                None => accept_service.serve_authenticated_once(connection, node),
             };
             match outcome {
                 Ok(remote) => {
@@ -2124,6 +2099,54 @@ mod tests {
         assert!(Crossing::queue(&shared, [0u8; 32], [3u8; 32]).is_some());
         drop(dialing);
         assert!(Crossing::queue(&shared, [0u8; 32], remote).is_some());
+    }
+
+    #[test]
+    fn queued_inbound_skips_same_peer_dial_without_bypassing_cycle_order() {
+        use super::*;
+
+        let (local, remote) = ([1u8; 32], [2u8; 32]);
+        let crossing = Arc::new(Mutex::new(Crossing::default()));
+        let state = Mutex::new(());
+        let queued = Crossing::queue(&crossing, local, remote).expect("queue inbound");
+
+        // Queueing releases the Crossing mutex before admission waits on state.
+        // A lower-ID waiter defers while state is busy; the tick sees the queued
+        // edge and skips its duplicate dial, then the inbound can proceed.
+        let held = state.lock().unwrap();
+        assert!(inbound_guard(&state, &local, &remote).is_none());
+        assert!(Crossing::dial(&crossing, remote).is_none());
+        drop(held);
+        assert!(inbound_guard(&state, &local, &remote).is_some());
+        assert!(Crossing::dial(&crossing, remote).is_none());
+        drop(queued);
+        assert!(Crossing::dial(&crossing, remote).is_some());
+    }
+
+    #[test]
+    fn idle_inbound_accepts_either_direction_and_busy_waits_have_a_strict_order() {
+        use super::*;
+        let state = Arc::new(Mutex::new(()));
+        let low = [1; 32];
+        let high = [2; 32];
+        assert!(inbound_guard(&state, &low, &high).is_some());
+        assert!(inbound_guard(&state, &high, &low).is_some());
+        let held = state.lock().unwrap();
+        assert!(inbound_guard(&state, &low, &high).is_none());
+        assert!(inbound_guard(&state, &low, &low).is_none());
+        let waiting = Arc::clone(&state);
+        let (send, received) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let guard = inbound_guard(&waiting, &high, &low);
+            send.send(guard.is_some()).unwrap();
+        });
+        assert!(matches!(
+            received.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        drop(held);
+        assert!(received.recv_timeout(Duration::from_secs(5)).unwrap());
+        worker.join().unwrap();
     }
 
     #[test]

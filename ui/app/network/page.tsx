@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { endpointKind, peerAddress } from "@/lib/addresses";
 import { useEffect, useMemo, useState } from "react";
 import {
   type FleetWorker,
@@ -90,7 +91,7 @@ export default function Page() {
       <>
         <PageHeader title="Network" subtitle={SUBTITLE} actions={<button className="btn btn-sm" onClick={() => void refresh()}>Retry</button>} />
         <Note title="Could not read this node" tone="bad">
-          {error}
+          The connection is unavailable. Try again, or <Link href="/diagnostics" className="text-accent underline">open Diagnostics</Link> for details.
         </Note>
       </>
     );
@@ -155,7 +156,7 @@ function Dashboard({
   const peerRows = sessions?.available ? sessions.peers : [];
   const connected = peerRows.filter((p) => p.status === "reached").length;
   const mcp = node.mcp;
-  const address = node.reach?.urls?.[0] ?? (node.reach?.bound ? `http://${node.reach.bound}` : null);
+  const shared = node.reach?.urls?.some((url) => endpointKind(url) === "address");
 
   return (
     <>
@@ -188,24 +189,17 @@ function Dashboard({
           )}
         </div>
         <dl className="kv self-start">
-          <dt>machines use</dt>
+          <dt>Availability</dt>
           <dd>
-            {address ? (
-              <span className="inline-flex items-center gap-1">
-                <span className="mono text-[12.5px]">{address}</span>
-                <CopyButton value={address} />
-              </span>
-            ) : (
-              <span className="text-ink-3">—</span>
-            )}
+            {shared ? "Shared on your network" : "This computer"}
             {node.reach && !node.reach.lan && (
               <div className="text-[11.5px] text-ink-3">this computer only; share it on your network on Contribute</div>
             )}
           </dd>
           {self?.listen && (
             <>
-              <dt>nodes dial</dt>
-              <dd className="mono text-[12.5px]">{self.listen}</dd>
+              <dt>Peer connections</dt>
+              <dd>{endpointKind(self.listen) === "local" ? "Outgoing connections" : "Accepting connections"}</dd>
             </>
           )}
           <dt>from outside</dt>
@@ -222,6 +216,8 @@ function Dashboard({
           )}
           <dt>version</dt>
           <dd className="mono text-[12.5px]">{network.version}</dd>
+          <dt>Troubleshooting</dt>
+          <dd><Link href="/diagnostics" className="text-accent hover:underline">Connection details →</Link></dd>
         </dl>
       </section>
 
@@ -496,8 +492,8 @@ function PeersTable({ sessions, announced, problem }: { sessions: SessionsRespon
   if (sessions.peers.length === 0) {
     return (
       <p className="px-4 py-6 text-[13px] text-ink-3">
-        No other node yet. It finds them through the seeds built into it, other nodes on this network,
-        and the address book ({announced} announced).
+        No other nodes reached yet. Peers will appear here as they connect.
+        {announced > 0 && <> The address book has {announced} announced.</>}
         {sessions.this_node && <> Up for {formatUptime(sessions.this_node.uptime_seconds)}.</>}
       </p>
     );
@@ -539,12 +535,12 @@ function PeerLine({ peer }: { peer: Session }) {
           {peer.age_seconds !== null && `, last ${peer.last_direction === "inbound" ? "from it" : "to it"}`}
         </div>
       </td>
-      <td className="mono px-3 py-2.5 text-ink-2">{peer.addr ?? "—"}</td>
+      <td className="px-3 py-2.5 text-ink-2"><span className="mono">{peerAddress(peer.addr)}</span>{endpointKind(peer.addr) === "address" && <CopyButton value={peer.addr!} />}</td>
       <td className="px-3 py-2.5">
         <PeerSays about={peer.about} />
       </td>
       <td className="px-4 py-2.5 text-[11.5px] text-ink-3" title={peer.last_failed_at ?? undefined}>
-        {peer.last_error ?? "—"}
+        {peer.last_error ? <Link href="/diagnostics" className="text-accent hover:underline">Connection details</Link> : "—"}
       </td>
     </tr>
   );

@@ -28,7 +28,7 @@ describe("agent stanzas", () => {
 describe("describePresence", () => {
   it("says who is attached, and why nobody can be", () => {
     expect(describePresence(undefined)).toMatch(/older/);
-    expect(describePresence({ serving: false })).toMatch(/^Not serving MCP/);
+    expect(describePresence({ serving: false })).toMatch(/^Agent connections are off/);
     const base = {
       serving: true as const,
       transport: "stdio",
@@ -41,9 +41,9 @@ describe("describePresence", () => {
       spend_limit: 0,
       prompts: [],
     };
-    expect(describePresence({ ...base, client: null })).toMatch(/no agent has said hello/);
+    expect(describePresence({ ...base, client: null })).toMatch(/No agent connected yet/);
     expect(describePresence({ ...base, client: { name: "claude-code", version: "2.1" } })).toBe(
-      "claude-code 2.1 is attached over MCP",
+      "claude-code 2.1 is connected",
     );
   });
 });

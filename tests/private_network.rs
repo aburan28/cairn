@@ -2,11 +2,14 @@
 //! leave a marker if invoked, so an offline-looking startup cannot hide a curl
 //! or Tailscale invocation that merely failed.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use cairn::canonical::Value;
@@ -33,23 +36,49 @@ impl Node {
 }
 
 fn scratch() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "cairn-private-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let dir = std::env::temp_dir().join(format!(
+            "cairn-private-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&dir) {
+            Ok(()) => return dir,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("cannot create {}: {error}", dir.display()),
+        }
+    }
+}
+
+fn unique_listener() -> TcpListener {
+    static ISSUED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+    let issued = ISSUED.get_or_init(|| Mutex::new(HashSet::new()));
+    loop {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        // Reserve every fixture port in one process-wide set, including trap
+        // listeners that stay bound. Otherwise a later trap can take a node's
+        // released address while that node is still starting, making the test
+        // report a false peer-policy violation (or Address already in use).
+        let first_issue = issued
+            .lock()
             .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&dir).unwrap();
-    dir
+            .insert(listener.local_addr().unwrap().port());
+        if first_issue {
+            return listener;
+        }
+    }
 }
 
 fn address() -> SocketAddr {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
+    let listener = unique_listener();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    address
 }
 
 fn command(dir: &Path) -> Command {
@@ -117,6 +146,11 @@ fn start(
     bootstrap: Option<&Path>,
     configure: impl FnOnce(&mut Command),
 ) -> Node {
+    assert_ne!(
+        p2p.port(),
+        http.port(),
+        "P2P and HTTP fixtures must not reserve the same port"
+    );
     helpers(&dir);
     let mut cmd = daemon_command(&dir);
     cmd.args([
@@ -199,6 +233,18 @@ fn wait_for(
         "node did not become ready: {}",
         fs::read_to_string(node.dir.join("stderr")).unwrap()
     );
+}
+
+#[test]
+fn concurrent_fixture_addresses_are_unique_until_child_spawn() {
+    let workers = (0..8)
+        .map(|_| std::thread::spawn(|| (0..16).map(|_| address().port()).collect::<Vec<_>>()))
+        .collect::<Vec<_>>();
+    let ports = workers
+        .into_iter()
+        .flat_map(|worker| worker.join().unwrap())
+        .collect::<HashSet<_>>();
+    assert_eq!(ports.len(), 8 * 16);
 }
 
 #[test]
@@ -288,6 +334,55 @@ fn explicitly_bootstrapped_private_nodes_reach_each_other() {
     for node in [&mut first, &mut second] {
         let network = wait_for(node, "/network", |_| true);
         assert_eq!(network["node"]["peers_policy"]["allowed"], 1);
+        wait_for(node, "/sessions", |value| {
+            value["reached"].as_u64().is_some_and(|n| n > 0)
+        });
+        assert!(!node.dir.join("helper-invoked").exists());
+    }
+}
+
+#[test]
+fn a_private_bootstrap_ring_makes_progress_without_a_cross_node_lock_cycle() {
+    let dirs = [scratch(), scratch(), scratch()];
+    let addresses = [address(), address(), address()];
+    let bootstraps = [
+        identity(&dirs[0], addresses[0]),
+        identity(&dirs[1], addresses[1]),
+        identity(&dirs[2], addresses[2]),
+    ];
+    let peers: Vec<_> = bootstraps
+        .iter()
+        .map(|path| {
+            let value: Value = Value::from_json(&fs::read_to_string(path).unwrap()).unwrap();
+            let public = cairn::p2p::handshake::PeerPublic::from_bytes(
+                &cairn::hex::decode(value.get("public").unwrap().as_str().unwrap()).unwrap(),
+            )
+            .unwrap();
+            cairn::hex::encode(&public.id())
+        })
+        .collect();
+    let mut nodes = Vec::new();
+    for i in 0..3 {
+        // All three are named members; only the next member is bootstrapped.
+        // The predecessor must be authorized to complete its inbound session.
+        let allowed = peers
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, id)| id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        nodes.push(start(
+            dirs[i].clone(),
+            addresses[i],
+            address(),
+            Some(&bootstraps[(i + 1) % 3]),
+            |cmd| {
+                cmd.env("CAIRN_PEERS", allowed);
+            },
+        ));
+    }
+    for node in &mut nodes {
         wait_for(node, "/sessions", |value| {
             value["reached"].as_u64().is_some_and(|n| n > 0)
         });
@@ -515,7 +610,7 @@ fn explicit_local_seeds_dial_only_allowed_identities() {
     let (first_p2p, second_p2p) = (address(), address());
     let first_bootstrap = identity(&first_dir, first_p2p);
     let second_bootstrap = identity(&second_dir, second_p2p);
-    let trap = TcpListener::bind("127.0.0.1:0").unwrap();
+    let trap = unique_listener();
     trap.set_nonblocking(true).unwrap();
     let stranger_bootstrap = identity(&stranger_dir, trap.local_addr().unwrap());
     let entry = |file: &Path, name: &str| {

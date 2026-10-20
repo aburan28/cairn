@@ -3798,6 +3798,19 @@ impl Node {
         None
     }
 
+    /// Whether the closed-epoch batch has made this accepted claim's payout final.
+    ///
+    /// A batch lists every accepted claim it considered, including duplicates
+    /// and exhausted piecework units that mint no settlement record. Looking
+    /// only for a settlement record leaves those final zero payouts looking
+    /// pending forever.
+    pub fn claim_batch_has_run(&self, claim_id: &str) -> bool {
+        self.ledger.entries_of_kind(BATCH).iter().any(|entry| {
+            matches!(entry.payload.get("claims"), Some(Value::Array(claims))
+                if claims.iter().any(|claim| claim.as_str() == Some(claim_id)))
+        })
+    }
+
     /// The current best-known score for a progressive objective.
     ///
     /// `None` also when the latest frontier entry cannot be decoded, which is
@@ -10454,8 +10467,12 @@ mod tests {
             .expect("reveal");
         assert!(alice.is_pending() && bob.is_pending());
         assert_eq!(node.ledger().entries_of_kind(SETTLEMENT).len(), 0);
+        assert!(!node.claim_batch_has_run(&alice.claim_id));
+        assert!(!node.claim_batch_has_run(&bob.claim_id));
 
         let batch = node.settle_at(&stamp(settle_offset())).expect("settle");
+        assert!(node.claim_batch_has_run(&alice.claim_id));
+        assert!(node.claim_batch_has_run(&bob.claim_id));
         assert_eq!(batch.len(), 2);
         let paid: Vec<&Outcome> = batch.iter().filter(|o| o.settled).collect();
         assert_eq!(paid.len(), 1, "{batch:?}");

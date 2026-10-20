@@ -97,6 +97,7 @@ cat >"$WORK/changelog.md" <<'EOF'
 EOF
 cat >"$WORK/assets.txt" <<'EOF'
 cairn-v1.4.0-macos-universal.dmg
+cairn-v1.4.0-x86_64-pc-windows-msvc.zip
 cairn-v1.4.0-x86_64-unknown-linux-musl.tar.gz
 cairn_1.4.0-1_amd64.deb
 cairn_1.4.0-1_arm64.deb
@@ -114,7 +115,7 @@ if [ "$(sed -n '1p' "$WORK/once.md")" = "$(sed -n '1p' "$WORK/changelog.md")" ];
 if cmp -s "$WORK/once.md" "$WORK/twice.md"; then ok "building a tag twice writes the same page"; else bad "a second run changed the page; it would grow on every rebuild"; fi
 if [ "$(grep -c 'cairn:install-notes' "$WORK/twice.md")" = "1" ]; then ok "one marker after two runs"; else bad "the install section stacked"; fi
 if grep -q 'Not in this release' "$WORK/once.md"; then bad "a complete release was described as missing something"; else ok "a complete release names nothing as missing"; fi
-for file in cairn-v1.4.0-macos-universal.dmg cairn_1.4.0-1_arm64.deb cairn-1.4.0-1.aarch64.rpm; do
+for file in cairn-v1.4.0-macos-universal.dmg cairn-v1.4.0-x86_64-pc-windows-msvc.zip cairn_1.4.0-1_arm64.deb cairn-1.4.0-1.aarch64.rpm; do
     if grep -q "releases/download/v1.4.0/$file" "$WORK/once.md"; then ok "links $file"; else bad "no link to $file"; fi
 done
 
