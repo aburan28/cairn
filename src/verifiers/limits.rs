@@ -671,17 +671,19 @@ mod tests {
     fn a_busy_child_is_measured_in_real_nanoseconds() {
         use std::process::Command;
         let mut child = Command::new("/bin/sh")
-            .args(["-c", "i=0; while [ $i -lt 2000000 ]; do i=$((i+1)); done"])
+            .args(["-c", "i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done"])
             .spawn()
             .expect("spawn sh");
         let pid = i32::try_from(child.id()).expect("pid");
         let started = Instant::now();
         let mut last = 0u64;
-        while started.elapsed() < Duration::from_millis(600) {
+        let mut completed = false;
+        while started.elapsed() < Duration::from_secs(20) {
             if let Some(proc) = platform::tree(pid).into_iter().find(|p| p.pid == pid) {
                 last = proc.cpu_ns;
             }
             if child.try_wait().expect("wait").is_some() {
+                completed = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -689,17 +691,20 @@ mod tests {
         let wall = started.elapsed();
         let _ = child.kill();
         let _ = child.wait();
-        // One busy process: its CPU time cannot exceed the wall time it had,
-        // and on any machine that is not badly oversubscribed it is most of
-        // it. A 24x unit error lands far outside both bounds.
+        assert!(completed, "busy child did not complete within 20 s");
+        // One busy process cannot use more CPU than elapsed wall time. Wait
+        // for a fixed amount of shell work rather than requiring a fixed CPU
+        // share of 600 ms: on a busy CI host a correctly measured child may
+        // receive under one eighth of that interval. The shorter loop still
+        // costs far over 75 ms of CPU; a 24x unit error lands below it.
         let wall_ns = u64::try_from(wall.as_nanos()).unwrap_or(u64::MAX);
         assert!(
             last <= wall_ns + 50_000_000,
             "cpu {last} ns > wall {wall_ns} ns"
         );
         assert!(
-            last >= wall_ns / 8,
-            "cpu {last} ns is implausibly small for {wall_ns} ns"
+            last >= 75_000_000,
+            "cpu {last} ns is implausibly small for the completed shell loop"
         );
     }
 }

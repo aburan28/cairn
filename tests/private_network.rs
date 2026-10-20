@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -35,33 +36,49 @@ impl Node {
 }
 
 fn scratch() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "cairn-private-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&dir).unwrap();
-    dir
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let dir = std::env::temp_dir().join(format!(
+            "cairn-private-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&dir) {
+            Ok(()) => return dir,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("cannot create {}: {error}", dir.display()),
+        }
+    }
 }
 
-fn address() -> SocketAddr {
+fn unique_listener() -> TcpListener {
     static ISSUED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
     let issued = ISSUED.get_or_init(|| Mutex::new(HashSet::new()));
     loop {
-        // The child must bind this address after this listener is dropped.
-        // Never hand the same released ephemeral port to another parallel
-        // fixture while the first child is still starting.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let first_issue = issued.lock().unwrap().insert(address.port());
-        drop(listener);
+        // Reserve every fixture port in one process-wide set, including trap
+        // listeners that stay bound. Otherwise a later trap can take a node's
+        // released address while that node is still starting, making the test
+        // report a false peer-policy violation (or Address already in use).
+        let first_issue = issued
+            .lock()
+            .unwrap()
+            .insert(listener.local_addr().unwrap().port());
         if first_issue {
-            return address;
+            return listener;
         }
     }
+}
+
+fn address() -> SocketAddr {
+    let listener = unique_listener();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    address
 }
 
 fn command(dir: &Path) -> Command {
@@ -593,7 +610,7 @@ fn explicit_local_seeds_dial_only_allowed_identities() {
     let (first_p2p, second_p2p) = (address(), address());
     let first_bootstrap = identity(&first_dir, first_p2p);
     let second_bootstrap = identity(&second_dir, second_p2p);
-    let trap = TcpListener::bind("127.0.0.1:0").unwrap();
+    let trap = unique_listener();
     trap.set_nonblocking(true).unwrap();
     let stranger_bootstrap = identity(&stranger_dir, trap.local_addr().unwrap());
     let entry = |file: &Path, name: &str| {
