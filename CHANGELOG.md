@@ -1,6 +1,8 @@
 # Changelog
 
-## [13.0.0](https://github.com/aburan28/cairn/compare/v12.2.0...v13.0.0) (2026-10-20)
+## [13.0.0](https://github.com/aburan28/cairn/compare/v12.1.0...v13.0.0) (2026-10-20)
+
+This release includes the accumulated changes previously listed under the unpublished 12.2.0 draft below. The comparison starts at v12.1.0, the latest published tag.
 
 
 ### ⚠ BREAKING CHANGES
@@ -239,7 +241,7 @@
 * what erasure coding prices about identity, and what it does not ([f836a92](https://github.com/aburan28/cairn/commit/f836a92deee091a38504b70b63116ce7e216d310))
 * what erasure coding prices about identity, and what it does not ([f6eefbf](https://github.com/aburan28/cairn/commit/f6eefbf9d30eb8c234f101a70bb827d15e521fa7))
 
-## [12.2.0](https://github.com/aburan28/cairn/compare/v12.1.0...v12.2.0) (2026-10-17)
+## 12.2.0 (unpublished draft, 2026-10-17; entries retained for history)
 
 
 ### Features
