@@ -7,16 +7,16 @@ import XCTest
 final class WorkTests: XCTestCase {
     private let objective = "sha256:" + String(repeating: "ab", count: 32)
 
-    func testThePlanIsTheCommandTheContributePageUsedToPrint() {
+    func testThePlanRunsThePublishedSolverAndNamesNoProgram() {
         let plan = WorkPlan(node: "http://127.0.0.1:8080", objective: objective, worker: "garage-gpu",
-                            identity: "/Users/x/Library/Application Support/Cairn/worker.identity.json",
-                            solver: "/Users/x/solver", solverArguments: ["--threads", "8"])
+                            identity: "/Users/x/Library/Application Support/Cairn/worker.identity.json")
         XCTAssertEqual(plan.arguments, [
             "work", "--node", "http://127.0.0.1:8080", "--objective", objective,
             "--worker", "garage-gpu", "--heartbeat", "5",
             "--identity", "/Users/x/Library/Application Support/Cairn/worker.identity.json",
-            "--", "/Users/x/solver", "--threads", "8",
+            "--package", "auto",
         ])
+        XCTAssertFalse(plan.arguments.contains("--"), "nothing after `--`: the sheet never names an executable")
         XCTAssertFalse(plan.arguments.contains("--submitter"), "a worker on the leader's own Mac is paid to its own key")
         var safelyStopped = plan
         safelyStopped.stopFile = "/tmp/cairn-stop-unique"
@@ -25,24 +25,18 @@ final class WorkTests: XCTestCase {
         if let flag { XCTAssertEqual(safelyStopped.arguments[flag + 1], "/tmp/cairn-stop-unique") }
         safelyStopped.pauseFile = "/tmp/cairn-pause-unique"
         safelyStopped.threads = 4
-        safelyStopped.gpus = "0,1"
         safelyStopped.hoursPerDay = 6
         XCTAssertTrue(safelyStopped.arguments.contains("--pause-file"))
         XCTAssertTrue(safelyStopped.arguments.contains("--threads"))
-        XCTAssertTrue(safelyStopped.arguments.contains("--gpus"))
         XCTAssertTrue(safelyStopped.arguments.contains("--hours-per-day"))
-        let unsigned = WorkPlan(node: "http://h:1", objective: objective, worker: "w", identity: nil, solver: "/s")
+        XCTAssertEqual(safelyStopped.arguments.suffix(2), ["--package", "auto"])
+        let unsigned = WorkPlan(node: "http://h:1", objective: objective, worker: "w", identity: nil)
         XCTAssertEqual(unsigned.arguments, ["work", "--node", "http://h:1", "--objective", objective,
-                                          "--worker", "w", "--heartbeat", "5", "--", "/s"])
+                                          "--worker", "w", "--heartbeat", "5", "--package", "auto"])
     }
 
-    func testThePlanRefusesWhatCairnWorkWouldRefuse() throws {
-        let solver = FileManager.default.temporaryDirectory.appendingPathComponent("cairn-solver-\(UUID())")
-        try Data("#!/bin/sh\n".utf8).write(to: solver)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: solver.path)
-        defer { try? FileManager.default.removeItem(at: solver) }
-
-        var plan = WorkPlan(node: "http://127.0.0.1:8080", objective: objective, worker: "w", identity: nil, solver: solver.path)
+    func testThePlanRefusesWhatCairnWorkWouldRefuse() {
+        var plan = WorkPlan(node: "http://127.0.0.1:8080", objective: objective, worker: "w", identity: nil)
         XCTAssertNil(plan.problem)
         plan.node = "127.0.0.1:8080"
         XCTAssertNotNil(plan.problem, "a node is dialled by URL")
@@ -53,9 +47,9 @@ final class WorkTests: XCTestCase {
         plan.worker = ""
         XCTAssertNotNil(plan.problem)
         plan.worker = "w"
-        plan.solver = solver.path + ".missing"
-        XCTAssertNotNil(plan.problem, "a solver that is not there would fail every round")
-        plan.solver = solver.path
+        plan.package = "/usr/local/bin/anything"
+        XCTAssertNotNil(plan.problem, "a package is `auto` or an id, never a path")
+        plan.package = "auto"
         plan.threads = 0
         XCTAssertNotNil(plan.problem)
         plan.threads = 2
@@ -73,14 +67,6 @@ final class WorkTests: XCTestCase {
         XCTAssertEqual(WorkPlan.defaultName(host: ""), "this-mac")
     }
 
-    func testSolverArgumentsSplitLikeAShellWouldWithoutBeingOne() {
-        XCTAssertEqual(WorkPlan.splitArguments(""), [])
-        XCTAssertEqual(WorkPlan.splitArguments("  --threads 8 "), ["--threads", "8"])
-        XCTAssertEqual(WorkPlan.splitArguments("--name 'my solver' --x \"a b\""), ["--name", "my solver", "--x", "a b"])
-        XCTAssertEqual(WorkPlan.splitArguments("''"), [""], "an empty quoted argument is still an argument")
-        XCTAssertEqual(WorkPlan.splitArguments("$HOME/x"), ["$HOME/x"], "nothing is expanded; nothing here goes through a shell")
-    }
-
     func testTheObjectiveListIsTheNodesOpenOnes() {
         let body: [String: Any] = ["objectives": [
             ["id": objective, "goal": "GOAL-ecc2k-130", "statement": "Find the private key for the ECC2K-130 challenge curve. Details follow.", "open": true],
@@ -94,6 +80,26 @@ final class WorkTests: XCTestCase {
         XCTAssertEqual(listed[1].title, "x", "a goal slug without its prefix when the statement is empty")
         XCTAssertFalse(listed[1].open, "`settled` is read when a node older than `open` answers")
         XCTAssertEqual(WorkObjective.title(goal: nil, statement: nil, id: objective), "abababab…abab")
+    }
+
+    func testAnObjectiveCanBeStartedOnlyWhenItsSolverIsReadyHere() {
+        let package = "sha256:" + String(repeating: "ef", count: 32)
+        let body: [String: Any] = ["objectives": [
+            ["id": objective, "statement": "Ready.", "open": true,
+             "solver": ["package": package, "name": "orbit-walk", "version": "1.0.0", "pinned": true, "ready": true]],
+            ["id": "sha256:" + String(repeating: "01", count: 32), "statement": "Pinned elsewhere.", "open": true,
+             "solver": ["package": package, "pinned": true, "ready": false]],
+            ["id": "sha256:" + String(repeating: "02", count: 32), "statement": "Nothing.", "open": true,
+             "solver": NSNull()],
+            ["id": "sha256:" + String(repeating: "03", count: 32), "statement": "A path is not a package.", "open": true,
+             "solver": ["package": "/bin/sh", "ready": true]],
+        ]]
+        let listed = WorkObjective.parse(body)
+        XCTAssertEqual(listed.map(\.canStart), [true, false, false, false])
+        XCTAssertEqual(listed[0].workerLabel, "orbit-walk 1.0.0")
+        XCTAssertEqual(listed[1].workerLabel, "solver not on this node")
+        XCTAssertEqual(listed[2].workerLabel, "no published solver")
+        XCTAssertNil(listed[3].solver, "only a package id is a solver; anything else runs nothing")
     }
 
     // MARK: the reader's page

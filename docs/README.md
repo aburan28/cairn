@@ -60,6 +60,9 @@ The six pages a user needs and nothing else in this repository provides.
   statement is untrusted input.
 - [verification.md](verification.md) — the verification ladder, and how to
   author a verifier whose verdict anybody can reproduce.
+- [solvers.md](solvers.md) — solver packages: the `cairn-solver/v1` interface
+  an objective's author implements, the tests it has to pass, and the sandbox
+  it runs in on a contributor's machine, so contributing is one button.
 - [agent.md](agent.md) — `cairn agent`: the host agent that probes a
   machine's CPUs, memory and GPUs, registers them with a node over
   `POST /hosts`, runs executor jobs under gVisor or Kata Containers with a

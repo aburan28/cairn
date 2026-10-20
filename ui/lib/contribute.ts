@@ -85,7 +85,7 @@ export const ROLES: RoleInfo[] = [
   {
     id: "compute",
     title: "Offer compute",
-    does: "Put machines to work on an objective: each takes its own slice and runs a solver you supply.",
+    does: "Put machines to work on an objective: each takes its own slice and runs the challenge's published solver.",
     pay: "paid",
     payDetail:
       "For what the machines find, exactly as a solver is: per accepted answer, or per new unit on a divided search. Idle time is not paid, because nothing in the log can show it was spent.",

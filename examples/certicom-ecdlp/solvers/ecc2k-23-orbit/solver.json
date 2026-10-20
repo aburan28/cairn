@@ -1,0 +1,192 @@
+{
+  "abi": "cairn-solver/v1",
+  "files": {
+    "jobs/ecc2k-23.json": {
+      "sha256": "72c83d28e6bd8c3c31b9e1b01d4225c1a6c3a15147c37b8bc4ae5b4fd5826ced",
+      "size": 582
+    },
+    "orbit_dp.py": {
+      "sha256": "3dd02384cd527594c4573af0ccfca2183c2cf5f84beb2d344e2bf7f86faac432",
+      "size": 60667
+    },
+    "orbit_solver.py": {
+      "sha256": "c0de030ea046d79fee0e0b0bfb98087b6d73b0e7981805dd499417ebbfbe56d9",
+      "size": 2644
+    }
+  },
+  "name": "ecc2k-23-orbit-walk",
+  "objective": "sha256:223a649828de7d0f031a28383b444d29e0481a54a2a26b6b45501ec9ab7f0d44",
+  "resources": {
+    "memory_mb": 256,
+    "round_seconds": 120
+  },
+  "summary": "Walks four Pollard-rho trails per round on the 21-bit Koblitz instance, from the unit this round of the worker's slice selects, and submits the distinguished orbits they reach. Python standard library only; one core.",
+  "targets": {
+    "python3": {
+      "args": [
+        "--job",
+        "jobs/ecc2k-23.json",
+        "--count",
+        "4"
+      ],
+      "entry": "orbit_solver.py"
+    }
+  },
+  "tests": [
+    {
+      "assignment": {
+        "epoch": 1,
+        "epoch_ends_in_seconds": 300,
+        "units": {
+          "end": 64,
+          "first": 0,
+          "of": 4096,
+          "unit_price": 100
+        }
+      },
+      "expect": [
+        {
+          "dps": [
+            {
+              "j": [
+                1,
+                0,
+                0,
+                0,
+                0,
+                2,
+                3,
+                2
+              ],
+              "seed": "0",
+              "x": "51549"
+            },
+            {
+              "j": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0
+              ],
+              "seed": "1",
+              "x": "6b15"
+            },
+            {
+              "j": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0
+              ],
+              "seed": "2",
+              "x": "20b05"
+            },
+            {
+              "j": [
+                1,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1,
+                1
+              ],
+              "seed": "3",
+              "x": "19163"
+            }
+          ]
+        }
+      ],
+      "name": "first unit of a slice",
+      "round": 0,
+      "verify": "accept"
+    },
+    {
+      "assignment": {
+        "epoch": 1,
+        "epoch_ends_in_seconds": 300,
+        "units": {
+          "end": 64,
+          "first": 0,
+          "of": 4096,
+          "unit_price": 100
+        }
+      },
+      "expect": [
+        {
+          "dps": [
+            {
+              "j": [
+                1,
+                0,
+                0,
+                0,
+                0,
+                1,
+                2,
+                0
+              ],
+              "seed": "10000",
+              "x": "31a13"
+            },
+            {
+              "j": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                7,
+                5,
+                2
+              ],
+              "seed": "10001",
+              "x": "af11"
+            },
+            {
+              "j": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                4,
+                2,
+                1
+              ],
+              "seed": "10002",
+              "x": "19067"
+            },
+            {
+              "j": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "seed": "10003",
+              "x": "b045"
+            }
+          ]
+        }
+      ],
+      "name": "the round picks the unit",
+      "round": 1,
+      "verify": "accept"
+    }
+  ],
+  "version": "1.0.0"
+}

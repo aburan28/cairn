@@ -66,29 +66,29 @@ describe("WorkPanel in a browser tab", () => {
   });
 
   it("shows no app controls, since a tab cannot start a process", async () => {
-    await render(<WorkPanel objective="sha256:a" base="" onChooseSolver={() => {}} />);
+    await render(<WorkPanel objective="sha256:a" base="" onConfigureWorker={() => {}} />);
     expect(container.querySelectorAll("button")).toHaveLength(0);
   });
 });
 
 describe("WorkPanel inside Cairn.app", () => {
-  it("puts the solver choice beside Set up & start", async () => {
+  it("puts worker settings beside Set up & start", async () => {
     installApp({ state: "idle" });
-    const onChooseSolver = vi.fn();
-    await render(<WorkPanel objective="sha256:a" base="" embedded onChooseSolver={onChooseSolver} />);
+    const onConfigureWorker = vi.fn();
+    await render(<WorkPanel objective="sha256:a" base="" embedded onConfigureWorker={onConfigureWorker} />);
     const start = button("Set up & start");
-    const solver = button("Solver…");
+    const settings = button("Worker settings…");
     expect(start).toBeDefined();
-    expect(solver?.parentElement).toBe(start?.parentElement);
-    await act(async () => solver!.click());
-    expect(onChooseSolver).toHaveBeenCalledOnce();
+    expect(settings?.parentElement).toBe(start?.parentElement);
+    await act(async () => settings!.click());
+    expect(onConfigureWorker).toHaveBeenCalledOnce();
   });
 
-  it("omits the solver button where the page does not ask for it", async () => {
+  it("omits worker settings where the page does not ask for them", async () => {
     installApp({ state: "idle" });
     await render(<WorkPanel objective="sha256:a" base="" />);
     expect(button("Set up & start")).toBeDefined();
-    expect(button("Solver…")).toBeUndefined();
+    expect(button("Worker settings…")).toBeUndefined();
   });
 
   it("starts work on the panel's goal through the app", async () => {

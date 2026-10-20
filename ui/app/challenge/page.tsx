@@ -755,12 +755,13 @@ function WorkOnThis({
     <Box title="Join this challenge" className="scroll-mt-4" id="join">
       <div className="flex flex-col gap-4">
         <p className="text-[12.5px] text-ink-2">
-          A worker takes a slice of this goal, runs the solver you choose in Cairn.app,
-          and sends answers to this challenge's checker. {piecework
+          A worker takes a slice of this goal, runs the solver its author published, in a
+          sandbox on your Mac, and sends answers to this challenge's checker. There is no
+          program to choose. {piecework
             ? "Different machines can work different slices at the same time."
             : "The checker decides whether an answer moves the result forward."}
         </p>
-        <WorkPanel objective={id} base={base ?? ""} onChooseSolver={bridge ? configureWorker : undefined} />
+        <WorkPanel objective={id} base={base ?? ""} onConfigureWorker={bridge ? configureWorker : undefined} />
         {appError && <p className="text-[12px] text-warn" role="alert">{appError}</p>}
         <div className="border-t border-edge pt-4">
           <h3 className="text-[13px] font-semibold text-ink">Solve with an agent</h3>

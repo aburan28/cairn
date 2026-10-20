@@ -1178,6 +1178,55 @@ final class Node: ObservableObject {
         }
     }
 
+    /// File solver packages in this node's store with `cairn solver add`, so
+    /// the objectives they were written for can be started from Share this
+    /// Mac… with nothing to choose. `cairn` runs each package's tests in the
+    /// sandbox first and refuses one that fails them, and that refusal is
+    /// what this reports. Only reads the log, so the node keeps running.
+    func addSolvers(at directories: [String], completion: @escaping (String?) -> Void) {
+        guard !directories.isEmpty else {
+            completion(nil)
+            return
+        }
+        guard !isAttached || runsInBackground else {
+            completion("This window is attached to another node; its solvers are its operator's to add.")
+            return
+        }
+        guard let binary = binary ?? Self.locateBinary() else {
+            completion("No cairn command was found.")
+            return
+        }
+        let log = dataDir.appendingPathComponent("log/cairn.jsonl")
+        let root = dataDir.path
+        // The same environment a worker gets, so the tests find the python3
+        // a worker's rounds will run under.
+        let environment = Self.childEnvironment(settings)
+        DispatchQueue.global(qos: .userInitiated).async {
+            var lastError: String?
+            for directory in directories {
+                let p = Process()
+                p.executableURL = binary
+                p.arguments = ["--log", log.path, "--root", root, "solver", "add", directory]
+                p.environment = environment
+                let out = Pipe()
+                p.standardOutput = out
+                p.standardError = out
+                do { try p.run() } catch {
+                    lastError = error.localizedDescription
+                    break
+                }
+                let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                p.waitUntilExit()
+                if p.terminationStatus != 0 {
+                    let said = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    lastError = said.isEmpty ? "cairn solver add exited with status \(p.terminationStatus)" : said
+                    break
+                }
+            }
+            DispatchQueue.main.async { completion(lastError) }
+        }
+    }
+
     /// Announce a peer in the log with `cairn peer`. The log has one writer,
     /// so a running node is stopped for the command and started again after.
     func announcePeer(transport: String, addr: String, completion: @escaping (String?) -> Void) {

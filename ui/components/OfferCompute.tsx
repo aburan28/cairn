@@ -58,8 +58,8 @@ export function OfferCompute({
   return (
     <div className="flex flex-col gap-4 text-[13px]">
       <p className="leading-relaxed text-ink-2">
-        Pick an open goal, then start a worker on this Mac. The worker takes a slice of the search, runs the solver you
-        chose in Cairn.app, and sends its answers for checking.
+        Pick an open goal, then start a worker on this Mac. The worker takes a slice of the search, runs the challenge's
+        published solver in a sandbox, and sends its answers for checking.
       </p>
 
       {chosen ? (
@@ -81,7 +81,7 @@ export function OfferCompute({
             objective={chosen.id}
             base={origin}
             embedded
-            onChooseSolver={bridge && !busy ? () => onWork(chosen.id) : undefined}
+            onConfigureWorker={bridge && !busy ? () => onWork(chosen.id) : undefined}
           />
         </>
       ) : (

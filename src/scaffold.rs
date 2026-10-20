@@ -605,7 +605,7 @@ fn todo_for(request: &Request) -> Vec<String> {
 /// Not [`Value::canonical_string`]: that is the consensus encoding, and these
 /// are files a person edits. The record's id is computed from the canonical
 /// form of what is *parsed back*, so whitespace here changes nothing.
-fn pretty(value: &Value) -> String {
+pub(crate) fn pretty(value: &Value) -> String {
     let mut out = String::new();
     write_pretty(&mut out, value, 0);
     out.push('\n');

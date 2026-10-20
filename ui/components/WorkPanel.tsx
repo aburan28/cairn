@@ -12,19 +12,19 @@ import { Badge } from "@/components/ui";
  *
  * The panel draws no outer margin; its caller spaces it. In a browser tab it
  * links to Contribute with this goal already chosen, except where `embedded`
- * says it is already inside that sheet. `onChooseSolver` puts the app's
- * solver sheet beside Start, so the two controls that set a worker up sit
+ * says it is already inside that sheet. `onConfigureWorker` puts the app's
+ * resource settings beside Start, so the two controls that set a worker up sit
  * together. */
 export function WorkPanel({
   objective,
   base,
   embedded = false,
-  onChooseSolver,
+  onConfigureWorker,
 }: {
   objective: string;
   base: string;
   embedded?: boolean;
-  onChooseSolver?: () => void;
+  onConfigureWorker?: () => void;
 }) {
   const [bridge, setBridge] = useState<Bridge | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
@@ -120,12 +120,12 @@ export function WorkPanel({
                 <button className="btn btn-sm" type="button" disabled={busy || draining} onClick={() => void act(paused || pausing ? "resume" : "pause")}>{paused || pausing ? "Resume" : "Pause"}</button>
                 <button className="btn btn-sm" type="button" disabled={busy || draining} onClick={() => void act("stop")}>{draining ? "Finishing safely…" : "Stop"}</button>
                 <button className="btn btn-sm" type="button" disabled={busy || status?.leaving} onClick={() => void act("exit")}>Exit task</button>
-                {onChooseSolver && <button className="btn btn-sm" type="button" disabled={busy} onClick={onChooseSolver}>Solver…</button>}
+                {onConfigureWorker && <button className="btn btn-sm" type="button" disabled={busy} onClick={onConfigureWorker}>Worker settings…</button>}
               </>
             ) : (
               <>
                 <button className="btn btn-primary btn-sm" type="button" disabled={busy || !objective || !supported} onClick={() => void act("start")}>Set up &amp; start</button>
-                {onChooseSolver && <button className="btn btn-sm" type="button" disabled={busy} onClick={onChooseSolver}>Solver…</button>}
+                {onConfigureWorker && <button className="btn btn-sm" type="button" disabled={busy} onClick={onConfigureWorker}>Worker settings…</button>}
                 {status?.state === "exited" && <button className="btn btn-sm" type="button" disabled={busy} onClick={() => void act("exit")}>Exit task</button>}
               </>
             )}

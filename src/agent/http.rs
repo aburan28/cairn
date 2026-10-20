@@ -155,6 +155,17 @@ pub fn post_json_as(
     request(url, "POST", path, Some(body), member, timeout)
 }
 
+/// `GET` of raw bytes, with the caller's own ceiling: a solver package's file
+/// may be larger than any JSON answer, and its pin already says how large.
+pub fn get_bytes(
+    url: &NodeUrl,
+    path: &str,
+    cap: u64,
+    timeout: Duration,
+) -> Result<(u16, Vec<u8>), AgentError> {
+    request_raw(url, "GET", path, None, None, timeout, cap)
+}
+
 fn request(
     url: &NodeUrl,
     method: &str,
@@ -163,6 +174,26 @@ fn request(
     member: Option<&MemberFile>,
     timeout: Duration,
 ) -> Result<Response, AgentError> {
+    let (status, raw) = request_raw(url, method, path, body, member, timeout, MAX_RESPONSE_BYTES)?;
+    let text = String::from_utf8_lossy(&raw);
+    let body = if text.trim().is_empty() {
+        Value::Null
+    } else {
+        Value::from_json(&text)
+            .unwrap_or_else(|_| Value::object([("error", Value::string(text.trim().to_string()))]))
+    };
+    Ok(Response { status, body })
+}
+
+fn request_raw(
+    url: &NodeUrl,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    member: Option<&MemberFile>,
+    timeout: Duration,
+    cap: u64,
+) -> Result<(u16, Vec<u8>), AgentError> {
     let mut stream = url.resolve(timeout)?;
     stream
         .set_read_timeout(Some(timeout))
@@ -233,9 +264,9 @@ fn request(
     // aborted the agent. Nothing a node answers this client is near the cap.
     let mut raw = Vec::new();
     match length {
-        Some(n) if n as u64 > MAX_RESPONSE_BYTES => {
+        Some(n) if n as u64 > cap => {
             return Err(AgentError::Node(format!(
-                "{}: a {n}-byte answer is past this client's {MAX_RESPONSE_BYTES}-byte cap",
+                "{}: a {n}-byte answer is past this client's {cap}-byte cap",
                 url.original
             )));
         }
@@ -248,25 +279,18 @@ fn request(
         None => {
             reader
                 .by_ref()
-                .take(MAX_RESPONSE_BYTES + 1)
+                .take(cap.saturating_add(1))
                 .read_to_end(&mut raw)
                 .map_err(|e| AgentError::Node(format!("{}: body: {e}", url.original)))?;
-            if raw.len() as u64 > MAX_RESPONSE_BYTES {
+            if raw.len() as u64 > cap {
                 return Err(AgentError::Node(format!(
-                    "{}: answer past this client's {MAX_RESPONSE_BYTES}-byte cap",
+                    "{}: answer past this client's {cap}-byte cap",
                     url.original
                 )));
             }
         }
     }
-    let text = String::from_utf8_lossy(&raw);
-    let body = if text.trim().is_empty() {
-        Value::Null
-    } else {
-        Value::from_json(&text)
-            .unwrap_or_else(|_| Value::object([("error", Value::string(text.trim().to_string()))]))
-    };
-    Ok(Response { status, body })
+    Ok((status, raw))
 }
 
 /// `HTTP/1.1 202 Accepted` -> 202.

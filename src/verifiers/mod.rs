@@ -3292,7 +3292,7 @@ fn version_of(binary: &Path) -> Option<String> {
     probed
 }
 
-fn which(binary: &str) -> Option<PathBuf> {
+pub(crate) fn which(binary: &str) -> Option<PathBuf> {
     if binary.is_empty() {
         return None;
     }
@@ -3341,14 +3341,14 @@ fn is_executable_file(path: &Path) -> bool {
 /// minimum that is correct: a unique name, private permissions on unix, and
 /// cleanup in `Drop` so no error path leaks a directory.
 #[derive(Debug)]
-struct TempDir {
+pub(crate) struct TempDir {
     path: PathBuf,
 }
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl TempDir {
-    fn new(prefix: &str) -> io::Result<TempDir> {
+    pub(crate) fn new(prefix: &str) -> io::Result<TempDir> {
         let base = std::env::temp_dir();
         let pid = std::process::id();
         for attempt in 0..64u32 {
@@ -3370,7 +3370,7 @@ impl TempDir {
         ))
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 }
@@ -3405,14 +3405,14 @@ pub enum LeanCompile {
 
 /// What a finished child produced. `code` is `None` if it died on a signal.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Completed {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
+pub(crate) struct Completed {
+    pub(crate) code: Option<i32>,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 #[derive(Debug)]
-enum RunFailure {
+pub(crate) enum RunFailure {
     /// The child never started -- usually a missing binary.
     Spawn(io::Error),
     /// The plumbing around the child failed.
@@ -3500,7 +3500,7 @@ fn read_scratch_file(path: &Path) -> io::Result<Vec<u8>> {
 ///
 /// `limits` is what the same loop holds the child's process tree to while it
 /// waits: a CPU cap and, on macOS, a memory cap. See [`limits`].
-fn run_bounded(
+pub(crate) fn run_bounded(
     command: &mut Command,
     workdir: &Path,
     stdin: Option<&[u8]>,

@@ -1,0 +1,32 @@
+{
+  "a": "0",
+  "b": "1",
+  "cofactor": 4,
+  "dp_max_weight": 8,
+  "family": "koblitz-frobenius-rho",
+  "frobenius_eigenvalue": "16c0a",
+  "generator": {
+    "x": "727a76",
+    "y": "5e8aa9"
+  },
+  "j_base": 3,
+  "j_count": 8,
+  "m": 23,
+  "max_batch": 16,
+  "max_steps_per_walker": 0,
+  "name": "cairn ecc2k-23 orbit rho",
+  "nb_generator": "74f49b",
+  "order": "1ffaed",
+  "poly": "800021",
+  "seed": 0,
+  "start_terms": 128,
+  "target": {
+    "x": "4ae2f4",
+    "y": "1b763"
+  },
+  "trail_bits": 16,
+  "unit_size": 256,
+  "units": 4096,
+  "version": 2,
+  "witness": "j-counts"
+}

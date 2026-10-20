@@ -27,6 +27,11 @@ const CAPABILITIES_KEY: &str = "capabilities";
 pub enum WorkerRequirement {
     /// A worker integration identified by a stable app-local name.
     BuiltIn { id: String },
+    /// A solver package the objective pins by id (`sha256:` of its canonical
+    /// manifest; see [`crate::solver`]). `cairn work --package auto` fetches
+    /// it, checks every file against the pin, runs its tests and then runs it
+    /// in the sandbox, so nobody has to choose a program to contribute.
+    Package { id: String },
     /// The operator must provide a compatible worker or solver.
     External,
 }
@@ -35,14 +40,17 @@ impl WorkerRequirement {
     pub fn mode(&self) -> &'static str {
         match self {
             Self::BuiltIn { .. } => "built_in",
+            Self::Package { .. } => "package",
             Self::External => "external",
         }
     }
 
     pub fn to_value(&self) -> Value {
         let mut fields = vec![("mode", Value::string(self.mode()))];
-        if let Self::BuiltIn { id } = self {
-            fields.push(("id", Value::string(id.clone())));
+        match self {
+            Self::BuiltIn { id } => fields.push(("id", Value::string(id.clone()))),
+            Self::Package { id } => fields.push(("package", Value::string(id.clone()))),
+            Self::External => {}
         }
         Value::object(fields)
     }
@@ -241,6 +249,19 @@ impl ObjectiveCapabilities {
             {
                 match worker.get("id").and_then(Value::as_str) {
                     Some(id) if !id.is_empty() => WorkerRequirement::BuiltIn { id: id.into() },
+                    _ => WorkerRequirement::External,
+                }
+            }
+            // A pin that is not a package id is a typo, and a typo must not
+            // become "run something": it falls back to external, like every
+            // other malformed hint here.
+            Some(Value::Object(worker))
+                if worker.get("mode").and_then(Value::as_str) == Some("package") =>
+            {
+                match worker.get("package").and_then(Value::as_str) {
+                    Some(id) if crate::solver::manifest::is_record_id(id) => {
+                        WorkerRequirement::Package { id: id.into() }
+                    }
                     _ => WorkerRequirement::External,
                 }
             }
@@ -496,5 +517,34 @@ mod tests {
         assert_eq!(capabilities.assignment, AssignmentMode::Queued);
         assert_eq!(capabilities.resources.cpus, Some(4));
         assert_eq!(capabilities.resources.memory_mb, Some(1024));
+    }
+
+    #[test]
+    fn a_pinned_solver_package_is_read_and_a_malformed_pin_runs_nothing() {
+        let with = |worker: &str| {
+            let objective = Objective::from_value(&Value::from_json(&format!(
+                r#"{{"goal":"g","statement":"s","verifier":{{"kind":"certificate","capabilities":{{"worker":{worker}}}}},"reward":1,"funder":"f","created_at":"2026-01-01T00:00:00Z"}}"#
+            )).unwrap()).unwrap();
+            ObjectiveCapabilities::for_objective(&objective).worker
+        };
+        let id = format!("sha256:{}", "ab".repeat(32));
+        assert_eq!(
+            with(&format!(r#"{{"mode":"package","package":"{id}"}}"#)),
+            WorkerRequirement::Package { id: id.clone() }
+        );
+        assert_eq!(
+            WorkerRequirement::Package { id: id.clone() }.to_value(),
+            Value::object([
+                ("mode", Value::string("package")),
+                ("package", Value::string(id))
+            ])
+        );
+        for bad in [
+            r#"{"mode":"package"}"#,
+            r#"{"mode":"package","package":"../../bin/sh"}"#,
+            r#"{"mode":"package","package":"sha256:ABCD"}"#,
+        ] {
+            assert_eq!(with(bad), WorkerRequirement::External, "{bad}");
+        }
     }
 }

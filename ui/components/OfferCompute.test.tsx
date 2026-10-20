@@ -125,7 +125,7 @@ describe("Offer compute with open goals", () => {
     await render({ objectives: [ECC] });
     expect(text().match(/in Cairn\.app/g)?.length ?? 0).toBeLessThanOrEqual(2);
     expect(link("See ways to contribute →")).toBeUndefined();
-    expect(button("Solver…")).toBeUndefined();
+    expect(button("Worker settings…")).toBeUndefined();
   });
 
   it("offers sharing only when other machines cannot reach the node", async () => {

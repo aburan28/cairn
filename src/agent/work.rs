@@ -72,6 +72,9 @@ use crate::canonical::Value;
 use crate::crypto::identity::Identity;
 use crate::fleet::auth::{key_hex, MemberFile};
 use crate::records::{commitment_hash, Claim, Commitment};
+use crate::solver::check::{self, Checker, Outcome};
+use crate::solver::run::{self, Round};
+use crate::solver::{fetch, Package, Platform};
 
 const CLIENT: &str = concat!("cairn-work/", env!("CARGO_PKG_VERSION"));
 const NODE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -122,9 +125,10 @@ fn warn_if_at_risk(response: &http::Response, what: &str) {
 const DEFAULT_MARGIN_SECONDS: u64 = 8;
 
 const USAGE: &str = "\
-cairn work — put this machine to work on one objective, with your own solver
+cairn work — put this machine to work on one objective
 
 USAGE
+    cairn work --node URL --objective ID --worker NAME [options] --package auto
     cairn work --node URL --objective ID --worker NAME [options] -- SOLVER [ARGS]...
     cairn work --fleet FILE --objective ID [--worker SUFFIX] [options] -- SOLVER [ARGS]...
     cairn work start --name NAME [--state-dir DIR] <worker options> -- SOLVER [ARGS]...
@@ -170,7 +174,18 @@ OFFERING COMPUTE
                          reveals are still sent while paused, so nothing
                          already committed goes unpaid
 
-THE SOLVER
+THE PUBLISHED SOLVER
+    --package auto       run the solver package published for this objective: the
+                         one the objective pins, else the approach the node offers
+                         (docs/solvers.md). It is downloaded, every file checked
+                         against its pin, its tests run on this machine, and every
+                         round run in the sandbox: no network, no access to your
+                         files, held to --threads. Nothing to choose or install.
+    --package ID         a particular package the node offers for this objective
+    --package-cache DIR  where downloaded packages are kept (default ~/.cairn/solvers)
+    --allow-unjailed     run a package on a host with no sandbox; development only
+
+YOUR OWN SOLVER
     Started once per round. Gets the assignment as one line of JSON on stdin and in
     $CAIRN_ASSIGNMENT, plus $CAIRN_NODE $CAIRN_OBJECTIVE $CAIRN_WORKER $CAIRN_EPOCH
     $CAIRN_EPOCH_ENDS_IN $CAIRN_ROUND. Prints candidate artifacts on stdout, one JSON object per
@@ -214,6 +229,14 @@ pub struct Options {
     pub gpus: Option<Vec<u32>>,
     /// Most solver time per UTC day. See [`Budget`].
     pub hours_per_day: Option<u64>,
+    /// A published solver package to run instead of `solver`: `auto` for the
+    /// one the node offers for this objective, or a package id. Fetched,
+    /// checked against its pin, tested here, and run in the sandbox.
+    pub package: Option<String>,
+    /// Where downloaded packages are kept ([`crate::solver::fetch::default_cache`]).
+    pub package_cache: Option<PathBuf>,
+    /// Run a package on a host with no sandbox. Development only.
+    pub allow_unjailed: bool,
     pub solver: Vec<String>,
 }
 
@@ -681,12 +704,20 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
     let mut threads = None;
     let mut gpus = None;
     let mut hours_per_day = None;
+    let mut package = None;
+    let mut package_cache = None;
+    let mut allow_unjailed = false;
 
     let mut i = 0;
     while i < flags.len() {
         let flag = flags[i].as_str();
         if flag == "--help" || flag == "-h" {
             return Ok(None);
+        }
+        if flag == "--allow-unjailed" {
+            allow_unjailed = true;
+            i += 1;
+            continue;
         }
         let value = || -> Result<&String, String> {
             flags
@@ -714,6 +745,8 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
             "--threads" => threads = Some(number(value()?)?),
             "--gpus" => gpus = Some(parse_gpus(value()?)?),
             "--hours-per-day" => hours_per_day = Some(number(value()?)?),
+            "--package" => package = Some(value()?.clone()),
+            "--package-cache" => package_cache = Some(PathBuf::from(value()?.as_str())),
             other => return Err(format!("unknown option {other:?}")),
         }
         i += 2;
@@ -779,8 +812,26 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
             return Err("--hours-per-day is a whole number of hours from 1 to 24".into());
         }
     }
-    if solver.is_empty() {
-        return Err("no solver: put the command after `--`".into());
+    match (&package, solver.is_empty()) {
+        (None, true) => {
+            return Err(
+                "no solver: give --package auto to run the objective's published solver, or \
+                 put your own command after `--`"
+                    .into(),
+            )
+        }
+        (Some(_), false) => return Err("give --package or a command after `--`, not both".into()),
+        (Some(wanted), true)
+            if wanted != "auto" && !crate::solver::manifest::is_record_id(wanted) =>
+        {
+            return Err(format!(
+                "--package is `auto` or a package id (sha256:…), not {wanted:?}"
+            ))
+        }
+        _ => {}
+    }
+    if allow_unjailed && package.is_none() {
+        return Err("--allow-unjailed is for --package; your own command was never jailed".into());
     }
     if identity_path.is_some() && submitter.is_some() {
         return Err(
@@ -813,6 +864,9 @@ pub fn parse(args: &[String]) -> Result<Option<Options>, String> {
         gpus,
         // Twenty-four hours a day is no budget at all.
         hours_per_day: hours_per_day.filter(|hours| *hours < 24),
+        package,
+        package_cache,
+        allow_unjailed,
         solver,
     }))
 }
@@ -948,6 +1002,8 @@ struct Worker {
     /// Present only for a named background worker. Its stop request never
     /// interrupts a commitment: the loop drains reveals before it exits.
     control: Option<Control>,
+    /// The published package this worker runs, once fetched and tested.
+    package: Option<(Package, Platform)>,
 }
 
 impl Worker {
@@ -972,6 +1028,7 @@ impl Worker {
             paused_said: false,
             manual_paused_said: false,
             control: None,
+            package: None,
             options,
         })
     }
@@ -997,6 +1054,9 @@ impl Worker {
                 String::new()
             }
         ));
+        if self.options.package.is_some() {
+            self.prepare_package()?;
+        }
         let mut next = Some(first);
         let mut failures = 0u32;
         loop {
@@ -1175,8 +1235,200 @@ impl Worker {
             .is_some_and(|path| path.exists())
     }
 
+    /// Fetch the package `--package` names, hold it to its pin, and run its
+    /// known-answer tests on this machine before the first round.
+    ///
+    /// The tests run here even though the node ran them when the package was
+    /// added: the node may be on another platform, and this machine is the
+    /// one about to give the package hours of its time. A package that fails
+    /// them here never runs a round here.
+    fn prepare_package(&mut self) -> Result<(), WorkError> {
+        let wanted = self
+            .options
+            .package
+            .clone()
+            .unwrap_or_else(|| "auto".into());
+        let invalid = |message: String| WorkError::Agent(AgentError::Invalid(message));
+        let offers = fetch::offers(&self.options.node, &self.options.objective)
+            .map_err(|e| WorkError::Agent(AgentError::Node(e)))?;
+        let id = fetch::choose(&offers, &wanted, &self.options.objective).map_err(invalid)?;
+        let cache = self
+            .options
+            .package_cache
+            .clone()
+            .or_else(fetch::default_cache)
+            .ok_or_else(|| invalid("set --package-cache or HOME for downloaded solvers".into()))?;
+        let package = fetch::fetch(&self.options.node, &id, &cache)
+            .map_err(|e| WorkError::Solver(format!("solver package {}: {e}", short(&id))))?;
+        let Some((platform, _)) = package.manifest.target_for_host() else {
+            return Err(invalid(format!(
+                "solver package {} has no build for {} and no python3 target",
+                short(&id),
+                crate::solver::cli::host_platform()
+            )));
+        };
+        let offer = offers.packages.iter().find(|p| p.id == id);
+        say(&format!(
+            "solver {} {} ({}{}), {platform}, sandbox {}",
+            package.manifest.name,
+            package.manifest.version,
+            short(&id),
+            if offer.is_some_and(|o| o.pinned) {
+                ", pinned by the objective"
+            } else {
+                ", published for this objective"
+            },
+            crate::verifiers::sandbox::mechanism().as_str()
+        ));
+        if self
+            .options
+            .gpus
+            .as_ref()
+            .is_some_and(|gpus| !gpus.is_empty())
+        {
+            say("--gpus is ignored: a sandboxed solver package gets CPU threads only");
+        }
+        let checker = Checker {
+            objective: Some(&self.options.objective),
+            verify: None,
+            allow_unjailed: self.options.allow_unjailed,
+            all_targets: false,
+            node_vouched: offer.is_some_and(|o| o.verdict == "pass"),
+        };
+        let report = check::check(&package, &checker);
+        for line in report.lines() {
+            say(line.trim_start());
+        }
+        match report.verdict() {
+            Outcome::Fail => {
+                return Err(WorkError::Solver(format!(
+                    "solver package {} failed its own tests on this machine; not running it",
+                    short(&id)
+                )))
+            }
+            // Not decided here is not a failure of the package -- but a
+            // machine that could not run its tests cannot run its rounds
+            // either, and an unscored `verify` test on a package no node
+            // could check is a package nobody has vouched for.
+            Outcome::Unavailable => {
+                return Err(WorkError::Solver(format!(
+                    "solver package {} cannot run on this machine: {}",
+                    short(&id),
+                    report
+                        .tests
+                        .iter()
+                        .find(|t| t.outcome == Outcome::Unavailable)
+                        .map(|t| t.detail.as_str())
+                        .unwrap_or("")
+                )))
+            }
+            _ => {}
+        }
+        self.package = Some((package, platform));
+        Ok(())
+    }
+
+    /// Report in every `--heartbeat` seconds until `stop` is set: what puts
+    /// this machine on the roster as working now.
+    fn heartbeat(
+        &self,
+        assignment: &Value,
+        stop: &Arc<AtomicBool>,
+        found: &Arc<AtomicU64>,
+    ) -> thread::JoinHandle<()> {
+        let stop = Arc::clone(stop);
+        let found = Arc::clone(found);
+        let body = self.heartbeat_body(assignment);
+        let node = self.options.node.clone();
+        let member = self.options.member.clone();
+        let every = self.options.heartbeat;
+        thread::spawn(move || {
+            let mut last: Option<Instant> = None;
+            while !stop.load(Ordering::SeqCst) {
+                if last.is_none_or(|at| at.elapsed() >= every) {
+                    let mut body = body.clone();
+                    if let Value::Object(map) = &mut body {
+                        map.insert(
+                            "units_pending".into(),
+                            Value::Int(i128::from(found.load(Ordering::SeqCst))),
+                        );
+                    }
+                    match http::post_json_as(
+                        &node,
+                        "/progress",
+                        &body,
+                        member.as_ref(),
+                        NODE_TIMEOUT,
+                    ) {
+                        Ok(response) if !response.ok() => {
+                            say(&format!("heartbeat refused: {}", response.error_text()))
+                        }
+                        Ok(_) => {}
+                        Err(error) => say(&format!("heartbeat: {error}")),
+                    }
+                    last = Some(Instant::now());
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
+        })
+    }
+
+    /// One round of the published package, in the sandbox.
+    fn solve_package(
+        &self,
+        package: &Package,
+        platform: Platform,
+        assignment: &Value,
+    ) -> Result<Vec<Value>, String> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let found = Arc::new(AtomicU64::new(0));
+        let beat = self.heartbeat(assignment, &stop, &found);
+        let threads = self
+            .options
+            .threads
+            .and_then(|t| u32::try_from(t).ok())
+            .unwrap_or(1);
+        let round = Round {
+            dir: &package.dir,
+            platform,
+            target: &package.manifest.targets[&platform],
+            resources: package.manifest.resources,
+            assignment,
+            objective: &self.options.objective,
+            worker: &self.options.worker,
+            round: self.rounds,
+            threads,
+            allow_unjailed: self.options.allow_unjailed,
+        };
+        let result = run::run(&round);
+        stop.store(true, Ordering::SeqCst);
+        let _ = beat.join();
+        let output = result.map_err(|failure| failure.to_string())?;
+        for problem in &output.skipped {
+            say(&format!("solver output skipped, {problem}"));
+        }
+        if !output.stderr.trim().is_empty() {
+            for line in output
+                .stderr
+                .trim_end()
+                .lines()
+                .rev()
+                .take(20)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
+                eprintln!("  | {line}");
+            }
+        }
+        Ok(output.candidates)
+    }
+
     /// Run the solver once over `assignment`, heartbeating while it runs.
     fn solve(&self, assignment: &Value) -> Result<Vec<Value>, String> {
+        if let Some((package, platform)) = &self.package {
+            return self.solve_package(package, *platform, assignment);
+        }
         let line = assignment.canonical_string();
         let epoch = assignment
             .get("epoch")
@@ -1212,43 +1464,7 @@ impl Worker {
 
         let stop = Arc::new(AtomicBool::new(false));
         let found = Arc::new(AtomicU64::new(0));
-        let beat = {
-            let stop = Arc::clone(&stop);
-            let found = Arc::clone(&found);
-            let body = self.heartbeat_body(assignment);
-            let node = self.options.node.clone();
-            let member = self.options.member.clone();
-            let every = self.options.heartbeat;
-            thread::spawn(move || {
-                let mut last: Option<Instant> = None;
-                while !stop.load(Ordering::SeqCst) {
-                    if last.is_none_or(|at| at.elapsed() >= every) {
-                        let mut body = body.clone();
-                        if let Value::Object(map) = &mut body {
-                            map.insert(
-                                "units_pending".into(),
-                                Value::Int(i128::from(found.load(Ordering::SeqCst))),
-                            );
-                        }
-                        match http::post_json_as(
-                            &node,
-                            "/progress",
-                            &body,
-                            member.as_ref(),
-                            NODE_TIMEOUT,
-                        ) {
-                            Ok(response) if !response.ok() => {
-                                say(&format!("heartbeat refused: {}", response.error_text()))
-                            }
-                            Ok(_) => {}
-                            Err(error) => say(&format!("heartbeat: {error}")),
-                        }
-                        last = Some(Instant::now());
-                    }
-                    thread::sleep(Duration::from_millis(250));
-                }
-            })
-        };
+        let beat = self.heartbeat(assignment, &stop, &found);
 
         let mut artifacts = Vec::new();
         let mut problems = Vec::new();
