@@ -1,5 +1,12 @@
 # Changelog
 
+## [13.1.0](https://github.com/aburan28/cairn/compare/v13.0.0...v13.1.0) (2026-10-20)
+
+
+### Features
+
+* **solver:** one-button contributing with published, sandboxed solver packages ([728921f](https://github.com/aburan28/cairn/commit/728921f422457d9e3f949c989586944bea1ea72d))
+
 ## [13.0.0](https://github.com/aburan28/cairn/compare/v12.1.0...v13.0.0) (2026-10-20)
 
 This release includes the accumulated changes previously listed under the unpublished 12.2.0 draft below. The comparison starts at v12.1.0, the latest published tag.
