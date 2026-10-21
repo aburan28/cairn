@@ -12,6 +12,10 @@ import time
 import urllib.request
 import uuid
 
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+os.environ.setdefault("CAIRN_ALLOW_NO_SOLVER", "1")
+
 
 def main():
     repo = Path(__file__).resolve().parent.parent

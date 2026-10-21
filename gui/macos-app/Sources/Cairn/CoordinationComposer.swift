@@ -74,8 +74,26 @@ final class CoordinationComposer {
                 }
                 guard case .running = node.state else { throw AIError("Wait for the node to finish starting.") }
                 try built.requireUnchanged()
+                // Every objective ships a solver contributors can press Start
+                // on; `cairn post --solver` checks it against this spec's
+                // checker in the sandbox and refuses the launch unless it passes.
+                let solver: String? = await MainActor.run {
+                    let panel = NSOpenPanel()
+                    panel.canChooseDirectories = true
+                    panel.canChooseFiles = false
+                    panel.allowsMultipleSelection = false
+                    panel.message = "Choose the solver package to publish with this challenge (a folder with solver.json)."
+                    panel.prompt = "Publish With This Solver"
+                    return panel.runModal() == .OK ? panel.url?.path : nil
+                }
+                guard let solver else {
+                    throw AIError("A challenge launches with its solver package. Choose one to publish with it.")
+                }
+                guard FileManager.default.fileExists(atPath: (solver as NSString).appendingPathComponent("solver.json")) else {
+                    throw AIError("That folder has no solver.json. Run `cairn solver pack` in it first.")
+                }
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                    node.postObjectives(at: [built.objectiveFile.path]) { error in
+                    node.postObjectives(at: [built.objectiveFile.path], solver: solver) { error in
                         if let error { continuation.resume(throwing: AIError(error)) }
                         else { continuation.resume() }
                     }

@@ -19,6 +19,9 @@
 # `daemon::Config` and a mistake in one subcommand's wiring is invisible to
 # the others. `cairn run` additionally owns stdio for MCP.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/.."
 
 RUST="${RUST_BIN:-./target/release/cairn}"

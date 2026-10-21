@@ -1894,6 +1894,10 @@ struct Server {
     /// daemon's own. `None` for a standalone server and in every unit test,
     /// which therefore narrate to nobody.
     attachment: Option<Attachment>,
+    /// Whether `post_objective` demands a solver package (docs/solvers.md).
+    /// Off only when the operator set CAIRN_ALLOW_NO_SOLVER=1, and in tests
+    /// that are about something else.
+    require_solver: bool,
 }
 
 impl Server {
@@ -1980,7 +1984,14 @@ impl Server {
             meta: None,
             spend: Arc::new(Mutex::new(SpendCeiling::new(0))),
             attachment: None,
+            require_solver: !crate::solver::cli::no_solver_allowed(),
         }
+    }
+
+    #[cfg(test)]
+    fn without_solver_requirement(mut self) -> Server {
+        self.require_solver = false;
+        self
     }
 
     fn attached(mut self, attachment: Attachment) -> Server {
@@ -4027,6 +4038,27 @@ impl Server {
             Some(identity) => objective.funded_by(identity),
             None => objective,
         };
+        // An agent posts on the same terms as `cairn post`: the objective
+        // ships a solver package this node already holds and has tested,
+        // unless the operator started this server with CAIRN_ALLOW_NO_SOLVER=1.
+        // Adding a package is the operator's `cairn solver add`, not a tool.
+        let problem = {
+            let root = self.node.read().root().to_path_buf();
+            if self.require_solver {
+                crate::solver::cli::solver_problem(&root, &objective)
+            } else {
+                crate::solver::cli::pin_problem(&root, &objective)
+            }
+        };
+        if let Some(problem) = problem {
+            return Err(format!(
+                "post refused: {}. Nothing was recorded.",
+                problem.replace(
+                    "`cairn post <this file> --solver DIR`",
+                    "`cairn post FILE --solver DIR` on the node"
+                )
+            ));
+        }
         // Before the write, and spent only after it is admitted: a refused post
         // must not use up the ceiling. The guard is held across the admission,
         // so two concurrent posts cannot both pass the check and spend the
@@ -4294,7 +4326,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cairn-mcp-test-{}", fresh_nonce()));
         std::fs::create_dir_all(&dir).unwrap();
         let ledger = Ledger::open(dir.join("log.jsonl")).unwrap();
-        Server::new(Node::new(ledger, &dir), None).with_spend_ceiling(SpendCeiling::new(limit))
+        Server::new(Node::new(ledger, &dir), None)
+            .with_spend_ceiling(SpendCeiling::new(limit))
+            .without_solver_requirement()
     }
 
     /// A server holding one accepted claim carrying `artifact`.
@@ -4327,7 +4361,7 @@ mod tests {
             .to_string();
 
         let ledger = Ledger::open(dir.join("log.jsonl")).unwrap();
-        let mut server = Server::new(Node::new(ledger, &dir), None);
+        let mut server = Server::new(Node::new(ledger, &dir), None).without_solver_requirement();
         let objective = Objective::new(
             "GOAL-c",
             "anything passes",
@@ -4391,7 +4425,8 @@ mod tests {
         let identity = Identity::from_secret_bytes([31u8; 32]);
         (
             Server::new(Node::new(ledger, &dir), Some(identity.clone()))
-                .with_spend_ceiling(SpendCeiling::new(u64::MAX)),
+                .with_spend_ceiling(SpendCeiling::new(u64::MAX))
+                .without_solver_requirement(),
             identity,
         )
     }
@@ -4710,6 +4745,28 @@ mod tests {
     /// A record the published schema rejects is refused *before* anything
     /// is appended, with the schema's message rather than a decode error.
     #[test]
+    fn post_objective_refuses_an_objective_that_ships_no_solver() {
+        let dir = std::env::temp_dir().join(format!("cairn-mcp-test-{}", fresh_nonce()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ledger = Ledger::open(dir.join("log.jsonl")).unwrap();
+        let mut s = Server::new(Node::new(ledger, &dir), None)
+            .with_spend_ceiling(SpendCeiling::new(u64::MAX));
+        s.require_solver = true;
+        let refused = call(
+            &mut s,
+            "post_objective",
+            objective_paying(0, "GOAL-nosolver"),
+        );
+        let text = refused.to_string();
+        assert!(text.contains("ships no solver package"), "{text}");
+        assert!(text.contains("on the node"), "{text}");
+        assert!(
+            s.node.read().objectives().is_empty(),
+            "nothing was recorded"
+        );
+    }
+
+    #[test]
     fn post_objective_gates_on_the_published_schema() {
         let mut s = server();
         let before = s.node.read().ledger().len();
@@ -4737,7 +4794,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let ledger = Ledger::open(dir.join("log.jsonl")).unwrap();
         let mut s = Server::new(Node::new(ledger, &dir), Some(identity.clone()))
-            .with_spend_ceiling(SpendCeiling::new(u64::MAX));
+            .with_spend_ceiling(SpendCeiling::new(u64::MAX))
+            .without_solver_requirement();
         let out = call(
             &mut s,
             "post_objective",

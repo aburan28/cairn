@@ -11,6 +11,9 @@
 # What must not change is that the result audits, that both implementations
 # agree on its Merkle root, and that the payouts follow the ratchet.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/.."
 
 RUST="${RUST_BIN:-./target/release/cairn}"

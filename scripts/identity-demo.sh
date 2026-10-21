@@ -9,6 +9,9 @@
 # The rule needs no registry: a submitter that is 64 lowercase hex characters
 # IS an ed25519 public key, so the name and the key are the same fact.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 
 # Forces a plaintext log. This script reads the log as text -- it greps for a
 # field, or parses it as JSON -- and the CLI seals every log it creates whenever

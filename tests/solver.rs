@@ -200,6 +200,45 @@ fn pack_refuses_a_symlink_rather_than_leaving_it_out() {
 }
 
 #[test]
+fn posting_an_approach_cannot_bypass_an_existing_solver_pin() {
+    let root = scratch("post-pin");
+    let mut objective = objective(&repo().join(EXAMPLE_OBJECTIVE));
+    let absent = format!("sha256:{}", "ab".repeat(32));
+    let Value::Object(verifier) = &mut objective.verifier else {
+        panic!("object verifier");
+    };
+    verifier.insert(
+        "capabilities".into(),
+        Value::object([(
+            "worker",
+            Value::object([
+                ("mode", Value::string("package")),
+                ("package", Value::string(&absent)),
+            ]),
+        )]),
+    );
+    let dir = root.join("approach");
+    let package = python_package(
+        &dir,
+        "print('{}')\n",
+        r#"[{"name":"t","assignment":{},"expect":[{}]}]"#,
+    );
+    let mut manifest = package.manifest.to_value().clone();
+    let Value::Object(fields) = &mut manifest else {
+        panic!("object manifest");
+    };
+    fields.insert("objective".into(), Value::string(objective.id()));
+    fs::write(dir.join("solver.json"), manifest.canonical_string()).unwrap();
+    let mut output = Vec::new();
+    let error = cli::add_for(&dir, &objective, &root, &mut output)
+        .expect_err("an approach cannot replace the objective's pin");
+    assert!(error.contains(&format!("pins package {absent}")), "{error}");
+    assert!(output.is_empty(), "the package was not executed");
+    assert!(Store::under(&root).list().is_empty(), "nothing was stored");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn a_pin_wins_and_a_missing_pin_is_never_replaced_by_an_approach() {
     let root = scratch("offers");
     let store = Store::under(&root);

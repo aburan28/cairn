@@ -12,6 +12,9 @@
 # contributor with no Rust toolchain; `crypto cryptanalysis rho-collab work`
 # runs the same walk.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/.."
 
 LOG="${1:-/tmp/cairn-piecework.jsonl}"

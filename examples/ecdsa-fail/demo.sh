@@ -6,6 +6,9 @@
 # Does not call the ecdsa.fail API. For the real launch benchmark use
 # `ecdsafail` (see adapter.sh and GAP.md).
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/../.."
 
 LOG="${1:-/tmp/cairn-ecdsa-fail.jsonl}"

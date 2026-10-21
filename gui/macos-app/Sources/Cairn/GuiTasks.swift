@@ -27,6 +27,8 @@ enum GuiTasks {
 
     static func isAvailable(_ task: GuiTask) -> Bool {
         guard let library else { return false }
+        // Every objective ships a solver (`cairn post` refuses one without).
+        guard !task.solvers.isEmpty else { return false }
         return task.objectives.allSatisfy {
             FileManager.default.fileExists(atPath: library.appendingPathComponent($0).path)
         } && task.solvers.allSatisfy {

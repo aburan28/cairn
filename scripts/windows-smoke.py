@@ -11,6 +11,10 @@ import tempfile
 import time
 import urllib.request
 
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+os.environ.setdefault("CAIRN_ALLOW_NO_SOLVER", "1")
+
 
 def main():
     parser = argparse.ArgumentParser()

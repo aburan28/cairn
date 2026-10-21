@@ -11,6 +11,9 @@
 # a commit and a reveal through the queue, drain them with the rules engine,
 # and audit the resulting log. Nothing here reaches around the HTTP boundary.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/.."
 
 RUST="${RUST_BIN:-./target/release/cairn}"

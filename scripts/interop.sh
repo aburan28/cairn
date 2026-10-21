@@ -8,6 +8,9 @@
 # the claim real -- and it is the check that catches a canonical-encoding drift
 # before it silently forks the network's identity scheme.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/.."
 
 if [ -z "${REF_BIN:-}" ]; then

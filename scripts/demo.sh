@@ -6,6 +6,9 @@
 # Everything here is re-runnable by anyone with a copy of the log. That is the
 # whole point of Stage 0 -- one operator, no consensus, no trust required.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/.."
 
 LOG="${1:-/tmp/cairn-demo.jsonl}"

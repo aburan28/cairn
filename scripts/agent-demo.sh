@@ -17,6 +17,9 @@
 # floor, so that job runs only because this agent's operator chose `none`; the
 # last queue run shows a host at the default floor refusing it.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/.."
 
 RUST="${RUST_BIN:-./target/release/cairn}"
