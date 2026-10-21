@@ -1,5 +1,22 @@
 # Changelog
 
+## [13.2.0](https://github.com/aburan28/cairn/compare/v13.1.0...v13.2.0) (2026-10-21)
+
+
+### Features
+
+* every objective ships a solver package ([#361](https://github.com/aburan28/cairn/issues/361)) ([8de0515](https://github.com/aburan28/cairn/commit/8de05155641e7e3d9263129bed22906597447ddf))
+
+
+### Fixes
+
+* **macos:** give Share this Mac's objective list 30 s, and say so on timeout ([#354](https://github.com/aburan28/cairn/issues/354)) ([a863ebe](https://github.com/aburan28/cairn/commit/a863ebe88a36d3602ae6f8656602bf440ddff6b6))
+
+
+### Performance
+
+* **serve:** stop re-reading the log per request and per-row scans on GET /objectives ([54a1205](https://github.com/aburan28/cairn/commit/54a1205f20ffc3908b89055126143a2e8f81b57c))
+
 ## [13.1.0](https://github.com/aburan28/cairn/compare/v13.0.0...v13.1.0) (2026-10-20)
 
 
