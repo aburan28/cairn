@@ -1862,6 +1862,34 @@ impl Node {
         out
     }
 
+    // -- pinned solver packages ------------------------------------------
+
+    /// Every solver package the log's objectives pin, each with the
+    /// objective that pins it (the first by id, when several do), whose
+    /// verifier a package's `verify: "accept"` tests are scored with.
+    ///
+    /// Pins only. An *approach* -- a package that names an objective in its
+    /// own manifest -- is an operator's choice of what to offer, not
+    /// something the log fixed, and it never enters a want set; see
+    /// [`crate::solver::sync`].
+    pub fn pinned_packages(&self) -> BTreeMap<String, (String, Objective)> {
+        let mut out = BTreeMap::new();
+        for (id, objective) in self.objectives() {
+            if let Some(pin) = crate::solver::store::pinned(&objective) {
+                out.entry(pin).or_insert((id, objective));
+            }
+        }
+        out
+    }
+
+    /// What this node would ask a peer for to complete those pins: the
+    /// manifest of each pin it neither holds nor saw fail, and the files a
+    /// staged manifest still lacks. Bare hex, like [`Node::missing_code`],
+    /// and like it a pure function of the log and the disk.
+    pub fn missing_packages(&self) -> BTreeSet<String> {
+        crate::solver::sync::Exchange::new(self.root(), self.pinned_packages().into_keys()).wants()
+    }
+
     /// Copy every pinned file the bundle has into the store, for every objective
     /// in the log. Returns how many addresses are now servable.
     ///

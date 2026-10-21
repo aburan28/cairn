@@ -165,7 +165,7 @@ fn run(args: &[String], context: &Context<'_>, out: &mut dyn Write) -> Result<i3
                     package.manifest.name,
                     package.manifest.version,
                     package.manifest.tests.len(),
-                    crate::verifiers::sandbox::mechanism().as_str()
+                    super::executor::describe()
                 ),
             );
             let report = check_package(
@@ -366,6 +366,17 @@ pub fn add_for(
 ) -> Result<String, String> {
     let package = Package::open(dir).map_err(|e| e.0)?;
     let id = objective.id();
+    // An approach may name this exact objective while its existing pin names
+    // another package. Keep the same pin check as `solver add --objective`
+    // before executing or storing the supplied package.
+    if let Some(pin) = super::store::pinned(objective) {
+        if pin != package.id() {
+            return Err(format!(
+                "objective {id} pins package {pin}; this package is {}",
+                package.id()
+            ));
+        }
+    }
     if let Some(named) = &package.manifest.objective {
         if named != &id {
             return Err(format!(

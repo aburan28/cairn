@@ -312,6 +312,14 @@ fn which(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// Whether a gVisor run here has cgroups to hold memory, CPU and process
+/// limits. An unprivileged `runsc --rootless` has none: such a run records the
+/// limits as unenforced. A caller whose guarantee is those limits (a solver
+/// round) must not pick gVisor on a host where this is false.
+pub fn gvisor_enforces_limits() -> bool {
+    rootless_flags().is_empty()
+}
+
 /// `runsc --rootless` when this process is not root. Read from
 /// `/proc/self/status` rather than `geteuid`, which would need `unsafe` or a
 /// libc dependency for one integer.

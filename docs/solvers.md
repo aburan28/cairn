@@ -143,22 +143,82 @@ assignment and `CAIRN_ROUND`, not from the clock.
 
 ## The sandbox
 
-`src/solver/run.rs` builds the round's jail with
-[`src/verifiers/sandbox.rs`](../src/verifiers/sandbox.rs), seatbelt on macOS
-and bubblewrap on Linux:
+A round runs in one of these, chosen once per process
+([`src/solver/executor.rs`](../src/solver/executor.rs)) and named in the
+worker's startup line (`solver … sandbox runsc`), in `cairn solver check`, and
+in the report `GET /solvers` shows:
 
-- no network of any kind, loopback included, so not even the node;
-- reads: the package, the system's own directories and, for `python3`, the
-  interpreter; never the home directory;
-- writes: the scratch directory only;
-- the scrubbed environment above;
-- the process tree held to the threads offered (paused when it runs over),
-  `memory_mb`, and `round_seconds` of wall clock.
+| executor | boundary | used when |
+|---|---|---|
+| `runsc` | gVisor: a user-space kernel serves the solver's syscalls | Linux, `runsc` starts a sandbox here, and the worker is root (see below) |
+| `kata` | a guest kernel in a lightweight VM | Linux, a container engine runs the Kata runtime, and `CAIRN_SOLVER_KATA_IMAGE` names an image |
+| `bwrap` | namespaces over the host kernel | Linux, neither of the above works |
+| `sandbox-exec` | seatbelt | macOS, always |
+
+`gVisor` and `Kata` are the host agent's executors
+([`src/agent/`](../src/agent/)): a round is built as an executor job and run by
+[`agent::job::run`](../src/agent/job.rs), so a solver gets the jail an executor
+job gets. The choice is `auto` unless `CAIRN_SOLVER_SANDBOX` says `strongest`
+(Kata, else gVisor, never the host), `runsc`, `kata` or `bwrap`. A pinned
+executor that cannot run makes the round fail with the reason; it never
+quietly runs under a weaker one. Under `auto` a stronger executor that was
+passed over is named with its reason in the startup line, for example
+`sandbox bwrap (runsc: not on PATH)`.
+
+Whichever runs it, the guarantees are the same:
+
+- no network of any kind: under gVisor and Kata the job is started with
+  networking off, so the sandbox has no route to the node or to anything on
+  the host's loopback or LAN;
+- reads: the package (at `/pkg`, read-only), the system's own directories and,
+  for `python3`, the interpreter; never the home directory. Under gVisor the
+  sandbox's root is built from nothing but those, not from the host's `/`;
+- writes: a scratch directory and a size-limited `/tmp` only, both gone when
+  the round ends;
+- the scrubbed environment above, `HOME` and `TMPDIR` pointing at scratch;
+- the offered threads, `memory_mb`, and `round_seconds` of wall clock. gVisor
+  holds memory and CPU with cgroups, which an unprivileged `runsc --rootless`
+  does not have. So gVisor is chosen only for a root worker (a systemd service
+  is the usual way), and otherwise `auto` falls back to bubblewrap, whose limits
+  are enforced, and the startup line says so.
+
+The assignment reaches the solver on stdin through a shell redirect from a
+read-only file inside the sandbox, so the sandbox needs `/bin/sh`.
+For Kata the image must have `/bin/sh`, `python3` for python3 targets, and a
+libc a native target was built for. Job directories and gVisor's state live in
+`~/.cairn/solver-run` (`CAIRN_SOLVER_STATE`).
 
 A host with no working jail refuses to run a package, with the fix in the
 message (`apt install bubblewrap`). `--allow-unjailed` overrides that for
 development and the report says `sandbox: none`. There is no GPU in the jail
 yet; a package gets CPU threads only.
+
+### macOS
+
+macOS has seatbelt (`sandbox-exec`) and nothing stronger is wired in. It is a
+kernel-enforced policy over the host kernel, the same class as bubblewrap, not
+a user-space or virtualised kernel. `CAIRN_SOLVER_SANDBOX=runsc` or `kata` on a
+Mac fails with "Linux only".
+
+What a VM-based executor on macOS would take, not built:
+
+- a Linux guest booted with Apple's Virtualization.framework (what Lima,
+  Colima and Apple's own container tooling build on), carrying `runsc` or a
+  Kata-capable runtime, `/bin/sh` and `python3`;
+- the package directory shared read-only into the guest (virtiofs) and the
+  assignment and candidates passed in and out over vsock or a pipe, so the
+  guest has no network device at all;
+- the VM's memory and CPU count set when it is created, which is a hard limit
+  for free, with one warm VM per worker and a gVisor or Kata sandbox per round
+  inside it rather than a VM boot per round;
+- on Apple silicon the guest is arm64 Linux: `linux-arm64` and `python3`
+  targets would run, a `darwin-*` native target could not;
+- the worker, not the node, owning the VM, and the guest image being pinned
+  and hash-checked like a package.
+
+Until then a contributor on a Mac who wants a VM boundary can run the worker
+inside a Linux VM they already have (`cairn work --package auto` there picks
+gVisor if it is root and has `runsc`).
 
 ## Publishing
 
@@ -219,7 +279,8 @@ before packages existed, and any objective posted `--without-solver`, can
 still get one: name it in `solver.json` (`"objective": "sha256:…"`) and add it
 to a node. `--package auto` runs the newest approach that passed on that node.
 When an objective *does* pin a package, a node that lacks it offers nothing in
-its place: the author chose that program.
+its place: the author chose that program. A pin travels to other nodes over
+p2p; an approach stays on the node it was added to ([below](#between-nodes)).
 
 `cairn solver add` runs every test on every target this host can run, scoring
 `verify: "accept"` tests with the objective's own pinned verifier exactly as
@@ -227,6 +288,74 @@ the node scores a submission, and files the package in `ROOT/.cairn/solvers`
 only if they pass. A node that can run none of the package's targets (a Linux
 node and a macOS-only package) files it on format and hashes alone and says
 so; each worker then runs the tests it can on its own platform.
+
+## Between nodes
+
+Every Cairn.app user runs a node of their own, so a package that stays on the
+node its author added it to is a package almost nobody can start. Pinned
+packages therefore travel over p2p the way pinned checkers do, in the same
+code exchange ([`src/p2p/code.rs`](../src/p2p/code.rs),
+[`src/solver/sync.rs`](../src/solver/sync.rs)):
+
+- **What a node wants** is computed from its log on every session: the manifest
+  of each package an objective in it pins (including objectives arriving in
+  that same session), and then each file the manifest names, by SHA-256. Pins
+  this node already offers, or saw fail, are left out. Nothing is remembered
+  between sessions, so an interrupted transfer resumes at the first file that
+  did not arrive.
+- **What a peer sends** is only what was asked for, only from its store
+  (checked packages), never from its own staging area. A package id brings
+  the manifest and then its files, so a node that knew only the pin usually
+  has the whole package after one session.
+- **What is kept**: a manifest only if its bytes hash to a wanted package id,
+  a file only if its bytes hash to the SHA-256 and size a staged manifest
+  pins. Both are checked whole, in memory, before anything is written. What
+  passes goes to `ROOT/.cairn/solvers/.incoming/<id>`, which nothing serves.
+- **Then the check, on this node.** Outside the session (it runs the tests),
+  the node runs `check_package` exactly as `cairn solver add --objective`
+  would, with the objective that pins it, and files the package only if it
+  passes, or on format and hashes alone when none of its targets runs here.
+  A failure is recorded in `.cairn/solvers/.failed/<hex>.json` with the
+  report; the package is never offered and never fetched again unless the
+  operator deletes that file. A check that could not be decided (no jail, the
+  checker not here yet) is never a failure: the package stays staged and the
+  check is retried every ten minutes. The daemon logs which of the three
+  happened.
+
+**Chunked, with a separate cap.** A package file may be 32 MiB and a blob may
+be one, deliberately and for every node at once. A separate, larger
+per-message cap for package files was the obvious alternative, and the
+transport rules it out: a frame is at most 16 MiB (`transport::MAX_FRAME`),
+which bounds every message family's allocation before decryption, and a
+32 MiB file is 64 MiB of hex. So a file travels as `code_part`s of at most a
+mebibyte, the blob ceiling, and the cap on the whole file is the size its
+manifest pins. Parts are not separately verifiable (the manifest pins whole
+files, and adding piece hashes would change every v1 package id), so a file
+is assembled in memory within one session and hashed before a byte of it is
+written; an item cut short is dropped and asked for again. One direction of
+one session moves at most one file of the largest size plus a manifest, and
+the two directions take turns, so neither side writes tens of mebibytes at a
+peer that is also writing.
+
+A peer that predates packages ignores the want's `packages` field and sends
+none, and the package round runs only when both wants carried one, so mixed
+versions sync as before.
+
+**Approaches do not travel.** A pin is inside the objective's id and under its
+funder's signature: the author chose that program, every node agrees on which
+bytes it is, and fetching it asks nobody to trust anyone new. Which *approach*
+a node offers for an objective that pinned nothing is that node's operator's
+decision, and `--package auto` runs the newest that passed, so a node that
+took approaches from peers would let any stranger choose the program that
+runs on its contributors' machines. The log does not bound them either (anyone
+may write an approach to anything), and learning them would need an inventory
+message, which the code exchange refuses to send for privacy reasons. An
+operator who wants an approach adds it with `cairn solver add`; an author who
+wants a solver to reach everyone pins it.
+
+`scripts/solver-sync-demo.sh` runs it between two daemons: B starts with an
+empty log and A's address, receives the objective, its checker and its
+package, checks it, offers it, and a worker pointed at B runs it and is paid.
 
 ## Running
 
@@ -248,11 +377,13 @@ without asking twice.
 
 ## What is not done yet
 
-- **Packages do not travel between nodes.** They live in each node's store.
-  A contributor whose own node synced an objective but not its package is told
-  the solver is not on this node; they can work against a node that has it.
-  Moving packages over the p2p exchange, as pinned checkers already move, is
-  the next step.
+- **Availability is whoever is on the line.** A node fetches a package from
+  the peers it holds sessions with, steered by the DHT as for checkers; one
+  whose peers never include a holder stays without it, and nothing pays
+  anybody to keep seeding. A large package also costs time: one session moves
+  one large file each way, holding the session (and the node's lock) while it
+  crosses the link.
+- **Approaches stay where they were added**, by design (above).
 - **No GPU** inside the jail, and no WASI target yet (above).
 - **Publishing is local.** `cairn solver add` writes the store of the node it
   runs beside; there is no HTTP upload, by design for now: a route that

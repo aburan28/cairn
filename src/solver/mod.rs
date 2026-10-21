@@ -66,6 +66,8 @@
 //! - `cairn solver check`, on the author's machine, before anything leaves it;
 //! - `cairn solver add` and `cairn post`, on the node, before the node will
 //!   offer the package or admit an objective that pins it;
+//! - every node that receives a pinned package from a peer ([`sync`]), before
+//!   it offers it in turn: no node's report travels with the bytes;
 //! - every worker, on its own platform, before the first round it runs.
 //!
 //! The last is the one that matters most. A node on Linux cannot run a macOS
@@ -74,11 +76,14 @@
 
 pub mod check;
 pub mod cli;
+pub mod executor;
 pub mod fetch;
+mod isolate;
 pub mod manifest;
 pub mod package;
 pub mod run;
 pub mod store;
+pub mod sync;
 
 pub use manifest::{Manifest, Platform, ABI};
 pub use package::Package;
