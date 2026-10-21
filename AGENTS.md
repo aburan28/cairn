@@ -151,6 +151,14 @@ establish prescribed execution.
   pyenv shim, run it with `PATH=/opt/homebrew/bin:$PATH` or `/usr/bin` first.
   `tests/solver.rs` probes the same jail for network, home and environment
   leaks and skips, saying so, on a host with no jail
+- `./scripts/solver-sync-demo.sh` if you touched `src/solver/sync.rs`, the
+  package round in `src/p2p/code.rs` or `src/p2p/session.rs`, or where
+  `src/p2p/service.rs` and the daemon call them. Node B starts with an empty
+  log and A's address, receives an objective's pinned package over p2p,
+  re-runs its tests itself before offering it, and a worker pointed at B (not
+  A) runs it and is paid. Same jail and `python3` needs as `solver-demo.sh`,
+  and it binds loopback ports. `tests/solver_sync.rs` covers what a peer may
+  and may not leave behind, without a jail
 - `./scripts/shard-demo.sh` if you touched `src/shards/`. That module has no
   network caller yet, so this script is its seam: six stores that share nothing,
   one shard each, one of them corrupt. A subsystem exercised only by its own

@@ -193,7 +193,8 @@ before packages existed, and any objective whose author shipped no solver, can
 still get one: name it in `solver.json` (`"objective": "sha256:…"`) and add it
 to a node. `--package auto` runs the newest approach that passed on that node.
 When an objective *does* pin a package, a node that lacks it offers nothing in
-its place: the author chose that program.
+its place: the author chose that program. A pin travels to other nodes over
+p2p; an approach stays on the node it was added to ([below](#between-nodes)).
 
 `cairn solver add` runs every test on every target this host can run, scoring
 `verify: "accept"` tests with the objective's own pinned verifier exactly as
@@ -201,6 +202,74 @@ the node scores a submission, and files the package in `ROOT/.cairn/solvers`
 only if they pass. A node that can run none of the package's targets (a Linux
 node and a macOS-only package) files it on format and hashes alone and says
 so; each worker then runs the tests it can on its own platform.
+
+## Between nodes
+
+Every Cairn.app user runs a node of their own, so a package that stays on the
+node its author added it to is a package almost nobody can start. Pinned
+packages therefore travel over p2p the way pinned checkers do, in the same
+code exchange ([`src/p2p/code.rs`](../src/p2p/code.rs),
+[`src/solver/sync.rs`](../src/solver/sync.rs)):
+
+- **What a node wants** is computed from its log on every session: the manifest
+  of each package an objective in it pins (including objectives arriving in
+  that same session), and then each file the manifest names, by SHA-256. Pins
+  this node already offers, or saw fail, are left out. Nothing is remembered
+  between sessions, so an interrupted transfer resumes at the first file that
+  did not arrive.
+- **What a peer sends** is only what was asked for, only from its store
+  (checked packages), never from its own staging area. A package id brings
+  the manifest and then its files, so a node that knew only the pin usually
+  has the whole package after one session.
+- **What is kept**: a manifest only if its bytes hash to a wanted package id,
+  a file only if its bytes hash to the SHA-256 and size a staged manifest
+  pins. Both are checked whole, in memory, before anything is written. What
+  passes goes to `ROOT/.cairn/solvers/.incoming/<id>`, which nothing serves.
+- **Then the check, on this node.** Outside the session (it runs the tests),
+  the node runs `check_package` exactly as `cairn solver add --objective`
+  would, with the objective that pins it, and files the package only if it
+  passes, or on format and hashes alone when none of its targets runs here.
+  A failure is recorded in `.cairn/solvers/.failed/<hex>.json` with the
+  report; the package is never offered and never fetched again unless the
+  operator deletes that file. A check that could not be decided (no jail, the
+  checker not here yet) is never a failure: the package stays staged and the
+  check is retried every ten minutes. The daemon logs which of the three
+  happened.
+
+**Chunked, with a separate cap.** A package file may be 32 MiB and a blob may
+be one, deliberately and for every node at once. A separate, larger
+per-message cap for package files was the obvious alternative, and the
+transport rules it out: a frame is at most 16 MiB (`transport::MAX_FRAME`),
+which bounds every message family's allocation before decryption, and a
+32 MiB file is 64 MiB of hex. So a file travels as `code_part`s of at most a
+mebibyte, the blob ceiling, and the cap on the whole file is the size its
+manifest pins. Parts are not separately verifiable (the manifest pins whole
+files, and adding piece hashes would change every v1 package id), so a file
+is assembled in memory within one session and hashed before a byte of it is
+written; an item cut short is dropped and asked for again. One direction of
+one session moves at most one file of the largest size plus a manifest, and
+the two directions take turns, so neither side writes tens of mebibytes at a
+peer that is also writing.
+
+A peer that predates packages ignores the want's `packages` field and sends
+none, and the package round runs only when both wants carried one, so mixed
+versions sync as before.
+
+**Approaches do not travel.** A pin is inside the objective's id and under its
+funder's signature: the author chose that program, every node agrees on which
+bytes it is, and fetching it asks nobody to trust anyone new. Which *approach*
+a node offers for an objective that pinned nothing is that node's operator's
+decision, and `--package auto` runs the newest that passed, so a node that
+took approaches from peers would let any stranger choose the program that
+runs on its contributors' machines. The log does not bound them either (anyone
+may write an approach to anything), and learning them would need an inventory
+message, which the code exchange refuses to send for privacy reasons. An
+operator who wants an approach adds it with `cairn solver add`; an author who
+wants a solver to reach everyone pins it.
+
+`scripts/solver-sync-demo.sh` runs it between two daemons: B starts with an
+empty log and A's address, receives the objective, its checker and its
+package, checks it, offers it, and a worker pointed at B runs it and is paid.
 
 ## Running
 
@@ -222,11 +291,13 @@ without asking twice.
 
 ## What is not done yet
 
-- **Packages do not travel between nodes.** They live in each node's store.
-  A contributor whose own node synced an objective but not its package is told
-  the solver is not on this node; they can work against a node that has it.
-  Moving packages over the p2p exchange, as pinned checkers already move, is
-  the next step.
+- **Availability is whoever is on the line.** A node fetches a package from
+  the peers it holds sessions with, steered by the DHT as for checkers; one
+  whose peers never include a holder stays without it, and nothing pays
+  anybody to keep seeding. A large package also costs time: one session moves
+  one large file each way, holding the session (and the node's lock) while it
+  crosses the link.
+- **Approaches stay where they were added**, by design (above).
 - **No GPU** inside the jail, and no WASI target yet (above).
 - **Publishing is local.** `cairn solver add` writes the store of the node it
   runs beside; there is no HTTP upload, by design for now: a route that
