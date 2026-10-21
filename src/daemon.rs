@@ -1646,6 +1646,7 @@ pub fn run(config: Config) -> Result<(), String> {
         None => None,
     };
 
+    let settling = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut ticks: u64 = 0;
     loop {
         if let Some(store) = config.store.as_ref() {
@@ -1781,7 +1782,21 @@ pub fn run(config: Config) -> Result<(), String> {
                     service.known_hints(),
                     crate::time::unix_seconds(),
                 );
-            guard.node.missing_code()
+            let mut needs = guard.node.missing_code();
+            // Solver packages too: a pin this node lacks is a reason to dial
+            // whoever the DHT says holds it, exactly as a missing checker is.
+            let pinned = guard.node.pinned_packages();
+            if !pinned.is_empty() {
+                let root = guard.node.root().to_path_buf();
+                needs.extend(
+                    crate::solver::sync::Exchange::new(&root, pinned.keys().cloned())
+                        .pins()
+                        .iter()
+                        .cloned(),
+                );
+                settle_packages(&settling, root, pinned);
+            }
+            needs
         };
         // The direct key requests `seed_from_log` queued, now that the lock is
         // released: each is a blocking dial, and a log naming dead addresses
@@ -1908,6 +1923,52 @@ pub fn run(config: Config) -> Result<(), String> {
         }
         thread::sleep(Duration::from_secs(TICK_SECONDS));
     }
+}
+
+/// Check and file the solver packages peers sent, on a thread of its own and
+/// one pass at a time.
+///
+/// Off the tick thread and outside the node's lock, because a check runs every
+/// test of a package in the jail and can take minutes; holding the lock for it
+/// would stop every session, inbound and outbound, for as long as a stranger's
+/// tests chose to run. A pass that finds nothing staged costs one `read_dir`.
+fn settle_packages(
+    running: &Arc<std::sync::atomic::AtomicBool>,
+    root: PathBuf,
+    pinned: BTreeMap<String, (String, Objective)>,
+) {
+    use std::sync::atomic::Ordering;
+    if !crate::solver::sync::Incoming::under(&root).dir().is_dir() {
+        return;
+    }
+    if running.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let running = Arc::clone(running);
+    thread::spawn(move || {
+        use crate::solver::sync::Settled;
+        for outcome in crate::solver::sync::settle(&root, &pinned) {
+            match outcome {
+                Settled::Offered { id, verdict } => log::info!(
+                    "solver package {id} from a peer: {} here; offered",
+                    match verdict {
+                        crate::solver::check::Outcome::Pass => "its tests passed",
+                        _ => "no target runs on this host, so format and hashes checked only",
+                    }
+                ),
+                Settled::Failed { id, why } => {
+                    log::warn!("solver package {id} from a peer: refused here: {why}")
+                }
+                Settled::Waiting { id, why } => {
+                    log::debug!("solver package {id} from a peer: waiting: {why}")
+                }
+                Settled::Dropped { id } => {
+                    log::debug!("solver package {id}: staged copy removed")
+                }
+            }
+        }
+        running.store(false, Ordering::Release);
+    });
 }
 
 /// Say what a successful session changed, in the journal: a peer reached

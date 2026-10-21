@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import ssl
 import stat
 import sys
 import time
@@ -61,10 +62,24 @@ def check_endpoint(url, allow_loopback_http=False):
 class MCP:
     def __init__(self, url, token):
         self.url, self.token, self.session = url, token, None
+        context = ssl.create_default_context()
+        if not context.get_ca_certs():
+            try:
+                import certifi
+            except ImportError as error:
+                paths = ssl.get_default_verify_paths()
+                if not ((paths.cafile and os.path.isfile(paths.cafile))
+                        or (paths.capath and os.path.isdir(paths.capath))):
+                    raise TransportError(
+                        "no TLS CA roots; set SSL_CERT_FILE or install certifi"
+                    ) from error
+            else:
+                context.load_verify_locations(cafile=certifi.where())
         # An agent bearer belongs to this endpoint. Environment proxies and
         # redirects could send it somewhere else without the agent noticing.
         self.opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}), NoRedirect())
+            urllib.request.ProxyHandler({}), NoRedirect(),
+            urllib.request.HTTPSHandler(context=context))
 
     def request(self, method, body=None):
         headers = {"Authorization": "Bearer " + self.token,

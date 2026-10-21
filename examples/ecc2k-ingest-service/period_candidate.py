@@ -72,14 +72,28 @@ def previously_ineligible(args):
             or record.get("replica_id") != args.replica_id
             or record.get("period") != args.period
             or record.get("reason") not in ("invalid_journal", "missing_before_status",
-                                             "missing_after_status")
+                                             "missing_after_status", "missing_journal",
+                                             "missing_next_journal")
             or type(record.get("journals")) is not list
-            or len(record["journals"]) != (2 if record["reason"] == "missing_after_status" else 1)):
+            or len(record["journals"]) != (2 if record["reason"] in (
+                "missing_after_status", "missing_next_journal") else 1)):
         raise ValueError(f"{path}: malformed ineligible marker; inspect before retry")
+    gap = record["reason"] in ("missing_journal", "missing_next_journal")
     for offset, journal in enumerate(record["journals"]):
+        expected = args.period + offset
+        if gap and (record["reason"] == "missing_journal" or offset == 1):
+            expected = None
+        key = journal.get("s3_key") if type(journal) is dict else None
+        suffix = key[len(args.evidence_prefix):] if type(key) is str and key.startswith(
+            args.evidence_prefix) else ""
+        match = re.fullmatch(r"period-([0-9]+)\.json", suffix)
+        witnessed_period = int(match[1]) if match else None
         if (type(journal) is not dict
                 or set(journal) != {"s3_key", "sha256", "version_id"}
-                or journal["s3_key"] != args.evidence_prefix + f"period-{args.period + offset}.json"
+                or (expected is not None and journal["s3_key"] != args.evidence_prefix
+                    + f"period-{expected}.json")
+                or (expected is None and (witnessed_period is None
+                    or witnessed_period < args.period + 2))
                 or type(journal["sha256"]) is not str
                 or not re.fullmatch(r"[0-9a-f]{64}", journal["sha256"])
                 or type(journal["version_id"]) is not str or not journal["version_id"]):
@@ -189,6 +203,92 @@ def check_journal(journal, period, seconds, replica_id):
     if snapshots[0]["observed_at"] > start + 60 or snapshots[-1]["observed_at"] < end - 60:
         raise ValueError("period journal does not cover both boundaries")
     return snapshots
+
+
+def completed_future_journal(args, s3):
+    """Find a versioned, structurally completed later journal for a missing period."""
+    prefix = args.evidence_prefix + "period-"
+    marker = prefix + f"{args.period + 1}.json"
+    token = None
+    while True:
+        request = {"Bucket": args.bucket, "Prefix": prefix, "MaxKeys": 1000}
+        if token:
+            request["ContinuationToken"] = token
+        else:
+            request["StartAfter"] = marker
+        listing = s3.list_objects_v2(**request)
+        for item in listing.get("Contents", []):
+            key = item["Key"]
+            match = re.fullmatch(re.escape(prefix) + r"([0-9]+)\.json", key)
+            if not match or int(match[1]) < args.period + 2:
+                continue
+            future_period = int(match[1])
+            try:
+                raw, version = fetch(s3, args.bucket, key, 900_000)
+            except MissingEvidence:
+                continue
+            if not version:
+                raise ValueError(f"{key}: evidence bucket must return an immutable version id")
+            try:
+                journal = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            end = (future_period + 1) * args.period_seconds
+            if (type(journal) is dict
+                    and set(journal) == {"schema", "replica_id", "period", "period_seconds",
+                                         "started_at", "ended_at", "healthy_at_end", "events",
+                                         "snapshots"}
+                    and journal.get("schema") == "cairn-dp-operator-period-v2"
+                    and journal.get("replica_id") == args.replica_id
+                    and type(journal.get("period")) is int
+                    and journal["period"] == future_period
+                    and type(journal.get("period_seconds")) is int
+                    and journal["period_seconds"] == args.period_seconds
+                    and type(journal.get("started_at")) is int
+                    and future_period * args.period_seconds <= journal["started_at"] <= (
+                        future_period * args.period_seconds + 60)
+                    and type(journal.get("healthy_at_end")) is bool
+                    and type(journal.get("events")) is list
+                    and type(journal.get("snapshots")) is list
+                    and type(journal.get("ended_at")) is int
+                    and end <= journal["ended_at"] <= min(end + 60, time.time_ns() // 1_000_000_000)):
+                return journal_reference(key, raw, version)
+        if not listing.get("IsTruncated"):
+            return None
+        token = listing.get("NextContinuationToken")
+        if not token:
+            raise ValueError("truncated S3 journal listing has no continuation token")
+
+
+def missing_journal_gap(args, missing_key, s3, future=None):
+    current_key = args.evidence_prefix + f"period-{args.period}.json"
+    next_key = args.evidence_prefix + f"period-{args.period + 1}.json"
+    if missing_key not in (current_key, next_key):
+        return None
+    if future is not None:
+        key = future.get("s3_key") if type(future) is dict else None
+        match = re.fullmatch(re.escape(args.evidence_prefix) + r"period-([0-9]+)\.json",
+                             key) if type(key) is str else None
+        sha = future.get("sha256") if type(future) is dict else None
+        version = future.get("version_id") if type(future) is dict else None
+        if (not match or int(match[1]) < args.period + 2
+                or type(sha) is not str or not re.fullmatch(r"[0-9a-f]{64}", sha)
+                or type(version) is not str or not version):
+            future = None
+    if future is None:
+        future = completed_future_journal(args, s3)
+    if future is None:
+        return None
+    if missing_key == current_key:
+        return IneligiblePeriod("missing_journal", [future])
+    try:
+        raw, version = fetch(s3, args.bucket, current_key, 900_000)
+    except MissingEvidence:
+        return None
+    if not version:
+        raise ValueError(f"{current_key}: evidence bucket must return an immutable version id")
+    return IneligiblePeriod("missing_next_journal", [
+        journal_reference(current_key, raw, version), future])
 
 
 def assemble(args, s3=None, database_url=None):
@@ -316,7 +416,7 @@ def assemble(args, s3=None, database_url=None):
     return destination
 
 
-def main(argv=None, database_url=None):
+def main(argv=None, database_url=None, s3=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--evidence-prefix", required=True)
@@ -338,6 +438,7 @@ def main(argv=None, database_url=None):
     watching = args.watch_from is not None
     period = args.period if not watching else args.watch_from
     last_missing = None
+    future_witness = None
     while True:
         current = (time.time_ns() // 1_000_000_000) // args.period_seconds
         if period >= current:
@@ -349,7 +450,10 @@ def main(argv=None, database_url=None):
                 period += 1
                 continue
             try:
-                print(assemble(args, database_url=database_url))
+                if s3 is None:
+                    import boto3
+                    s3 = boto3.client("s3")
+                print(assemble(args, s3=s3, database_url=database_url))
                 period += 1
                 last_missing = None
                 if watching:
@@ -365,6 +469,14 @@ def main(argv=None, database_url=None):
             except MissingEvidence as error:
                 if not watching:
                     raise
+                gap = missing_journal_gap(args, str(error), s3, future_witness)
+                if gap is not None:
+                    future_witness = gap.journals[-1]
+                    marker = record_ineligible(args, gap)
+                    print(f"ineligible service period: {marker}: {gap.reason}", file=sys.stderr)
+                    period += 1
+                    last_missing = None
+                    continue
                 if str(error) != last_missing:
                     print(f"waiting for completed S3 evidence: {error}", file=sys.stderr)
                     last_missing = str(error)

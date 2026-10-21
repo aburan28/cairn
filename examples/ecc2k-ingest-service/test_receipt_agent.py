@@ -2,12 +2,17 @@
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import receipt_agent
+
+
+REAL_MCP = receipt_agent.MCP
 
 
 OBJECTIVE = "sha256:" + "1" * 64
@@ -156,6 +161,28 @@ class ReceiptAgentTest(unittest.TestCase):
         os.chmod(self.token, 0o644)
         with self.assertRaisesRegex(ValueError, "must be private"):
             receipt_agent.private_token(self.token)
+
+    def test_https_client_refuses_missing_ca_roots(self):
+        context = Mock()
+        context.get_ca_certs.return_value = []
+        with patch.object(receipt_agent.ssl, "create_default_context", return_value=context), \
+                patch.object(receipt_agent.ssl, "get_default_verify_paths",
+                             return_value=SimpleNamespace(cafile=None, capath=None)), \
+                patch.dict(sys.modules, {"certifi": None}):
+            with self.assertRaisesRegex(receipt_agent.TransportError, "no TLS CA roots"):
+                REAL_MCP("https://cairn.example/mcp", "ab" * 32)
+
+    def test_https_client_accepts_system_ca_directory_without_certifi(self):
+        context = Mock()
+        context.get_ca_certs.return_value = []
+        ca_dir = self.root / "certs"
+        ca_dir.mkdir()
+        with patch.object(receipt_agent.ssl, "create_default_context", return_value=context), \
+                patch.object(receipt_agent.ssl, "get_default_verify_paths",
+                             return_value=SimpleNamespace(cafile=None, capath=str(ca_dir))), \
+                patch.dict(sys.modules, {"certifi": None}):
+            client = REAL_MCP("https://cairn.example/mcp", "ab" * 32)
+        self.assertIsNotNone(client.opener)
 
 
 if __name__ == "__main__":

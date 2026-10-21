@@ -357,12 +357,15 @@ these two source tables; it is not a database-wide membership or callable-
 function audit.
 
 This process holds no auditor signing key and never calls Cairn. A missing
-shipped period is retried in watch mode. A completed, versioned journal that
-fails the service checks, or lacks a status generated across a period boundary,
-produces a private `ineligible-<replica>-<period>.json` marker with the journal
-keys, version ids, and hashes. The watcher then reviews later periods and
-honors that marker after a restart. No candidate or receipt is made for the
-marked period. Other evidence errors stop the watcher for investigation. The
+shipped period is retried until S3 contains a versioned, structurally completed
+journal at least two periods later. The watcher then records the missing period
+as ineligible, including the later journal's exact key, version id, and hash,
+and continues. A completed, versioned journal that fails the service checks,
+or lacks a status generated across a period boundary, also produces a private
+`ineligible-<replica>-<period>.json` marker. The watcher honors each marker
+after a restart. No candidate or receipt is made for a marked period. A late
+arrival of missing evidence needs manual review rather than automatic payment.
+Other evidence errors stop the watcher for investigation. The
 independent auditor must still review source
 inventory, RDS output, and public status provenance before running
 `service.py sign` on `body.json`. For a period with completed polls, the

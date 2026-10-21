@@ -495,7 +495,11 @@ So holdership is **pulled**. `Ask` carries content addresses the asker wants;
 discards anything outside the asked set rather than trusting a peer not to
 volunteer. The set asked is the set the code round already sent as a
 `code_want`, threaded through rather than recomputed, so the round adds routing
-knowledge at **no additional disclosure**.
+knowledge at **no additional disclosure**. That includes the solver package ids
+in the want's `packages` field ([solvers.md](solvers.md#between-nodes)): a
+package id is a content address like a checker's, a node answers for the
+packages in its store, and a holder of a manifest can serve every file it
+names.
 
 Threading it rather than recomputing matters in the other direction too: the
 still-missing set after a fetch excludes everything the peer just supplied, so a
