@@ -119,26 +119,27 @@ struct TasksSheet: View {
         busy = true
         let files = task.objectives.map { library.appendingPathComponent($0).path }
         let solvers = task.solvers.map { library.appendingPathComponent($0).path }
-        node.postObjectives(at: files) { err in
-            // An objective's id is its content, so posting the same one twice
-            // is refused by the node. That is not a failure to show in red,
-            // and its solver still goes in: a log posted by an older app has
-            // the objective and not the package.
-            if let err, !err.contains("already posted") {
+        // The solver goes in first: the node refuses to post an objective
+        // that ships none. Each package is checked against the objective
+        // file it names, so its verify tests run before anything is posted.
+        node.addSolvers(at: solvers, objective: files.first) { solverError in
+            if let solverError {
                 busy = false
-                error = err
+                error = "Its solver did not pass its tests here, so nothing was posted: \(solverError)"
                 return
             }
-            let posted = err == nil ? "Posted." : "Already in this node's log."
-            node.addSolvers(at: solvers) { solverError in
+            node.postObjectives(at: files) { err in
                 busy = false
-                if let solverError {
-                    error = "\(posted) Its solver was not added: \(solverError)"
+                // An objective's id is its content, so posting the same one
+                // twice is refused by the node. That is not a failure to show
+                // in red: a log posted by an older app has the objective and
+                // now has its package too.
+                if let err, !err.contains("already posted") {
+                    error = err
                     return
                 }
-                info = solvers.isEmpty
-                    ? "\(posted) It is listed under Objectives once the node is back."
-                    : "\(posted) Its solver passed its tests here, so Share this Mac… can start it."
+                let posted = err == nil ? "Posted." : "Already in this node's log."
+                info = "\(posted) Its solver passed its tests here, so Share this Mac… can start it."
                 browser.reload()
             }
         }
@@ -162,7 +163,11 @@ private struct TaskRow: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if !available {
+                if task.solvers.isEmpty {
+                    Text("No solver package ships with this task yet, so it cannot be posted.")
+                        .font(.caption)
+                        .foregroundStyle(.gray)
+                } else if !available {
                     Text("Not included in this build of Cairn.")
                         .font(.caption)
                         .foregroundStyle(.gray)

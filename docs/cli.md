@@ -144,9 +144,15 @@ refused.
 
 ## Taking part
 
-### `post <objective.json> [--identity FILE]`
+### `post <objective.json> [--identity FILE] [--solver DIR | --without-solver]`
 
-Fund a checkable question. With `--identity`, the record is signed and the
+Fund a checkable question. Every objective must ship a solver package
+contributors can press Start on ([solvers](solvers.md#publishing)): the post is
+refused unless the objective pins, or this node already offers, a package that
+passed its tests here. `--solver DIR` pins the package in `DIR`, checks it
+against the objective, adds it and posts in one step. `--without-solver` (or
+`CAIRN_ALLOW_NO_SOLVER=1`) posts an objective meant only for agents. With
+`--identity`, the record is signed and the
 signing key's public half *is* the funder. Prints a decomposition note when the
 reward is below what the network costs to verify it — before you fund it, not
 after.
@@ -421,8 +427,9 @@ cairn --root R --log L solver list [--objective ID]    # what this node offers
 
 `check` exits `0` when every test passed, `1` when one failed and `3` when
 none could run here. `add` files only a package whose tests passed on this
-node, in `ROOT/.cairn/solvers`. `cairn post` refuses an objective that pins a
-package this node does not hold or whose tests did not pass here.
+node, in `ROOT/.cairn/solvers`. `cairn post` refuses an objective that ships no
+package that passed here, and one that pins a package this node does not hold
+or whose tests did not pass here.
 
 ### `drain --queue DIR [--dry-run]`
 

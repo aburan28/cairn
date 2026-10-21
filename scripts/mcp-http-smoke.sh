@@ -8,6 +8,9 @@
 # comes from the Python evaluator in examples/, executed as a subprocess with
 # its hash checked first.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 
 # Plaintext, like the stdio smoke test's log: the CLI seals every log it
 # creates whenever a key file exists, and this script greps the log's line

@@ -162,6 +162,30 @@ yet; a package gets CPU threads only.
 
 ## Publishing
 
+**Every objective ships a solver.** An objective nobody can press Start on is
+one only its author can work, so every author-side way of posting refuses an
+objective that has no solver package on the posting node whose tests passed
+there: `cairn post`, the MCP `post_objective` tool, `POST /submit` (refused
+`422 no_solver`) and Cairn.app's task, challenge and coordination composers.
+The one-step way to satisfy it:
+
+```sh
+cairn solver pack my-solver/
+cairn --root R --log L post objective.json --solver my-solver/
+```
+
+`--solver DIR` writes the package's id into the objective as its pin (below),
+runs the package's tests against that objective in the sandbox, adds it to the
+node's store, and posts; if the tests fail nothing is posted.
+
+The escape hatch is explicit: `cairn post --without-solver` for one objective
+meant only for agents, or `CAIRN_ALLOW_NO_SOLVER=1` in the environment of the
+`cairn post`, `cairn mcp` or `cairn serve` process (test fixtures and demos set
+it). A pinned package must still be present and passing either way. Like the
+pin check, this is applied only where an author posts: record sync, peers and
+`cairn drain` never apply it, so it changes nothing about which records a node
+admits.
+
 There are two ways a package becomes the thing that runs.
 
 **Pinned by its objective.** The author packs the solver, puts its id in the
@@ -180,6 +204,8 @@ cairn --root R --log L solver add my-solver/ --objective objective.json
 cairn --root R --log L post objective.json
 ```
 
+(`post --solver my-solver/` does the pinning and the `add` for you.)
+
 `capabilities` is the routing hint verifiers already ignore
 ([scheduling](../src/scheduling.rs)), so the pin is inside the objective's id
 and its funding signature without a new record field, and older nodes read the
@@ -189,7 +215,7 @@ lives in the author's command only: record sync and peers never apply it, so it
 changes nothing about which records a node admits.
 
 **An approach to an objective that pinned none.** Every objective posted
-before packages existed, and any objective whose author shipped no solver, can
+before packages existed, and any objective posted `--without-solver`, can
 still get one: name it in `solver.json` (`"objective": "sha256:…"`) and add it
 to a node. `--package auto` runs the newest approach that passed on that node.
 When an objective *does* pin a package, a node that lacks it offers nothing in

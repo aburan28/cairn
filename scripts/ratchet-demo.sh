@@ -5,6 +5,9 @@
 # The point of this demo is that publishing an improvement is the profitable
 # move. Nobody has to hoard, so nobody duplicates anybody else's work.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/.."
 
 LOG="${1:-/tmp/cairn-ratchet.jsonl}"

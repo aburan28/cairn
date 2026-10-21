@@ -65,11 +65,13 @@ mkdir -p "$ROOT/examples/certicom-ecdlp/checkers"
 cp examples/certicom-ecdlp/checkers/ecc2k23_orbit_batch.py "$ROOT/examples/certicom-ecdlp/checkers/"
 
 rule "an objective, and the solver its author publishes for it"
-OID=$("$RUST" --log "$LOG" --root "$ROOT" post examples/certicom-ecdlp/objective-ecc2k-23-orbit-batch.json | head -1 | awk '{print $2}')
-echo "objective $OID"
-"$RUST" --log "$LOG" --root "$ROOT" solver add "$PACKAGE" | sed 's/^/  /'
+OBJECTIVE=examples/certicom-ecdlp/objective-ecc2k-23-orbit-batch.json
+# The solver first: `cairn post` refuses an objective that ships none.
+"$RUST" --log "$LOG" --root "$ROOT" solver add "$PACKAGE" --objective "$OBJECTIVE" | sed 's/^/  /'
 PID=$("$RUST" --log "$LOG" --root "$ROOT" solver list | awk 'NR==1 {print $1}')
 [ -n "$PID" ] || fail "solver add filed nothing"
+OID=$("$RUST" --log "$LOG" --root "$ROOT" post "$OBJECTIVE" | head -1 | awk '{print $2}')
+echo "objective $OID"
 
 "$RUST" --log "$LOG" --root "$ROOT" p2p \
   --identity "$WORK/id.json" --root-key "$WORK/rk.json" --checkpoint "$WORK/cp.json" \

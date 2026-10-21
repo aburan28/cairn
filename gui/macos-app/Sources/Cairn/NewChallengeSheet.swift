@@ -28,6 +28,9 @@ final class ChallengeComposer: ObservableObject {
     @Published var draftProblems: [String] = []
     @Published var error: String?
     @Published var feedback = ""
+    /// The solver package posted with the challenge. Every objective ships
+    /// one, so contributors can press Start instead of choosing a program.
+    @Published var solverDir: URL?
     /// Where a draft under way has got to: the sheet's bar and checklist.
     @Published var progress = DraftProgress()
     /// The provider's key, read from `~/.cairn/secrets` when the sheet
@@ -213,6 +216,10 @@ final class ChallengeComposer: ObservableObject {
     /// passed is still the test of what is posted.
     func post(then reload: @escaping () -> Void) {
         guard let draft, outcome?.ok == true else { return }
+        guard let solverDir else {
+            error = "Choose the solver package to publish with this challenge."
+            return
+        }
         error = nil
         let built: BuiltChallenge
         do {
@@ -223,7 +230,7 @@ final class ChallengeComposer: ObservableObject {
             return
         }
         phase = .posting
-        node.postObjectives(at: [built.objectiveFile.path]) { [weak self] err in
+        node.postObjectives(at: [built.objectiveFile.path], solver: solverDir.path) { [weak self] err in
             guard let self else { return }
             if let err {
                 self.error = err
@@ -603,6 +610,8 @@ struct NewChallengeSheet: View {
                 }
             }
 
+            solverRow
+
             HStack {
                 Button("Back") { composer.phase = .compose }
                 Button("Redraft") { composer.draftChallenge(redraft: true) }
@@ -612,11 +621,46 @@ struct NewChallengeSheet: View {
                 Button("Cancel") { isPresented = false }.keyboardShortcut(.cancelAction)
                 Button("Post Challenge") { composer.post { browser.reload() } }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(composer.outcome?.ok != true || composer.phase == .posting || node.isAttached)
+                    .disabled(composer.outcome?.ok != true || composer.solverDir == nil
+                              || composer.phase == .posting || node.isAttached)
                     .help(composer.outcome?.ok == true
                           ? "Post it to this node's log. The node pauses for a moment: its log has one writer."
                           : "Posting waits for a hole to be refused, the theorem to compile, and the model's proof, if it wrote one, to be accepted.")
             }
+        }
+    }
+
+    /// The author's side of one-button contributing: the program that
+    /// works this challenge, as a `cairn-solver/v1` package (docs/solvers.md).
+    /// Posting checks it against the challenge's own checker, in the
+    /// sandbox, and refuses the post unless its tests pass.
+    private var solverRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("Solver").font(.callout.weight(.medium))
+            if let dir = composer.solverDir {
+                Text(dir.lastPathComponent).font(.callout.monospaced())
+                    .help(dir.path)
+            } else {
+                Text("Required. A solver package (a folder with solver.json) that contributors run with one click.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button(composer.solverDir == nil ? "Choose Package…" : "Change…") {
+                let panel = NSOpenPanel()
+                panel.canChooseDirectories = true
+                panel.canChooseFiles = false
+                panel.allowsMultipleSelection = false
+                panel.message = "Choose a solver package folder (it contains solver.json)."
+                guard panel.runModal() == .OK, let url = panel.url else { return }
+                guard FileManager.default.fileExists(atPath: url.appendingPathComponent("solver.json").path) else {
+                    composer.error = "\(url.lastPathComponent) has no solver.json. Run `cairn solver pack` in it first."
+                    return
+                }
+                composer.error = nil
+                composer.solverDir = url
+            }
+            .disabled(composer.phase == .posting)
         }
     }
 

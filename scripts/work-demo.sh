@@ -13,6 +13,9 @@
 # The "second machine" is a process on this one: the only thing it shares
 # with the node is the HTTP address, which is exactly what a LAN worker has.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/.."
 
 RUST="${RUST_BIN:-./target/release/cairn}"

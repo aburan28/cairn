@@ -202,7 +202,7 @@ enum CoordinationBuilder {
             var env = environment
             env["CAIRN_REQUIRE_SANDBOX"] = "1"
             env["CAIRN_SANDBOX_MEMORY_MB"] = "512"
-            let posted = ChallengeTest.run(binary, global + ["post", built.objectiveFile.path], in: scratch,
+            let posted = ChallengeTest.run(binary, global + ["post", built.objectiveFile.path, "--without-solver"], in: scratch,
                                            environment: env, timeout: 30)
             guard posted.status == 0 else { throw AIError("The node refused the spec: \(posted.err)") }
             guard let id = posted.out.split(separator: "\n").first(where: { $0.hasPrefix("objective ") })?

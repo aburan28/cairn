@@ -19,6 +19,9 @@
 # `conformance/adversarial.jsonl` is the corpus: one case per line, each with
 # a note saying what would break if the two disagreed about it.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/.."
 
 CORPUS="${CORPUS:-conformance/adversarial.jsonl}"

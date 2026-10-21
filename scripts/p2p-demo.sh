@@ -31,6 +31,9 @@
 # is local. A checkpoint attests to one node's prefix, never to a root every
 # node must share.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/.."
 
 # The daemon and the HTTP publisher are `cairn p2p` and `cairn serve`: one

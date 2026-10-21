@@ -621,6 +621,11 @@ pub struct Serving {
     log: PathBuf,
     root: PathBuf,
     spool: Option<Spool>,
+    /// Whether `POST /submit` demands that an objective ship a solver
+    /// package (docs/solvers.md). Off when the operator set
+    /// CAIRN_ALLOW_NO_SOLVER=1, and by default in this module's unit tests,
+    /// which are about the transport; one test turns it on.
+    require_solver: bool,
     /// Only operator-selected labs are public. Run recipes can contain
     /// private parameters; discovering a lab on disk is not consent to share.
     workspaces: Vec<PathBuf>,
@@ -764,6 +769,7 @@ impl Serving {
             log,
             root: root.into(),
             spool: None,
+            require_solver: cfg!(not(test)) && !crate::solver::cli::no_solver_allowed(),
             workspaces: std::env::var_os("CAIRN_LAB_HTTP")
                 .map(|paths| std::env::split_paths(&paths).collect())
                 .unwrap_or_default(),
@@ -5451,6 +5457,34 @@ fn submit(
     if let Err(refusal) = decoded {
         return json_refusal(stream, &refusal);
     }
+    // An objective submitted here must ship a solver this node holds and has
+    // tested, as `cairn post` requires, unless the operator started the node
+    // with CAIRN_ALLOW_NO_SOLVER=1. Checked at the door only: the drain never
+    // applies it, so a proposal already queued is not stranded by it.
+    if kind == "objective" {
+        if let Ok(objective) = Objective::from_value(&value) {
+            let problem = if serving.require_solver {
+                crate::solver::cli::solver_problem(&serving.root, &objective)
+            } else {
+                crate::solver::cli::pin_problem(&serving.root, &objective)
+            };
+            if let Some(problem) = problem {
+                return json_refusal(
+                    stream,
+                    &Refusal::new(
+                        422,
+                        "no_solver",
+                        problem.replace(
+                            "`cairn post <this file> --solver DIR`",
+                            "`cairn post FILE --solver DIR` on the node, or pin a package \
+                             it already offers (GET /solvers) in \
+                             verifier.capabilities.worker",
+                        ),
+                    ),
+                );
+            }
+        }
+    }
 
     // A fleet leader signs its workers' records here, before the gate and the
     // queue, so what is queued is exactly what will be admitted.
@@ -6407,6 +6441,7 @@ fn respond_with(
         413 => "Content Too Large",
         415 => "Unsupported Media Type",
         421 => "Misdirected Request",
+        422 => "Unprocessable Content",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
@@ -7212,6 +7247,33 @@ mod tests {
         let other = spool.offer("commitment", &different).expect("offer");
         assert_ne!(first, other);
         assert_eq!(spool.pending().len(), 2);
+    }
+
+    #[test]
+    fn an_objective_that_ships_no_solver_is_refused_at_the_door() {
+        let dir = TempDir::new("no-solver");
+        let log = dir.path.join("log.jsonl");
+        std::fs::write(&log, "").unwrap();
+        let queue = dir.path.join("queue");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut serving = Serving::new(&log, &dir.path).accepting_into(&queue);
+        serving.require_solver = true;
+        std::thread::spawn(move || {
+            let _ = serve_on(listener, serving);
+        });
+        let (status, refused) = ask_json(
+            addr,
+            "/submit?kind=objective",
+            &draft("no-solver").canonical_string(),
+        );
+        assert!(status.contains("422"), "{status} {refused:?}");
+        assert_eq!(
+            refused.get("reason").and_then(Value::as_str),
+            Some("no_solver"),
+            "{refused:?}"
+        );
+        assert!(Spool::at(&queue).pending().is_empty(), "nothing was queued");
     }
 
     #[test]

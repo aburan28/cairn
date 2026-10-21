@@ -20,6 +20,9 @@
 #   5. The `replay` example round-trips: the one objective shape an
 #      experiment's run record takes on the network.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/.."
 
 WORK="$(mktemp -d)"

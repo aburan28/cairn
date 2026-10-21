@@ -24,6 +24,9 @@
 #      `invalid_spec`: the generated spec has to be *complete*, or the scaffold
 #      has handed somebody a bounty that can never settle.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 
 # Forces a plaintext log. This script reads the log as text -- it greps for a
 # field, or parses it as JSON -- and the CLI seals every log it creates whenever

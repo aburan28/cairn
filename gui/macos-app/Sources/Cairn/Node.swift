@@ -1126,7 +1126,11 @@ final class Node: ObservableObject {
     /// node briefly, same as announcing a peer. The files a pin names must
     /// already be under the node's root (`GuiTasks.stage`), or the node admits
     /// an objective it cannot check.
-    func postObjectives(at paths: [String], completion: @escaping (String?) -> Void) {
+    /// `solver`, when given, is a solver package directory: `cairn post
+    /// --solver` checks it against each objective, adds it and pins it.
+    /// Without one the node posts only objectives that already ship a solver.
+    func postObjectives(at paths: [String], solver: String? = nil,
+                        completion: @escaping (String?) -> Void) {
         guard !isAttached || runsInBackground else {
             completion("This window is attached to another node; it cannot write that log.")
             return
@@ -1148,7 +1152,7 @@ final class Node: ObservableObject {
         let log = dataDir.appendingPathComponent("log/cairn.jsonl")
         let root = dataDir.path
         let posts = paths.map { path in
-            ["--log", log.path, "--root", root, "post", path]
+            ["--log", log.path, "--root", root, "post", path] + (solver.map { ["--solver", $0] } ?? [])
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var lastError: String?
@@ -1183,7 +1187,8 @@ final class Node: ObservableObject {
     /// Mac… with nothing to choose. `cairn` runs each package's tests in the
     /// sandbox first and refuses one that fails them, and that refusal is
     /// what this reports. Only reads the log, so the node keeps running.
-    func addSolvers(at directories: [String], completion: @escaping (String?) -> Void) {
+    func addSolvers(at directories: [String], objective: String? = nil,
+                    completion: @escaping (String?) -> Void) {
         guard !directories.isEmpty else {
             completion(nil)
             return
@@ -1207,6 +1212,7 @@ final class Node: ObservableObject {
                 let p = Process()
                 p.executableURL = binary
                 p.arguments = ["--log", log.path, "--root", root, "solver", "add", directory]
+                    + (objective.map { ["--objective", $0] } ?? [])
                 p.environment = environment
                 let out = Pipe()
                 p.standardOutput = out

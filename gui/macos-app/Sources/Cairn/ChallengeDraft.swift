@@ -464,7 +464,7 @@ enum ChallengeTest {
                 "--key-file", scratch.appendingPathComponent("no-key").path,
             ]
             progress(.posting)
-            let posted = run(binary, global + ["post", built.objectiveFile.path], in: scratch, environment: environment)
+            let posted = run(binary, global + ["post", built.objectiveFile.path, "--without-solver"], in: scratch, environment: environment)
             guard posted.status == 0 else {
                 let why = posted.err.isEmpty ? "cairn post exited \(posted.status)" : posted.err
                 return Outcome(hole: .refused(why), statement: .untested("the objective was refused"), proof: nil)

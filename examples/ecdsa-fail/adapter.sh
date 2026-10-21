@@ -9,6 +9,9 @@
 # Does not replace ecdsafail submit. Unavailable tooling exits non-zero without
 # claiming the circuit failed.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 

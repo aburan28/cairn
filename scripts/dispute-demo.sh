@@ -22,6 +22,9 @@
 #   3. `reference/rust` audits the finished log clean, which means it accounts
 #      for the bond and the slash rather than ignoring records it does not know.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 cd "$(dirname "$0")/.."
 
 WORK="$(mktemp -d)"

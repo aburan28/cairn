@@ -320,6 +320,85 @@ pub fn pin_problem(root: &Path, objective: &Objective) -> Option<String> {
     }
 }
 
+/// Set to `1` on a process that posts objectives (`cairn post`, `cairn mcp`,
+/// `cairn serve`) to admit objectives that ship no solver package. For test
+/// harnesses, demos, and objectives meant only for agents; Cairn.app never
+/// sets it. `cairn post --without-solver` is the same thing for one post.
+pub const ALLOW_NO_SOLVER_ENV: &str = "CAIRN_ALLOW_NO_SOLVER";
+
+/// Whether this process was told to admit objectives with no solver.
+pub fn no_solver_allowed() -> bool {
+    std::env::var(ALLOW_NO_SOLVER_ENV).is_ok_and(|v| v == "1")
+}
+
+/// Why an author may not post `objective` from this node, or `None`.
+///
+/// Every objective must ship a solver anyone can press Start on: either a
+/// pinned package ([`pin_problem`]) or, for an objective that pins none, an
+/// approach package this node holds that names it and passed its tests. Only
+/// author-side entry points apply this -- record sync and peers never do --
+/// so it changes no rule about which records a node admits.
+pub fn solver_problem(root: &Path, objective: &Objective) -> Option<String> {
+    if super::store::pinned(objective).is_some() {
+        return pin_problem(root, objective);
+    }
+    if Offers::for_objective(&Store::under(root), objective)
+        .recommended
+        .is_some()
+    {
+        return None;
+    }
+    Some(String::from(
+        "this objective ships no solver package. Every objective must publish a solver \
+         contributors can press Start on (docs/solvers.md): post it with `cairn post <this file> \
+         --solver DIR`, which checks the package, adds it to this node and pins it",
+    ))
+}
+
+/// Check the package in `dir` against `objective` and file it in this
+/// node's store, as `cairn solver add DIR --objective FILE` does. Used by
+/// `cairn post --solver DIR`, after the pin is written into the objective.
+pub fn add_for(
+    dir: &Path,
+    objective: &Objective,
+    root: &Path,
+    out: &mut dyn Write,
+) -> Result<String, String> {
+    let package = Package::open(dir).map_err(|e| e.0)?;
+    let id = objective.id();
+    if let Some(named) = &package.manifest.objective {
+        if named != &id {
+            return Err(format!(
+                "{} names objective {named} in solver.json, but this objective is {id}",
+                dir.display()
+            ));
+        }
+    }
+    let report = check_package(&package, Some((id.as_str(), objective)), root, false, true);
+    for line in report.lines() {
+        let _ = writeln!(out, "  solver: {line}");
+    }
+    if report.verdict() != Outcome::Pass {
+        return Err(format!(
+            "solver package {} did not pass its tests here (verdict {}); nothing was posted",
+            package.id(),
+            report.verdict().as_str()
+        ));
+    }
+    Store::under(root)
+        .add(&package, &report)
+        .map_err(|why| format!("solver package not added: {why}"))?;
+    Ok(package.id())
+}
+
+/// The id a package directory would be pinned by, and the objective its
+/// `solver.json` names if it is an approach package, without running anything.
+pub fn package_id(dir: &Path) -> Result<(String, Option<String>), String> {
+    Package::open(dir)
+        .map(|p| (p.id(), p.manifest.objective.clone()))
+        .map_err(|e| e.0)
+}
+
 /// The platform a worker here would run, for a message.
 pub fn host_platform() -> String {
     Platform::host()

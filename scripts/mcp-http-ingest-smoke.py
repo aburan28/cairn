@@ -17,6 +17,10 @@ from urllib.request import Request, urlopen
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+os.environ.setdefault("CAIRN_ALLOW_NO_SOLVER", "1")
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CAIRN = Path(os.environ.get("CAIRN_BIN", ROOT / "target/debug/cairn")).resolve()

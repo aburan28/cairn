@@ -529,6 +529,7 @@ enum Command {
     Post {
         objective: String,
         identity: Option<String>,
+        solver: PostSolver,
     },
     SignObjective {
         objective: String,
@@ -1828,9 +1829,21 @@ fn parse_issue(cursor: &mut Cursor) -> Result<Command, CliError> {
 fn parse_post(cursor: &mut Cursor) -> Result<Command, CliError> {
     let mut objective: Option<String> = None;
     let mut identity: Option<String> = None;
+    let mut solver = PostSolver::Required;
     while let Some(token) = cursor.take() {
         if token == "--identity" {
             identity = Some(cursor.value("post: --identity")?);
+        } else if token == "--solver" || token == "--without-solver" {
+            if solver != PostSolver::Required {
+                return Err(CliError::Usage(String::from(
+                    "post: give one of --solver DIR or --without-solver",
+                )));
+            }
+            solver = if token == "--solver" {
+                PostSolver::Package(cursor.value("post: --solver")?)
+            } else {
+                PostSolver::Without
+            };
         } else if is_flag(&token) {
             return Err(CliError::Usage(format!("post: unknown option {token:?}")));
         } else if objective.is_some() {
@@ -1844,7 +1857,21 @@ fn parse_post(cursor: &mut Cursor) -> Result<Command, CliError> {
     Ok(Command::Post {
         objective: require(objective, "post", "an objective JSON file")?,
         identity,
+        solver,
     })
+}
+
+/// What `cairn post` does about the objective's solver package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PostSolver {
+    /// The objective must already pin, or be offered, a package that passed
+    /// here, unless `CAIRN_ALLOW_NO_SOLVER=1`.
+    Required,
+    /// `--solver DIR`: check that package, add it, and pin it in the
+    /// objective before posting.
+    Package(String),
+    /// `--without-solver`: an objective meant only for agents.
+    Without,
 }
 
 fn parse_sign_objective(cursor: &mut Cursor) -> Result<Command, CliError> {
@@ -3847,7 +3874,10 @@ fn print_help(out: &mut dyn Write) {
     say(out, "usage: cairn [--log PATH] [--root PATH] <command>");
     say(out, "");
     say(out, "commands:");
-    say(out, "  post <objective.json> [--identity <file>]");
+    say(
+        out,
+        "  post <objective.json> [--identity <file>] [--solver <dir> | --without-solver]",
+    );
     say(out, "      fund a checkable question");
     say(out, "  sign-objective <objective.json> --identity <file>");
     say(
@@ -4767,8 +4797,9 @@ fn cmd_post(
     options: &Options,
     path: &str,
     identity: Option<&str>,
+    solver: &PostSolver,
 ) -> Result<i32, CliError> {
-    post_objective_file(out, options, path, identity)?;
+    post_objective_file(out, options, path, identity, solver)?;
     Ok(0)
 }
 
@@ -4980,6 +5011,46 @@ fn cmd_balances(out: &mut dyn Write, options: &Options) -> Result<i32, CliError>
     Ok(0)
 }
 
+/// Write `pin` into a draft objective as `verifier.capabilities.worker`,
+/// the routing hint verifiers ignore (`src/scheduling.rs`). A different pin
+/// already there is refused rather than overwritten.
+fn pin_solver(data: &mut Value, pin: &str) -> Result<(), String> {
+    let worker = Value::object([
+        ("mode", Value::string("package")),
+        ("package", Value::string(pin)),
+    ]);
+    let Value::Object(objective) = data else {
+        return Err(String::from("the objective is not a JSON object"));
+    };
+    let Some(Value::Object(verifier)) = objective.get_mut("verifier") else {
+        return Err(String::from(
+            "the objective has no verifier object to pin a solver in",
+        ));
+    };
+    let capabilities = verifier
+        .entry(String::from("capabilities"))
+        .or_insert_with(|| Value::object::<[(&str, Value); 0], &str>([]));
+    let Value::Object(capabilities) = capabilities else {
+        return Err(String::from("verifier.capabilities is not an object"));
+    };
+    if let Some(existing) = capabilities.get("worker") {
+        if existing.get("package").and_then(Value::as_str) == Some(pin) {
+            return Ok(());
+        }
+        if existing.get("mode").and_then(Value::as_str) == Some("package") {
+            return Err(format!(
+                "the objective already pins solver package {}; --solver would replace it",
+                existing
+                    .get("package")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+            ));
+        }
+    }
+    capabilities.insert(String::from("worker"), worker);
+    Ok(())
+}
+
 /// Post the objective in `path` and return its id.
 ///
 /// Split out of [`cmd_post`] so [`cmd_try`] posts by exactly the same route
@@ -4991,9 +5062,22 @@ fn post_objective_file(
     options: &Options,
     path: &str,
     identity: Option<&str>,
+    solver: &PostSolver,
 ) -> Result<String, CliError> {
     let mut node = open_node_for_writing(options)?;
-    let data = read_json(path)?;
+    let mut data = read_json(path)?;
+    // `--solver DIR` pins the package by writing its id where a pin lives,
+    // `verifier.capabilities.worker`, so what is posted is the file plus
+    // that one field. The pin is part of the objective's id.
+    // A package whose solver.json already names an objective is an approach
+    // to that one objective: pinning it would change the id it names.
+    if let PostSolver::Package(dir) = solver {
+        let (pin, names) =
+            cairn::solver::cli::package_id(Path::new(dir)).map_err(CliError::Refused)?;
+        if names.is_none() {
+            pin_solver(&mut data, &pin).map_err(CliError::Refused)?;
+        }
+    }
     // The published schema runs *before* the constructor. `Objective::from_value`
     // is permissive by necessity -- it has to read back records written by older
     // versions of this code -- so it is the wrong place to enforce the contract
@@ -5012,8 +5096,41 @@ fn post_objective_file(
     // one missing here is missing for everybody working through this node.
     // Only the author's own command applies this: record sync and peers never
     // do, so it changes no rule about which records a node admits.
-    if let Some(problem) = cairn::solver::cli::pin_problem(Path::new(&options.root), &objective) {
-        return Err(CliError::Refused(problem.replace("<this file>", path)));
+    //
+    // Beyond a pin, every objective must ship a solver at all: one pinned,
+    // `--solver DIR`, or an approach package already added here. Only
+    // `--without-solver` or CAIRN_ALLOW_NO_SOLVER=1 posts one without.
+    let root = Path::new(&options.root);
+    match solver {
+        PostSolver::Package(dir) => {
+            let pin = cairn::solver::cli::add_for(Path::new(dir), &objective, root, out)
+                .map_err(CliError::Refused)?;
+            say(out, format!("solver {pin}  added for this objective"));
+        }
+        PostSolver::Without => {
+            if let Some(problem) = cairn::solver::cli::pin_problem(root, &objective) {
+                return Err(CliError::Refused(problem.replace("<this file>", path)));
+            }
+        }
+        PostSolver::Required => {
+            let problem = if cairn::solver::cli::no_solver_allowed() {
+                cairn::solver::cli::pin_problem(root, &objective)
+            } else {
+                cairn::solver::cli::solver_problem(root, &objective)
+            };
+            if let Some(problem) = problem {
+                let problem = problem.replace("<this file>", path);
+                return Err(CliError::Refused(
+                    if problem.starts_with("this objective ships no solver") {
+                        format!(
+                            "{problem}. To post one meant only for agents, pass --without-solver"
+                        )
+                    } else {
+                        problem
+                    },
+                ));
+            }
+        }
     }
     let id = post_objective(&mut node, &objective, &timestamp())?;
 
@@ -7806,7 +7923,7 @@ fn cmd_try(out: &mut dyn Write, options: &Options, round: Round<'_>) -> Result<i
             say(out, "  already posted; using it");
             id
         } else {
-            post_objective_file(out, options, objective, None)?
+            post_objective_file(out, options, objective, None, &PostSolver::Required)?
         }
     };
 
@@ -10139,7 +10256,8 @@ fn run(argv: Vec<String>, out: &mut dyn Write) -> Result<i32, CliError> {
         Command::Post {
             objective,
             identity,
-        } => cmd_post(out, options, objective, identity.as_deref()),
+            solver,
+        } => cmd_post(out, options, objective, identity.as_deref(), solver),
         Command::SignObjective {
             objective,
             identity,
@@ -10914,8 +11032,91 @@ mod tests {
         let path = dir.join("objective.json");
         std::fs::write(&path, objective.canonical_string()).expect("write objective");
         let mut out: Vec<u8> = Vec::new();
-        cmd_post(&mut out, options, &path.display().to_string(), None).expect("post succeeds");
+        cmd_post(
+            &mut out,
+            options,
+            &path.display().to_string(),
+            None,
+            &PostSolver::Without,
+        )
+        .expect("post succeeds");
         String::from_utf8(out).expect("utf-8")
+    }
+
+    #[test]
+    fn post_refuses_an_objective_that_ships_no_solver() {
+        let (dir, options, objective) = bundle_with_objective();
+        let path = dir.join("objective.json");
+        std::fs::write(&path, objective.canonical_string()).expect("write objective");
+        let path = path.display().to_string();
+        let error = cmd_post(
+            &mut Vec::new(),
+            &options,
+            &path,
+            None,
+            &PostSolver::Required,
+        )
+        .expect_err("no solver, no post");
+        let text = error.to_string();
+        assert!(text.contains("ships no solver package"), "{text}");
+        assert!(
+            text.contains("--solver DIR") && text.contains("--without-solver"),
+            "{text}"
+        );
+        assert!(
+            open_node(&options).expect("open").objectives().is_empty(),
+            "nothing was posted"
+        );
+        // Said out loud, an objective meant only for agents still posts.
+        cmd_post(&mut Vec::new(), &options, &path, None, &PostSolver::Without)
+            .expect("--without-solver posts");
+    }
+
+    #[test]
+    fn post_flags_choose_one_solver_route() {
+        let parsed = parse(argv(&["post", "o.json", "--solver", "pkg"])).expect("parses");
+        assert!(matches!(
+            parsed.command,
+            Command::Post { solver: PostSolver::Package(ref d), .. } if d == "pkg"
+        ));
+        let parsed = parse(argv(&["post", "o.json", "--without-solver"])).expect("parses");
+        assert!(matches!(
+            parsed.command,
+            Command::Post {
+                solver: PostSolver::Without,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(argv(&[
+                "post",
+                "o.json",
+                "--solver",
+                "pkg",
+                "--without-solver"
+            ]))
+            .expect_err("both"),
+            CliError::Usage(_)
+        ));
+    }
+
+    #[test]
+    fn pin_solver_writes_the_worker_pin_and_keeps_a_different_one() {
+        let (_dir, _options, mut objective) = bundle_with_objective();
+        pin_solver(&mut objective, "sha256:aa").expect("pins");
+        let worker = objective
+            .get("verifier")
+            .and_then(|v| v.get("capabilities"))
+            .and_then(|c| c.get("worker"))
+            .expect("worker pin");
+        assert_eq!(worker.get("mode").and_then(Value::as_str), Some("package"));
+        assert_eq!(
+            worker.get("package").and_then(Value::as_str),
+            Some("sha256:aa")
+        );
+        pin_solver(&mut objective, "sha256:aa").expect("the same pin again is fine");
+        let error = pin_solver(&mut objective, "sha256:bb").expect_err("a different pin is kept");
+        assert!(error.contains("already pins"), "{error}");
     }
 
     #[test]

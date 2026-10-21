@@ -12,6 +12,9 @@
 # the Python evaluator in examples/, executed as a subprocess with its hash
 # checked first, not from anything Rust-side.
 set -euo pipefail
+# Objectives posted here are throwaway fixtures that ship no solver package;
+# real ones must (docs/solvers.md).
+export CAIRN_ALLOW_NO_SOLVER=1
 
 # The body reads the log as text -- it greps for record kinds and counts lines --
 # and the CLI seals every log it creates whenever a key file exists. Forcing a
