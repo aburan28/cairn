@@ -74,7 +74,9 @@
 
 pub mod check;
 pub mod cli;
+pub mod executor;
 pub mod fetch;
+mod isolate;
 pub mod manifest;
 pub mod package;
 pub mod run;

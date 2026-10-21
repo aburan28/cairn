@@ -1,7 +1,9 @@
 //! One round of a solver, in the jail.
 //!
-//! The jail is the one pinned checkers already run in
-//! ([`crate::verifiers::sandbox`]): seatbelt on macOS, bubblewrap on Linux, no
+//! On Linux a round runs under gVisor or Kata through the host agent's
+//! executor ([`super::executor`]) when either works here, and otherwise in the
+//! jail pinned checkers already run in ([`crate::verifiers::sandbox`]):
+//! seatbelt on macOS, bubblewrap on Linux. Every executor gives no
 //! network, a scrubbed environment, nothing readable outside the package, the
 //! system and the interpreter, nothing writable outside a scratch directory
 //! that is deleted afterwards, and the process tree held to the threads the
@@ -13,6 +15,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use super::executor;
+use super::isolate;
 use super::manifest::{self, Platform, Resources, Target};
 use crate::canonical::Value;
 use crate::verifiers::sandbox::{self, Confinement};
@@ -76,7 +80,7 @@ impl std::fmt::Display for Failure {
 /// The interpreter a `python3` target runs under: the one pinned checkers use,
 /// chosen the same way (`CAIRN_PYTHON`, else `python3` on `PATH`), with the
 /// same refusal of a version-manager shim the jail cannot follow.
-fn python(jailed: bool) -> Result<(PathBuf, Option<PathBuf>), String> {
+pub(super) fn python(jailed: bool) -> Result<(PathBuf, Option<PathBuf>), String> {
     let wanted = std::env::var(verifiers::PYTHON_ENV)
         .ok()
         .map(|v| v.trim().to_string())
@@ -115,8 +119,73 @@ fn python(jailed: bool) -> Result<(PathBuf, Option<PathBuf>), String> {
     Ok((found, root))
 }
 
+/// The contract's variables, the same under every executor.
+pub(super) fn contract_env(round: &Round<'_>, line: &str) -> Vec<(String, String)> {
+    let field = |name: &str| {
+        round
+            .assignment
+            .get(name)
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .to_string()
+    };
+    let threads = round.threads.max(1).to_string();
+    vec![
+        ("CAIRN_ABI".into(), manifest::ABI.into()),
+        ("CAIRN_ASSIGNMENT".into(), line.into()),
+        ("CAIRN_OBJECTIVE".into(), round.objective.into()),
+        ("CAIRN_WORKER".into(), round.worker.into()),
+        ("CAIRN_EPOCH".into(), field("epoch")),
+        ("CAIRN_EPOCH_ENDS_IN".into(), field("epoch_ends_in_seconds")),
+        ("CAIRN_ROUND".into(), round.round.to_string()),
+        (
+            "CAIRN_ROUND_SECONDS".into(),
+            round.resources.round_seconds.to_string(),
+        ),
+        ("CAIRN_THREADS".into(), threads.clone()),
+        ("OMP_NUM_THREADS".into(), threads.clone()),
+        ("RAYON_NUM_THREADS".into(), threads),
+    ]
+}
+
 /// Run one round and collect what it printed.
 pub fn run(round: &Round<'_>) -> Result<Output, Failure> {
+    let selection = executor::select().map_err(Failure::Unavailable)?;
+    match &selection.executor {
+        executor::Executor::Host => run_host(round),
+        isolated => isolate::run(round, isolated),
+    }
+}
+
+/// Validate and package what a finished round printed.
+pub(super) fn finish(
+    stdout: &str,
+    stderr: String,
+    sandbox: &'static str,
+    elapsed: Duration,
+) -> Result<Output, Failure> {
+    let (candidates, skipped) = parse_candidates(stdout);
+    if candidates.len() > manifest::MAX_CANDIDATES {
+        return Err(Failure::Broke {
+            reason: format!(
+                "printed {} candidates; one round may print at most {}",
+                candidates.len(),
+                manifest::MAX_CANDIDATES
+            ),
+            stderr,
+        });
+    }
+    Ok(Output {
+        candidates,
+        skipped,
+        stderr,
+        sandbox,
+        elapsed,
+    })
+}
+
+/// A round under the platform's own jail: bubblewrap or seatbelt.
+fn run_host(round: &Round<'_>) -> Result<Output, Failure> {
     let mechanism = sandbox::mechanism();
     if !mechanism.is_jail() && !round.allow_unjailed {
         let why = match &mechanism {
@@ -153,32 +222,16 @@ pub fn run(round: &Round<'_>) -> Result<Output, Failure> {
     let threads = round.threads.max(1);
     let seconds = round.resources.round_seconds;
     let line = round.assignment.canonical_string();
-    let field = |name: &str| {
-        round
-            .assignment
-            .get(name)
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .to_string()
-    };
     let mut plan = Confinement::new(
         scratch.path(),
         &dir,
         seconds.saturating_mul(u64::from(threads)).saturating_add(5),
     )
     .reading(&dir)
-    .scrubbed()
-    .with_env("CAIRN_ABI", manifest::ABI)
-    .with_env("CAIRN_ASSIGNMENT", &line)
-    .with_env("CAIRN_OBJECTIVE", round.objective)
-    .with_env("CAIRN_WORKER", round.worker)
-    .with_env("CAIRN_EPOCH", field("epoch"))
-    .with_env("CAIRN_EPOCH_ENDS_IN", field("epoch_ends_in_seconds"))
-    .with_env("CAIRN_ROUND", round.round.to_string())
-    .with_env("CAIRN_ROUND_SECONDS", seconds.to_string())
-    .with_env("CAIRN_THREADS", threads.to_string())
-    .with_env("OMP_NUM_THREADS", threads.to_string())
-    .with_env("RAYON_NUM_THREADS", threads.to_string());
+    .scrubbed();
+    for (key, value) in contract_env(round, &line) {
+        plan = plan.with_env(key, value);
+    }
     plan.memory_mb = round.resources.memory_mb;
     plan.cpus = threads;
     if let Some((interpreter, root)) = &interpreter {
@@ -236,24 +289,7 @@ pub fn run(round: &Round<'_>) -> Result<Output, Failure> {
         });
     }
 
-    let (candidates, skipped) = parse_candidates(&completed.stdout);
-    if candidates.len() > manifest::MAX_CANDIDATES {
-        return Err(Failure::Broke {
-            reason: format!(
-                "printed {} candidates; one round may print at most {}",
-                candidates.len(),
-                manifest::MAX_CANDIDATES
-            ),
-            stderr: completed.stderr,
-        });
-    }
-    Ok(Output {
-        candidates,
-        skipped,
-        stderr: completed.stderr,
-        sandbox: sandbox_name,
-        elapsed,
-    })
+    finish(&completed.stdout, completed.stderr, sandbox_name, elapsed)
 }
 
 /// One JSON object per line; blank lines are nothing.
