@@ -183,7 +183,7 @@ class CandidateTests(unittest.TestCase):
                  "sha256": "b" * 64, "version_id": "v1"}]))
         attempted = []
 
-        def assemble(args, database_url=None):
+        def assemble(args, s3=None, database_url=None):
             attempted.append(args.period)
             return self.root / "candidate"
 
@@ -194,7 +194,7 @@ class CandidateTests(unittest.TestCase):
         with patch.object(period_candidate, "assemble", side_effect=assemble), patch.object(
                 period_candidate.time, "sleep", side_effect=StopIteration):
             with self.assertRaises(StopIteration):
-                period_candidate.main(argv)
+                period_candidate.main(argv, s3=self.s3())
         self.assertEqual(attempted, [self.period + 1])
 
     def test_missing_journal_records_unpaid_gap_and_watcher_advances(self):
@@ -214,7 +214,7 @@ class CandidateTests(unittest.TestCase):
         self.assertTrue(period_candidate.previously_ineligible(self.args))
         attempted = []
 
-        def assemble(args, database_url=None):
+        def assemble(args, s3=None, database_url=None):
             attempted.append(args.period)
             return self.root / "candidate"
 
@@ -285,7 +285,7 @@ class CandidateTests(unittest.TestCase):
         s3 = FakeS3({future_key: service.canonical(future) + b"\n"})
         attempted = []
 
-        def assemble(args, database_url=None):
+        def assemble(args, s3=None, database_url=None):
             attempted.append(args.period)
             if args.period == self.args.period:
                 raise period_candidate.MissingEvidence(

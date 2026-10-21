@@ -450,7 +450,10 @@ def main(argv=None, database_url=None, s3=None):
                 period += 1
                 continue
             try:
-                print(assemble(args, database_url=database_url))
+                if s3 is None:
+                    import boto3
+                    s3 = boto3.client("s3")
+                print(assemble(args, s3=s3, database_url=database_url))
                 period += 1
                 last_missing = None
                 if watching:
@@ -466,9 +469,6 @@ def main(argv=None, database_url=None, s3=None):
             except MissingEvidence as error:
                 if not watching:
                     raise
-                if s3 is None:
-                    import boto3
-                    s3 = boto3.client("s3")
                 gap = missing_journal_gap(args, str(error), s3, future_witness)
                 if gap is not None:
                     future_witness = gap.journals[-1]
