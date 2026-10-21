@@ -260,12 +260,23 @@ def completed_future_journal(args, s3):
             raise ValueError("truncated S3 journal listing has no continuation token")
 
 
-def missing_journal_gap(args, missing_key, s3):
+def missing_journal_gap(args, missing_key, s3, future=None):
     current_key = args.evidence_prefix + f"period-{args.period}.json"
     next_key = args.evidence_prefix + f"period-{args.period + 1}.json"
     if missing_key not in (current_key, next_key):
         return None
-    future = completed_future_journal(args, s3)
+    if future is not None:
+        key = future.get("s3_key") if type(future) is dict else None
+        match = re.fullmatch(re.escape(args.evidence_prefix) + r"period-([0-9]+)\.json",
+                             key) if type(key) is str else None
+        sha = future.get("sha256") if type(future) is dict else None
+        version = future.get("version_id") if type(future) is dict else None
+        if (not match or int(match[1]) < args.period + 2
+                or type(sha) is not str or not re.fullmatch(r"[0-9a-f]{64}", sha)
+                or type(version) is not str or not version):
+            future = None
+    if future is None:
+        future = completed_future_journal(args, s3)
     if future is None:
         return None
     if missing_key == current_key:
@@ -427,6 +438,7 @@ def main(argv=None, database_url=None, s3=None):
     watching = args.watch_from is not None
     period = args.period if not watching else args.watch_from
     last_missing = None
+    future_witness = None
     while True:
         current = (time.time_ns() // 1_000_000_000) // args.period_seconds
         if period >= current:
@@ -457,8 +469,9 @@ def main(argv=None, database_url=None, s3=None):
                 if s3 is None:
                     import boto3
                     s3 = boto3.client("s3")
-                gap = missing_journal_gap(args, str(error), s3)
+                gap = missing_journal_gap(args, str(error), s3, future_witness)
                 if gap is not None:
+                    future_witness = gap.journals[-1]
                     marker = record_ineligible(args, gap)
                     print(f"ineligible service period: {marker}: {gap.reason}", file=sys.stderr)
                     period += 1

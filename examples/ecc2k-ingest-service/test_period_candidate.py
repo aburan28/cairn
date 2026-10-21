@@ -304,6 +304,23 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(service.load_json(period_candidate.ineligible_path(self.args))["reason"],
                          "missing_journal")
 
+    def test_consecutive_gaps_reuse_immutable_future_witness(self):
+        self.args.period = int(time.time()) // 60 - 6
+        future_period = self.args.period + 4
+        future_key = self.prefix + f"period-{future_period}.json"
+        future = self.journal | {"period": future_period,
+                                 "started_at": future_period * 60 + 1,
+                                 "ended_at": (future_period + 1) * 60 + 1}
+        s3 = FakeS3({future_key: service.canonical(future) + b"\n"})
+        first = period_candidate.missing_journal_gap(
+            self.args, self.prefix + f"period-{self.args.period}.json", s3)
+        self.args.period += 1
+        with patch.object(s3, "list_objects_v2", side_effect=AssertionError("listed again")):
+            second = period_candidate.missing_journal_gap(
+                self.args, self.prefix + f"period-{self.args.period}.json", s3,
+                first.journals[0])
+        self.assertEqual(second.journals, first.journals)
+
 
 if __name__ == "__main__":
     unittest.main()
