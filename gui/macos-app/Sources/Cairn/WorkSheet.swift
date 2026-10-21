@@ -283,7 +283,10 @@ struct WorkSheet: View {
         loadingObjectives = true
         defer { loadingObjectives = false }
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 5
+        // A busy node takes several seconds to list objectives (2-10 s
+        // measured on a 13.0.0 node with four objectives); a short timeout
+        // turns a slow answer into "could not read".
+        config.timeoutIntervalForRequest = 30
         do {
             let (data, response) = try await URLSession(configuration: config).data(from: route)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
@@ -297,6 +300,9 @@ struct WorkSheet: View {
             if !listed.contains(where: { $0.id == objective }) {
                 objective = listed.first?.id ?? ""
             }
+        } catch let error as URLError where error.code == .timedOut {
+            objectives = []
+            objectivesProblem = "\(base) did not list its objectives within 30 seconds. It may still be starting or busy; press Refresh to try again."
         } catch {
             objectives = []
             objectivesProblem = "Could not read the objectives at \(base): \(error.localizedDescription)"
