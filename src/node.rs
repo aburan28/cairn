@@ -3710,6 +3710,36 @@ impl Node {
             .collect()
     }
 
+    /// One pass over the log's settlement and frontier records, keyed by
+    /// objective. A route that reports many objectives asks this once instead
+    /// of calling [`Node::settlement_of`], [`Node::paid_total`] and
+    /// [`Node::frontier_of`] per row, each of which scans the whole log.
+    pub fn lifecycle_index(&self) -> LifecycleIndex<'_> {
+        let mut index = LifecycleIndex::default();
+        for entry in self.ledger.entries() {
+            if entry.kind != SETTLEMENT && entry.kind != FRONTIER {
+                continue;
+            }
+            let Some(id) = payload_str(&entry.payload, "objective_id") else {
+                continue;
+            };
+            if entry.kind == SETTLEMENT {
+                let reward = entry
+                    .payload
+                    .get("reward")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let tally = index.settled.entry(id).or_insert((&entry.payload, 0, 0));
+                tally.1 = tally.1.saturating_add(u128::from(reward));
+                tally.2 += 1;
+            } else {
+                // Later records overwrite earlier ones: the latest frontier.
+                index.frontiers.insert(id, &entry.payload);
+            }
+        }
+        index
+    }
+
     /// The first settlement recorded for an objective, as its raw payload.
     ///
     /// "First" rather than "latest" because for a non-ratchet objective there is
@@ -3752,14 +3782,25 @@ impl Node {
     /// tightening it here alone would make `src/` and `reference/rust/`
     /// disagree about which logs are valid.
     pub fn objective_is_closed(&self, objective: &Objective) -> bool {
+        self.objective_is_closed_in(objective, &self.lifecycle_index())
+    }
+
+    /// [`Node::objective_is_closed`] against a [`LifecycleIndex`] the caller
+    /// built once, so a listing of N objectives reads the log once rather than
+    /// N times. The one definition of "closed": the unindexed method calls it.
+    pub fn objective_is_closed_in(
+        &self,
+        objective: &Objective,
+        index: &LifecycleIndex<'_>,
+    ) -> bool {
         let id = objective.id();
         // Piecework closes when the pool is empty, and not before: the first
         // paid unit is exactly when there is the most left to earn.
         if objective.piecework.is_some() {
-            return self.paid_total(&id) >= u128::from(objective.reward);
+            return index.paid_total(&id) >= u128::from(objective.reward);
         }
         let Some(block) = &objective.ratchet else {
-            return self.settlement_of(&id).is_some();
+            return index.settlement(&id).is_some();
         };
         let Ok(ratchet) = Ratchet::from_value(block) else {
             // `post_objective` refuses an unreadable ratchet, so this only
@@ -3767,7 +3808,7 @@ impl Node {
             // one, which is the definition of closed used here.
             return true;
         };
-        match self.frontier_of(&id) {
+        match index.frontier(&id) {
             Some(frontier) => ratchet.is_exhausted(frontier.score),
             None => !ratchet.is_fundable(),
         }
@@ -9369,6 +9410,36 @@ impl Node {
     }
 }
 
+/// Settlement and frontier records of a log, grouped by objective. Built by
+/// [`Node::lifecycle_index`]; answers what [`Node::settlement_of`],
+/// [`Node::paid_total`] and [`Node::frontier_of`] answer, without a scan each.
+#[derive(Default)]
+pub struct LifecycleIndex<'a> {
+    /// First settlement payload, total reward paid, settlement count.
+    settled: std::collections::HashMap<&'a str, (&'a Value, u128, usize)>,
+    frontiers: std::collections::HashMap<&'a str, &'a Value>,
+}
+
+impl LifecycleIndex<'_> {
+    /// The first settlement record for the objective, as `Node::settlement_of`.
+    pub fn settlement(&self, objective_id: &str) -> Option<Value> {
+        self.settled.get(objective_id).map(|t| t.0.clone())
+    }
+    /// As `Node::paid_total`.
+    pub fn paid_total(&self, objective_id: &str) -> u128 {
+        self.settled.get(objective_id).map_or(0, |t| t.1)
+    }
+    /// How many settlement records the objective has.
+    pub fn paid_units(&self, objective_id: &str) -> usize {
+        self.settled.get(objective_id).map_or(0, |t| t.2)
+    }
+    /// As `Node::frontier_of`.
+    pub fn frontier(&self, objective_id: &str) -> Option<FrontierEntry> {
+        let payload = self.frontiers.get(objective_id)?;
+        FrontierEntry::from_value(payload).ok()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -11135,6 +11206,111 @@ mod tests {
         assert_eq!(outcome.verdict.status, Status::Accept);
         assert!(node.ledger().entries_of_kind(FRONTIER).is_empty());
         assert!(node.ledger().entries_of_kind(SETTLEMENT).is_empty());
+    }
+
+    /// `GET /objectives` reads settlement and frontier state per row. The
+    /// index must answer exactly what the per-objective accessors answer, and
+    /// must not scale with ledger size per row: a big ledger of other
+    /// objectives' settlements with a handful of objectives stays fast.
+    #[test]
+    fn lifecycle_index_matches_the_accessors_on_a_large_ledger() {
+        let dir = TempDir::new("lifecycle-index");
+        let mut node = node(&dir);
+        let objective = ratchet_objective();
+        node.post_objective(&objective, TS).expect("post");
+        let id = objective.id();
+        for i in 0..20_000u64 {
+            let payload = Value::object([
+                (
+                    "objective_id",
+                    Value::string(format!("sha256:other{}", i % 500)),
+                ),
+                ("reward", Value::Int(1)),
+            ]);
+            node.ledger_mut()
+                .append(SETTLEMENT, payload, TS)
+                .expect("append");
+        }
+        for (score, reward) in [(10i128, 100i128), (20, 200)] {
+            let payload = Value::object([
+                ("objective_id", Value::string(id.clone())),
+                ("reward", Value::Int(reward)),
+                ("score", Value::Int(score)),
+            ]);
+            node.ledger_mut()
+                .append(SETTLEMENT, payload, TS)
+                .expect("append");
+        }
+        let held = FrontierEntry::new(id.clone(), "sha256:held", "alice", 60, 600_000);
+        node.ledger_mut()
+            .append(FRONTIER, held.to_value(), TS)
+            .expect("append");
+
+        let started = std::time::Instant::now();
+        let index = node.lifecycle_index();
+        let mut ids = vec![
+            id.clone(),
+            "sha256:other7".to_string(),
+            "sha256:none".to_string(),
+        ];
+        ids.sort();
+        for probe in &ids {
+            assert_eq!(index.settlement(probe), node.settlement_of(probe));
+            assert_eq!(index.paid_total(probe), node.paid_total(probe));
+            assert_eq!(
+                index.frontier(probe).map(|f| f.to_value()),
+                node.frontier_of(probe).map(|f| f.to_value())
+            );
+        }
+        assert_eq!(index.paid_units(&id), 2);
+        assert_eq!(index.paid_total(&id), 300);
+        assert_eq!(
+            node.objective_is_closed_in(&objective, &index),
+            node.objective_is_closed(&objective)
+        );
+        // One pass over 20k entries plus lookups. Generous bound: this guards
+        // against a per-row full scan returning, not against a slow machine.
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// Writes a plain log of a busy node -- four objectives, a long tail of
+    /// settlements and frontiers -- to `$CAIRN_BENCH_LOG`, for timing
+    /// `GET /objectives` by hand. `cargo test -- --ignored write_bench_log`.
+    #[test]
+    #[ignore]
+    fn lifecycle_index_write_bench_log() {
+        let Ok(path) = std::env::var("CAIRN_BENCH_LOG") else {
+            return;
+        };
+        let _ = std::fs::remove_file(&path);
+        let ledger = Ledger::open(&path).expect("open");
+        let registry = VerifierRegistry::new(std::path::Path::new(".")).with_lean_binary(NO_LEAN);
+        let mut node = Node::with_registry(ledger, registry);
+        for (i, reward) in [1000u64, 2000, 3000].into_iter().enumerate() {
+            let mut o = lean_objective(reward);
+            o.statement = format!("prove it {i}");
+            node.post_objective(&o, TS).expect("post");
+        }
+        node.post_objective(&ratchet_objective(), TS).expect("post");
+        for i in 0..60_000u64 {
+            let payload = Value::object([
+                (
+                    "objective_id",
+                    Value::string(format!("sha256:other{}", i % 500)),
+                ),
+                ("reward", Value::Int(1)),
+            ]);
+            node.ledger_mut()
+                .append(SETTLEMENT, payload, TS)
+                .expect("append");
+            if i % 4 == 0 {
+                let f =
+                    FrontierEntry::new(format!("sha256:other{}", i % 500), "sha256:h", "a", 1, 1);
+                node.ledger_mut()
+                    .append(FRONTIER, f.to_value(), TS)
+                    .expect("append");
+            }
+        }
     }
 
     #[test]

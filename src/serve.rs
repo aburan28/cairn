@@ -71,7 +71,7 @@ use crate::hosts;
 use crate::lease::{self, Leases};
 use crate::ledger::{Codec, Ledger};
 use crate::network::{self, Hardware, NodeFacts, Roles};
-use crate::node::Node;
+use crate::node::{LifecycleIndex, Node};
 use crate::p2p::sessions::Sessions;
 use crate::partition::{assignment_for, epoch_of, epoch_seconds};
 use crate::piecework::Piecework;
@@ -652,6 +652,9 @@ pub struct Serving {
     /// minute. The mutex is held for the few microseconds a lookup or an
     /// insert takes, never across a read of the log.
     progress: Mutex<Board>,
+    /// The log as last loaded for a read-only listing, with the file stamp it
+    /// was loaded at. See [`Serving::read_node`].
+    loaded: Mutex<Option<LoadedNode>>,
     /// Advisory task leases, held exactly as heartbeats are and for the same
     /// reasons. See [`crate::lease`].
     leases: Mutex<Leases>,
@@ -768,6 +771,7 @@ impl Serving {
             deposits,
             key: None,
             progress: Mutex::new(Board::default()),
+            loaded: Mutex::new(None),
             leases: Mutex::new(Leases::default()),
             hosts: Mutex::new(hosts::Roster::default()),
             swarm: Mutex::new(Default::default()),
@@ -1284,10 +1288,44 @@ impl Serving {
             .map_err(|error| error.to_string())
     }
 
+    /// [`Serving::node`] for a handler that only reads, shared between
+    /// requests until the log file changes.
+    ///
+    /// `node` re-reads and re-parses the whole log -- decrypting every line of
+    /// a sealed one -- per request, which is seconds on a node with a long
+    /// history and made `GET /objectives` time out for a handful of rows. The
+    /// log is append-only, so its size and mtime say whether the copy held is
+    /// still the file: the stamp is taken *before* the read, so an append that
+    /// lands during a load makes the next request reload rather than serve a
+    /// stale view. Writers never come through here.
+    fn read_node(&self) -> Result<Arc<Node>, String> {
+        let stamp = std::fs::metadata(&self.log)
+            .and_then(|meta| Ok((meta.len(), meta.modified()?)))
+            .ok();
+        let mut held = self.loaded.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some(stamp), Some(loaded)) = (stamp, held.as_ref()) {
+            if loaded.stamp == stamp {
+                return Ok(Arc::clone(&loaded.node));
+            }
+        }
+        let node = Arc::new(self.node()?);
+        *held = stamp.map(|stamp| LoadedNode {
+            stamp,
+            node: Arc::clone(&node),
+        });
+        Ok(node)
+    }
+
     fn node(&self) -> Result<Node, String> {
         let ledger = Ledger::open_with(&self.log, self.codec()?).map_err(|e| e.to_string())?;
         Ok(Node::new(ledger, &self.root))
     }
+}
+
+/// A log read for listing, and the (size, mtime) of the file when it was read.
+struct LoadedNode {
+    stamp: (u64, std::time::SystemTime),
+    node: Arc<Node>,
 }
 
 /// One parsed request line plus the headers we care about.
@@ -2341,7 +2379,7 @@ fn goals_index(stream: &mut TcpStream, serving: &Serving, request: &Request) -> 
         Ok(catalog) => catalog,
         Err(why) => return json_error(stream, 500, why),
     };
-    let node = match serving.node() {
+    let node = match serving.read_node() {
         Ok(node) => node,
         Err(why) => return json_error(stream, 500, &why),
     };
@@ -2426,7 +2464,7 @@ fn goal_of(stream: &mut TcpStream, serving: &Serving, key: &str) -> io::Result<(
         Ok(catalog) => catalog,
         Err(why) => return json_error(stream, 500, why),
     };
-    let node = match serving.node() {
+    let node = match serving.read_node() {
         Ok(node) => node,
         Err(why) => return json_error(stream, 500, &why),
     };
@@ -2465,22 +2503,24 @@ fn grouped_goals(node: &Node, catalog: &goals::Catalog, serving: &Serving) -> Ve
             .cmp(&b.1.created_at)
             .then_with(|| a.0.cmp(b.0))
     });
+    let index = node.lifecycle_index();
     goals::group(
         catalog,
         ordered
             .into_iter()
             .map(|(id, objective)| (id.as_str(), objective)),
-        |objective| node.objective_is_closed(objective),
+        |objective| node.objective_is_closed_in(objective, &index),
         &fleet,
     )
 }
 
 fn objectives(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
-    let node = match serving.node() {
+    let node = match serving.read_node() {
         Ok(node) => node,
         Err(why) => return json_error(stream, 500, &why),
     };
     let mut items = Vec::new();
+    let index = node.lifecycle_index();
     let packages = crate::solver::store::Store::under(&serving.root).list();
     for (id, objective) in node.objectives() {
         let solver = crate::solver::store::Offers::among(&packages, &objective).row();
@@ -2500,7 +2540,7 @@ fn objectives(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
             ("reward", Value::Int(i128::from(objective.reward))),
             ("funder", Value::string(objective.funder.clone())),
         ];
-        fields.extend(lifecycle_fields(&node, &id, &objective));
+        fields.extend(lifecycle_fields_in(&node, &index, &id, &objective));
         items.push(Value::object(fields));
     }
     json(
@@ -2521,7 +2561,7 @@ fn objectives(stream: &mut TcpStream, serving: &Serving) -> io::Result<()> {
 }
 
 fn one_objective(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<()> {
-    let node = match serving.node() {
+    let node = match serving.read_node() {
         Ok(node) => node,
         Err(why) => return json_error(stream, 500, &why),
     };
@@ -2778,11 +2818,22 @@ fn one_claim(stream: &mut TcpStream, serving: &Serving, id: &str) -> io::Result<
 /// whole. It is `null` for piecework for the same reason: its payouts are per
 /// unit, and `piecework.paid_units` and `paid_total` carry them.
 fn lifecycle_fields(node: &Node, id: &str, objective: &Objective) -> Vec<(&'static str, Value)> {
-    let closed = node.objective_is_closed(objective);
+    lifecycle_fields_in(node, &node.lifecycle_index(), id, objective)
+}
+
+/// [`lifecycle_fields`] against an index built once for the whole listing.
+fn lifecycle_fields_in(
+    node: &Node,
+    index: &LifecycleIndex<'_>,
+    id: &str,
+    objective: &Objective,
+) -> Vec<(&'static str, Value)> {
+    let closed = node.objective_is_closed_in(objective, index);
     let settlement = if objective.ratchet.is_some() || objective.piecework.is_some() {
         Value::Null
     } else {
-        node.settlement_of(id)
+        index
+            .settlement(id)
             .map(|payload| settlement_value(&payload))
             .unwrap_or(Value::Null)
     };
@@ -2791,10 +2842,10 @@ fn lifecycle_fields(node: &Node, id: &str, objective: &Objective) -> Vec<(&'stat
         ("open", Value::Bool(!closed)),
         ("settlement", settlement),
     ];
-    if let Some(frontier) = node.frontier_of(id) {
+    if let Some(frontier) = index.frontier(id) {
         fields.push(("frontier", frontier_value(&frontier, objective.reward)));
     }
-    if let Some(piecework) = piecework_value(node, id, objective) {
+    if let Some(piecework) = piecework_value_in(index, id, objective) {
         fields.push(("piecework", piecework));
     }
     fields
@@ -2803,15 +2854,18 @@ fn lifecycle_fields(node: &Node, id: &str, objective: &Objective) -> Vec<(&'stat
 /// A piecework objective's standing: what a unit pays, how much of the pool
 /// is left, and how many units the log has paid for. `None` off piecework.
 fn piecework_value(node: &Node, id: &str, objective: &Objective) -> Option<Value> {
+    piecework_value_in(&node.lifecycle_index(), id, objective)
+}
+
+fn piecework_value_in(
+    index: &LifecycleIndex<'_>,
+    id: &str,
+    objective: &Objective,
+) -> Option<Value> {
     let piecework = crate::piecework::Piecework::from_value(objective.piecework.as_ref()?).ok()?;
-    let paid = node.paid_total(id);
+    let paid = index.paid_total(id);
     let remaining = u128::from(objective.reward).saturating_sub(paid);
-    let paid_units = node
-        .ledger()
-        .entries_of_kind("settlement")
-        .into_iter()
-        .filter(|entry| entry.payload.get("objective_id").and_then(Value::as_str) == Some(id))
-        .count();
+    let paid_units = index.paid_units(id);
     let mut fields = vec![
         ("unit_price", Value::Int(i128::from(piecework.unit_price))),
         ("paid_units", Value::Int(paid_units as i128)),
@@ -6467,6 +6521,43 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    /// A listing route must not re-read the log per request, and must not
+    /// serve a view older than the file: the held copy is shared while the log
+    /// is unchanged and replaced as soon as an entry is appended.
+    #[test]
+    fn read_node_is_shared_until_the_log_changes() {
+        let dir = TempDir::new("read-node");
+        let log = dir.path.join("log.jsonl");
+        let mut ledger = Ledger::open(&log).expect("open");
+        ledger
+            .append(
+                "note",
+                Value::object([("n", Value::Int(0))]),
+                "2026-01-01T00:00:00+00:00",
+            )
+            .expect("append");
+        let serving = Serving::new(&log, &dir.path);
+
+        let first = serving.read_node().expect("read");
+        let again = serving.read_node().expect("read");
+        assert!(Arc::ptr_eq(&first, &again), "unchanged log is not re-read");
+        assert_eq!(first.ledger().entries().len(), 1);
+
+        ledger
+            .append(
+                "note",
+                Value::object([("n", Value::Int(1))]),
+                "2026-01-01T00:00:01+00:00",
+            )
+            .expect("append");
+        let after = serving.read_node().expect("read");
+        assert!(
+            !Arc::ptr_eq(&first, &after),
+            "an append invalidates the copy"
+        );
+        assert_eq!(after.ledger().entries().len(), 2);
     }
 
     /// A browser on another origin may read this node, and may not write to it.
