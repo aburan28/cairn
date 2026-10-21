@@ -143,22 +143,82 @@ assignment and `CAIRN_ROUND`, not from the clock.
 
 ## The sandbox
 
-`src/solver/run.rs` builds the round's jail with
-[`src/verifiers/sandbox.rs`](../src/verifiers/sandbox.rs), seatbelt on macOS
-and bubblewrap on Linux:
+A round runs in one of these, chosen once per process
+([`src/solver/executor.rs`](../src/solver/executor.rs)) and named in the
+worker's startup line (`solver … sandbox runsc`), in `cairn solver check`, and
+in the report `GET /solvers` shows:
 
-- no network of any kind, loopback included, so not even the node;
-- reads: the package, the system's own directories and, for `python3`, the
-  interpreter; never the home directory;
-- writes: the scratch directory only;
-- the scrubbed environment above;
-- the process tree held to the threads offered (paused when it runs over),
-  `memory_mb`, and `round_seconds` of wall clock.
+| executor | boundary | used when |
+|---|---|---|
+| `runsc` | gVisor: a user-space kernel serves the solver's syscalls | Linux, `runsc` starts a sandbox here, and the worker is root (see below) |
+| `kata` | a guest kernel in a lightweight VM | Linux, a container engine runs the Kata runtime, and `CAIRN_SOLVER_KATA_IMAGE` names an image |
+| `bwrap` | namespaces over the host kernel | Linux, neither of the above works |
+| `sandbox-exec` | seatbelt | macOS, always |
+
+`gVisor` and `Kata` are the host agent's executors
+([`src/agent/`](../src/agent/)): a round is built as an executor job and run by
+[`agent::job::run`](../src/agent/job.rs), so a solver gets the jail an executor
+job gets. The choice is `auto` unless `CAIRN_SOLVER_SANDBOX` says `strongest`
+(Kata, else gVisor, never the host), `runsc`, `kata` or `bwrap`. A pinned
+executor that cannot run makes the round fail with the reason; it never
+quietly runs under a weaker one. Under `auto` a stronger executor that was
+passed over is named with its reason in the startup line, for example
+`sandbox bwrap (runsc: not on PATH)`.
+
+Whichever runs it, the guarantees are the same:
+
+- no network of any kind: under gVisor and Kata the job is started with
+  networking off, so the sandbox has no route to the node or to anything on
+  the host's loopback or LAN;
+- reads: the package (at `/pkg`, read-only), the system's own directories and,
+  for `python3`, the interpreter; never the home directory. Under gVisor the
+  sandbox's root is built from nothing but those, not from the host's `/`;
+- writes: a scratch directory and a size-limited `/tmp` only, both gone when
+  the round ends;
+- the scrubbed environment above, `HOME` and `TMPDIR` pointing at scratch;
+- the offered threads, `memory_mb`, and `round_seconds` of wall clock. gVisor
+  holds memory and CPU with cgroups, which an unprivileged `runsc --rootless`
+  does not have. So gVisor is chosen only for a root worker (a systemd service
+  is the usual way), and otherwise `auto` falls back to bubblewrap, whose limits
+  are enforced, and the startup line says so.
+
+The assignment reaches the solver on stdin through a shell redirect from a
+read-only file inside the sandbox, so the sandbox needs `/bin/sh`.
+For Kata the image must have `/bin/sh`, `python3` for python3 targets, and a
+libc a native target was built for. Job directories and gVisor's state live in
+`~/.cairn/solver-run` (`CAIRN_SOLVER_STATE`).
 
 A host with no working jail refuses to run a package, with the fix in the
 message (`apt install bubblewrap`). `--allow-unjailed` overrides that for
 development and the report says `sandbox: none`. There is no GPU in the jail
 yet; a package gets CPU threads only.
+
+### macOS
+
+macOS has seatbelt (`sandbox-exec`) and nothing stronger is wired in. It is a
+kernel-enforced policy over the host kernel, the same class as bubblewrap, not
+a user-space or virtualised kernel. `CAIRN_SOLVER_SANDBOX=runsc` or `kata` on a
+Mac fails with "Linux only".
+
+What a VM-based executor on macOS would take, not built:
+
+- a Linux guest booted with Apple's Virtualization.framework (what Lima,
+  Colima and Apple's own container tooling build on), carrying `runsc` or a
+  Kata-capable runtime, `/bin/sh` and `python3`;
+- the package directory shared read-only into the guest (virtiofs) and the
+  assignment and candidates passed in and out over vsock or a pipe, so the
+  guest has no network device at all;
+- the VM's memory and CPU count set when it is created, which is a hard limit
+  for free, with one warm VM per worker and a gVisor or Kata sandbox per round
+  inside it rather than a VM boot per round;
+- on Apple silicon the guest is arm64 Linux: `linux-arm64` and `python3`
+  targets would run, a `darwin-*` native target could not;
+- the worker, not the node, owning the VM, and the guest image being pinned
+  and hash-checked like a package.
+
+Until then a contributor on a Mac who wants a VM boundary can run the worker
+inside a Linux VM they already have (`cairn work --package auto` there picks
+gVisor if it is root and has `runsc`).
 
 ## Publishing
 

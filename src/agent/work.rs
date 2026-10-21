@@ -1278,7 +1278,7 @@ impl Worker {
             } else {
                 ", published for this objective"
             },
-            crate::verifiers::sandbox::mechanism().as_str()
+            crate::solver::executor::describe()
         ));
         if self
             .options

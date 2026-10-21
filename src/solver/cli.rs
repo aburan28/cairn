@@ -165,7 +165,7 @@ fn run(args: &[String], context: &Context<'_>, out: &mut dyn Write) -> Result<i3
                     package.manifest.name,
                     package.manifest.version,
                     package.manifest.tests.len(),
-                    crate::verifiers::sandbox::mechanism().as_str()
+                    super::executor::describe()
                 ),
             );
             let report = check_package(

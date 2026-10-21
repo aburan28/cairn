@@ -212,7 +212,7 @@ pub fn check(package: &Package, checker: &Checker<'_>) -> Report {
         .map(|p| p.as_str().to_string())
         .chain(manifest.other_targets.iter().cloned())
         .collect();
-    let mut sandbox = crate::verifiers::sandbox::mechanism().as_str().to_string();
+    let mut sandbox = super::executor::name();
     let mut tests = Vec::new();
     if platforms.is_empty() {
         for test in &manifest.tests {
