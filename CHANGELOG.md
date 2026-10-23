@@ -1,5 +1,27 @@
 # Changelog
 
+## [14.0.0](https://github.com/aburan28/cairn/compare/v13.1.0...v14.0.0) (2026-10-22)
+
+
+### Features
+
+* every objective ships a solver package ([#361](https://github.com/aburan28/cairn/issues/361)) ([8de0515](https://github.com/aburan28/cairn/commit/8de05155641e7e3d9263129bed22906597447ddf))
+* solver packages travel over p2p the way pinned checkers do ([#357](https://github.com/aburan28/cairn/issues/357)) ([f618f95](https://github.com/aburan28/cairn/commit/f618f950ccd60c7c9b718d041cb9cf60fea58fac))
+* solver rounds prefer gVisor or Kata on Linux, with bubblewrap fallback ([#356](https://github.com/aburan28/cairn/issues/356)) ([0513a17](https://github.com/aburan28/cairn/commit/0513a17438493503a40ebe854560f98600cbb2e0))
+* advance the DP receipt watcher across missing journals ([#355](https://github.com/aburan28/cairn/pull/355)) ([da0d8dd](https://github.com/aburan28/cairn/commit/da0d8ddf617bf8c8f13a0db0d9fcae8ee6ffd339))
+* add a progress-metrics exporter for the daily lab report ([#362](https://github.com/aburan28/cairn/issues/362)) ([1e20eed](https://github.com/aburan28/cairn/commit/1e20eeda01dd182872cfa87414ec6829a109aeb2))
+
+
+### Fixes
+
+* **macos:** give Share this Mac's objective list 30 seconds and explain timeouts ([#354](https://github.com/aburan28/cairn/issues/354)) ([a863ebe](https://github.com/aburan28/cairn/commit/a863ebe88a36d3602ae6f8656602bf440ddff6b6))
+* load trusted system CA roots for the HTTPS receipt agent, including when certifi is absent ([#359](https://github.com/aburan28/cairn/pull/359), [#360](https://github.com/aburan28/cairn/pull/360)) ([796bf66](https://github.com/aburan28/cairn/commit/796bf6699d3692f840b24be9c6a3d2b3ff131352))
+
+
+### Performance
+
+* **serve:** stop re-reading the log and rescanning each objective for GET /objectives ([54a1205](https://github.com/aburan28/cairn/commit/54a1205f20ffc3908b89055126143a2e8f81b57c))
+
 ## [13.2.0](https://github.com/aburan28/cairn/compare/v13.1.0...v13.2.0) (2026-10-21)
 
 
