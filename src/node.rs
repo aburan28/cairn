@@ -133,6 +133,37 @@ pub const VDF_SEED_BINDS_DIFFICULTY_FROM: u64 = 2_989_152;
 /// fails none.
 pub const VDF_QUOTIENT_GROUP_FROM: u64 = VDF_SEED_BINDS_DIFFICULTY_FROM;
 
+/// The first epoch only a [`crate::drand::SOURCE`] beacon orders
+/// (2026-11-15T00:00Z at [`crate::partition::EPOCH_SECONDS`]).
+///
+/// The two cutovers above priced grinding a delay beacon; they could not end
+/// it. A `vdf` seed is the log's root, so a sequencer that reorders or pads
+/// what it appends gets a new seed and, for one more evaluation each, a new
+/// order -- and it is the sequencer who decides whether, and in which epoch,
+/// a `vdf` record is written at all. With "first record wins" over every
+/// source, an operator holding a drand round it disliked could simply append
+/// a `vdf` beacon first. A drand round is a function of the epoch and is
+/// signed by a threshold group nobody here controls, so it is the one source
+/// whose value no writer chooses; from this epoch it is the only one consulted.
+///
+/// Other sources stay admissible: a record that orders nothing is harmless,
+/// and refusing it would turn every operator still writing `--delay` beacons
+/// into one whose appends fail. An epoch whose only beacons are of another
+/// source falls back to the epoch-chain head, and
+/// [`Node::epochs_without_beacon`] counts it, so the weaker ordering stays
+/// visible. Earlier epochs keep "first admissible record of any source", so
+/// every anchor already derived from a log is derived the same way.
+pub const DRAND_GOVERNS_FROM: u64 = 2_991_168;
+
+/// Whether a beacon of `source` may order `epoch` at all.
+///
+/// One predicate shared by settlement, admission and the audit, because the
+/// three disagreeing about which records count is exactly a fork: settlement
+/// on one anchor, an audit re-deriving another.
+fn beacon_source_orders(epoch: u64, source: Option<&str>) -> bool {
+    epoch < DRAND_GOVERNS_FROM || source == Some(drand::SOURCE)
+}
+
 /// Prove a delay beacon for `epoch` in the group its epoch is read in.
 pub fn prove_vdf_beacon(epoch: u64, seed: &[u8], difficulty: u64) -> crate::vdf::Proof {
     if epoch >= VDF_QUOTIENT_GROUP_FROM {
@@ -6564,9 +6595,10 @@ impl Node {
 
     /// [`Node::anchor_of_epoch`] as it stood at `positions`.
     ///
-    /// An external beacon for the epoch wins; the epoch-chain head is the
-    /// fallback. The fallback is not a nicety — it is what keeps every log
-    /// written before beacon records existed auditing clean, and what keeps a
+    /// An external beacon for the epoch wins -- from [`DRAND_GOVERNS_FROM`],
+    /// only a drand one; the epoch-chain head is the fallback. The fallback is
+    /// not a nicety — it is what keeps every log written before beacon records
+    /// existed auditing clean, and what keeps a
     /// node whose chain source is unreachable settling at all. `Unavailable is
     /// never Reject` applies to a randomness source exactly as it applies to a
     /// verifier: a node that cannot reach the chain must not halt settlement
@@ -6597,12 +6629,20 @@ impl Node {
     /// refuses and `audit_beacons` reports, but a reader must still be total
     /// on a log that already contains one — and "first" is the only choice
     /// that a second append cannot change.
+    ///
+    /// From [`DRAND_GOVERNS_FROM`] "admissible" also means drand-sourced, and
+    /// the filter sits before `find_map` on purpose: the first *drand* record
+    /// wins, so a `vdf` record appended ahead of it cannot pre-empt it. The
+    /// pairing is still not checked here -- see `audit_beacons` -- because the
+    /// source is a string comparison two implementations cannot disagree
+    /// about, and the signature is not.
     fn epoch_beacon_within(&self, epoch: u64, positions: usize) -> Option<String> {
         self.ledger
             .entries_of_kind(BEACON)
             .into_iter()
             .filter(|entry| usize::try_from(entry.seq).unwrap_or(usize::MAX) < positions)
             .filter(|entry| entry.payload.get("orders").and_then(Value::as_u64) == Some(epoch))
+            .filter(|entry| beacon_source_orders(epoch, payload_str(&entry.payload, "source")))
             .filter(|entry| beacon_is_in_time(entry, epoch))
             .find_map(|entry| payload_str(&entry.payload, "value").map(String::from))
     }
@@ -6653,6 +6693,11 @@ impl Node {
         if drawn_in != orders {
             return Err(RuleViolation::BeaconOutOfEpoch { orders, drawn_in });
         }
+        // "Already has one" means "already has one that orders it", so from
+        // `DRAND_GOVERNS_FROM` only a drand record makes the next one a
+        // duplicate. A drand beacon after a `vdf` one is not a re-roll -- the
+        // `vdf` one never ordered anything -- and refusing it would let
+        // whoever appends first keep the epoch on the grindable fallback.
         if self
             .epoch_beacon_within(orders, self.ledger.len())
             .is_some()
@@ -8880,10 +8925,11 @@ impl Node {
     ///
     /// # Why a bad signature is reported and not consulted when settling
     ///
-    /// The timing and duplicate rules *do* reach settlement:
-    /// [`Node::epoch_beacon_within`] skips a beacon drawn outside its epoch, so
-    /// such a record orders nothing. The pairing check deliberately does not
-    /// join them, for two reasons that point the same way.
+    /// The timing, duplicate and source rules *do* reach settlement:
+    /// [`Node::epoch_beacon_within`] skips a beacon drawn outside its epoch,
+    /// and from [`DRAND_GOVERNS_FROM`] one that is not drand's, so such a
+    /// record orders nothing. The pairing check deliberately does not join
+    /// them, for two reasons that point the same way.
     ///
     /// It buys almost nothing. A beacon that orders nothing falls back to the
     /// epoch-chain head, which is the value a sequencer can grind anyway — so
@@ -8917,7 +8963,23 @@ impl Node {
                     continue;
                 }
             };
-            if !seen.insert(orders) {
+            // Counted only among records that could order the epoch. From
+            // `DRAND_GOVERNS_FROM` a `vdf` record beside a drand one is not a
+            // second candidate anchor -- no reader picks it -- so calling it a
+            // duplicate would be a false fault on a log an honest operator
+            // wrote before switching sources mid-epoch. Two drand records still
+            // are one.
+            //
+            // A non-drand record past the cutover is deliberately not reported
+            // on its own. `audit` is a fault channel and such a record breaks
+            // no rule; `scripts/interop.sh` writes a `--delay` beacon at the
+            // current epoch and requires a clean audit, so reporting it would
+            // fail that check from the cutover on. What a reader who cares
+            // needs -- this epoch was ordered against the chain head -- is
+            // what `epochs_without_beacon` and `CAIRN_REQUIRE_BEACON` say.
+            if beacon_source_orders(orders, payload_str(&entry.payload, "source"))
+                && !seen.insert(orders)
+            {
                 problems.push(format!(
                     "epoch {orders}: more than one beacon, so the settlement order is \
                      whichever one a reader picks"
@@ -9006,6 +9068,30 @@ impl Node {
 
         if beacon_required() {
             for epoch in self.epochs_without_beacon() {
+                // Said differently when the log *has* a beacon for the epoch:
+                // "settled with no beacon" next to a `vdf` record a reader can
+                // see would read as a bug in the audit rather than the rule.
+                let ignored = self
+                    .ledger
+                    .entries_of_kind(BEACON)
+                    .into_iter()
+                    .find(|entry| {
+                        entry.payload.get("orders").and_then(Value::as_u64) == Some(epoch)
+                            && beacon_is_in_time(entry, epoch)
+                            && !beacon_source_orders(epoch, payload_str(&entry.payload, "source"))
+                    });
+                if let Some(entry) = ignored {
+                    problems.push(format!(
+                        "epoch {epoch}: the {} beacon at entry {} was recorded but does not \
+                         order this epoch -- from epoch {DRAND_GOVERNS_FROM} only a drand \
+                         beacon does -- so it was ordered against the epoch chain head, a \
+                         value the sequencer influences by choosing what to append \
+                         ({REQUIRE_BEACON_ENV}=1)",
+                        payload_str(&entry.payload, "source").unwrap_or("unnamed"),
+                        entry.seq
+                    ));
+                    continue;
+                }
                 problems.push(format!(
                     "epoch {epoch}: settled with no beacon, so it was ordered against \
                      the epoch chain head -- a value the sequencer influences by \
@@ -9034,6 +9120,12 @@ impl Node {
     /// uniformly strong, and `AGENTS.md` is explicit that overstating what is
     /// defended is the one thing this repository cannot afford. So: a separate
     /// question, with an answer a reader has to ask for.
+    ///
+    /// "Without a beacon" means without one that *orders* the epoch, so from
+    /// [`DRAND_GOVERNS_FROM`] an epoch whose only beacon is `vdf` or
+    /// `ethereum` is listed. It is the same question settlement asks, through
+    /// the same function, which is what keeps this list and the anchors in
+    /// the log from ever disagreeing about which epochs were weak.
     pub fn epochs_without_beacon(&self) -> Vec<u64> {
         self.ledger
             .entries_of_kind(BATCH)
@@ -14903,5 +14995,229 @@ mod tests {
             .collect();
         assert!(would_report.iter().all(|line| line.contains("no beacon")));
         assert!(node.audit(false).is_empty(), "clean without the gate");
+    }
+
+    // -- from DRAND_GOVERNS_FROM, only drand orders --------------------------
+
+    /// `offset` seconds into `epoch`, for epochs nowhere near [`BASE`]: the
+    /// cutover is a month past every other fixture here.
+    fn at_epoch(epoch: u64, offset: i64) -> String {
+        crate::time::format_iso8601_utc(epoch as i64 * EPOCH + offset)
+    }
+
+    /// Who reveals in [`settled_behind`]'s epoch. Six, so that two anchors
+    /// giving the same order is a 1-in-720 accident the test refuses rather
+    /// than a likely one.
+    const ORDERED: [&str; 6] = ["alice", "bob", "carol", "dave", "erin", "frank"];
+
+    /// A drand record for `orders`, appended past `record_beacon`.
+    ///
+    /// Past it because no drand round at or after the cutover has been
+    /// published yet, so there is no real signature to record, and
+    /// `record_beacon` rightly refuses anything else. The value is the fixture
+    /// round's signature over the *wrong* round, which is what makes this a
+    /// test of the split too: settlement must take it as the anchor anyway,
+    /// and only the audit may say it does not verify.
+    fn append_drand(node: &mut Node, orders: u64, ts: &str) {
+        node.ledger_mut()
+            .append(
+                BEACON,
+                Value::object([
+                    ("orders", Value::Int(i128::from(orders))),
+                    ("source", Value::string(drand::SOURCE)),
+                    (
+                        "block",
+                        Value::Int(i128::from(drand::round_for_epoch(orders, epoch_seconds()))),
+                    ),
+                    ("value", Value::string(DRAND_SIGNATURE)),
+                ]),
+                ts,
+            )
+            .expect("append");
+    }
+
+    /// An honest delay beacon for `orders`, through the admission path.
+    fn record_vdf(node: &mut Node, orders: u64, ts: &str) -> String {
+        let seed = node.vdf_seed(orders, node.ledger().len(), MIN_VDF_DIFFICULTY);
+        let proof = prove_vdf_beacon(orders, &seed, MIN_VDF_DIFFICULTY);
+        node.record_beacon_with(
+            orders,
+            VDF_SOURCE,
+            0,
+            &proof.output_hex(),
+            Some((MIN_VDF_DIFFICULTY, &proof.witness_hex())),
+            ts,
+        )
+        .expect("an honest delay beacon is admissible either side of the cutover");
+        proof.output_hex()
+    }
+
+    /// Commit [`ORDERED`] in the epoch before `orders`, let `beacons` write
+    /// whatever it writes at the start of `orders`, reveal, and settle.
+    ///
+    /// The beacons go in *before* the reveals, because that is the attack: an
+    /// operator who records a delay beacon the moment the epoch opens gets it
+    /// in ahead of the drand round, and under "first record wins" that was
+    /// enough to set the order.
+    fn settled_behind(
+        dir: &TempDir,
+        orders: u64,
+        beacons: impl FnOnce(&mut Node),
+    ) -> Option<(Node, Vec<String>)> {
+        let objective = replay_objective(1000)?;
+        let mut node = node(dir);
+        node.post_objective(&objective, TS).expect("post");
+        for who in ORDERED {
+            let hash = commitment_hash(&objective.id(), who, &results(1), who);
+            node.commit(
+                &Commitment::new(objective.id(), who, hash, at_epoch(orders - 1, 0)),
+                &at_epoch(orders - 1, 0),
+            )
+            .expect("commit");
+        }
+        beacons(&mut node);
+        for who in ORDERED {
+            let claim = Claim::new(
+                objective.id(),
+                who,
+                results(1),
+                who,
+                at_epoch(orders, 10),
+                vec![],
+            )
+            .expect("valid claim");
+            node.reveal(&claim, &at_epoch(orders, 10)).expect("reveal");
+        }
+        node.settle_at(&at_epoch(orders - 1, settle_offset()))
+            .expect("settle");
+        let batch = node
+            .ledger()
+            .entries_of_kind(BATCH)
+            .into_iter()
+            .find(|entry| entry.payload.get("epoch").and_then(Value::as_u64) == Some(orders))
+            .map(|entry| entry.payload.clone())
+            .expect("the epoch settled");
+        assert_eq!(
+            batch.get("anchor").and_then(Value::as_str),
+            Some(node.anchor_of_epoch(orders).as_str()),
+            "the batch did not use the anchor the log derives"
+        );
+        let paid: Vec<String> = match batch.get("claims") {
+            Some(Value::Array(items)) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(paid.len(), ORDERED.len(), "{paid:?}");
+        Some((node, paid))
+    }
+
+    /// The order `anchor` gives this epoch's claims, by the rule settlement
+    /// sorts with.
+    fn order_under(node: &Node, orders: u64, anchor: &str) -> Vec<String> {
+        let mut batch = node.accepted_in_epoch(orders);
+        batch.sort_by(|(a_id, a), (b_id, b)| {
+            let ra = settlement_rank(orders, anchor, &a.commitment_hash());
+            let rb = settlement_rank(orders, anchor, &b.commitment_hash());
+            (ra, a_id).cmp(&(rb, b_id))
+        });
+        batch.into_iter().map(|(id, _)| id).collect()
+    }
+
+    #[test]
+    fn from_the_cutover_a_delay_beacon_recorded_first_does_not_pre_empt_drand() {
+        let dir = TempDir::new("drand-governs");
+        let orders = DRAND_GOVERNS_FROM;
+        let mut delay = String::new();
+        let Some((mut node, paid)) = settled_behind(&dir, orders, |node| {
+            delay = record_vdf(node, orders, &at_epoch(orders, 0));
+            append_drand(node, orders, &at_epoch(orders, 1));
+        }) else {
+            return;
+        };
+
+        assert_eq!(node.anchor_of_epoch(orders), DRAND_SIGNATURE);
+        assert_eq!(paid, order_under(&node, orders, DRAND_SIGNATURE));
+        assert_ne!(
+            paid,
+            order_under(&node, orders, &delay),
+            "the fixture must tell the two anchors apart"
+        );
+        assert!(node.epochs_without_beacon().is_empty());
+
+        // The audit re-derives the drand anchor, so the batch is clean; what it
+        // reports is the pairing -- and only that. The delay record beside the
+        // drand one is no second anchor, so it is no duplicate either.
+        let problems = node.audit(false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("does not carry round"), "{problems:?}");
+
+        // A second drand record is a re-roll, and both halves still say so.
+        let refused = node
+            .record_beacon(orders, "ethereum", 1, "aa", &at_epoch(orders, 20))
+            .expect_err("the epoch already has a beacon that orders it");
+        assert!(
+            matches!(refused, RuleViolation::DuplicateBeacon { epoch } if epoch == orders),
+            "{refused}"
+        );
+        append_drand(&mut node, orders, &at_epoch(orders, 21));
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|p| p.contains("more than one beacon")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn below_the_cutover_the_first_beacon_still_governs() {
+        // Logs that already hold beacons for these epochs derived their
+        // anchors this way, and a rule that changed them would be a fork.
+        let dir = TempDir::new("drand-before-cutover");
+        let orders = DRAND_GOVERNS_FROM - 1;
+        let mut delay = String::new();
+        let Some((node, paid)) = settled_behind(&dir, orders, |node| {
+            delay = record_vdf(node, orders, &at_epoch(orders, 0));
+            append_drand(node, orders, &at_epoch(orders, 1));
+        }) else {
+            return;
+        };
+
+        assert_eq!(node.anchor_of_epoch(orders), delay);
+        assert_eq!(paid, order_under(&node, orders, &delay));
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|p| p.contains("more than one beacon")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn from_the_cutover_an_epoch_with_only_a_delay_beacon_falls_back() {
+        let dir = TempDir::new("drand-absent");
+        let orders = DRAND_GOVERNS_FROM + 1;
+        let mut head = String::new();
+        let mut delay = String::new();
+        let Some((node, paid)) = settled_behind(&dir, orders, |node| {
+            head = node.anchor_of_epoch(orders);
+            delay = record_vdf(node, orders, &at_epoch(orders, 0));
+            // Still admissible, and still no re-roll: neither record orders
+            // the epoch, so neither is the first of two.
+            node.record_beacon(orders, "ethereum", 1, "aa", &at_epoch(orders, 1))
+                .expect("a beacon that orders nothing is not a duplicate");
+        }) else {
+            return;
+        };
+
+        assert_eq!(node.anchor_of_epoch(orders), head);
+        assert_eq!(paid, order_under(&node, orders, &head));
+        assert_ne!(node.anchor_of_epoch(orders), delay);
+        // Weak, and reportable as weak, by the same query as an epoch with no
+        // beacon record at all.
+        assert_eq!(node.epochs_without_beacon(), vec![orders]);
+        // But not a fault: both records are legal, and the batch follows the
+        // anchor the log derives.
+        assert_eq!(node.audit(false), Vec::<String>::new());
     }
 }

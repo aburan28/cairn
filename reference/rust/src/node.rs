@@ -1356,10 +1356,11 @@ impl Node {
     /// order**, not epoch order, so a batch for an older epoch appended later
     /// leaves earlier links untouched instead of retroactively faulting them.
     ///
-    /// A recorded `beacon` for `epoch` displaces the chain head entirely. The
-    /// chain is what a sequencer can steer by choosing what to append, and
-    /// steering it steers the settlement order; a beacon drawn somewhere the
-    /// sequencer does not control is the point of the record. The chain
+    /// A recorded `beacon` for `epoch` -- from [`drand::GOVERNS_FROM`], a
+    /// drand one -- displaces the chain head entirely. The chain is what a
+    /// sequencer can steer by choosing what to append, and steering it steers
+    /// the settlement order; a beacon drawn somewhere the sequencer does not
+    /// control is the point of the record. The chain
     /// remains the fallback, so every log written before beacons existed --
     /// including `launch/cairn.jsonl` -- derives exactly what it always
     /// did.
@@ -1435,6 +1436,12 @@ impl Node {
     /// An entry this crate cannot place in time does not order anything, for
     /// the same reason it does not move `anchor_at`: it is not evidence about
     /// where a boundary was.
+    ///
+    /// From [`drand::GOVERNS_FROM`] a third: it must be **drand's**. Filtered
+    /// before the first is taken, so a delay beacon appended ahead of the
+    /// drand round cannot pre-empt it. The signature is still not consulted
+    /// here -- the source is a string, and two implementations cannot
+    /// disagree about a string the way two BLS libraries can about a point.
     fn epoch_beacon(&self, epoch: u64, positions: Option<usize>) -> Option<String> {
         let entries = self.ledger.entries();
         let entries = match positions {
@@ -1451,6 +1458,9 @@ impl Node {
                     .and_then(Value::as_i128)
                     .and_then(|value| u64::try_from(value).ok())
                     == Some(epoch)
+            })
+            .filter(|entry| {
+                drand::orders(epoch, entry.payload.get("source").and_then(Value::as_str))
             })
             .filter(|entry| {
                 unix_seconds(&entry.ts)
@@ -4019,7 +4029,15 @@ impl Node {
                 problems.push(format!("entry {}: beacon orders no epoch", entry.seq));
                 continue;
             };
-            if !beacon_epochs.insert(orders) {
+            // Only among records that could order the epoch: from
+            // `drand::GOVERNS_FROM` a delay beacon beside a drand one is not a
+            // second anchor anybody reads, so it is no re-roll. Two drand
+            // records still are. A non-drand record past the cutover breaks no
+            // rule and is not reported on its own -- this is a fault list, and
+            // `scripts/interop.sh` audits a fresh delay beacon expecting none.
+            if drand::orders(orders, entry.payload.get("source").and_then(Value::as_str))
+                && !beacon_epochs.insert(orders)
+            {
                 problems.push(format!(
                     "entry {}: a second beacon for epoch {orders}; whoever writes it \
                      would re-roll the settlement order after reading the first",
@@ -4827,5 +4845,218 @@ mod tests {
             0
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- from drand::GOVERNS_FROM, only drand orders -------------------------
+
+    /// `offset` seconds into `epoch` at the default 600-second epoch.
+    fn at_epoch(epoch: u64, offset: u64) -> String {
+        crate::time::format_iso8601_utc((epoch * 600 + offset) as i64)
+    }
+
+    /// Quicknet's signature over round 30,798,012 -- a real one, over a round
+    /// far below the cutover. No round at or past it has been published, so
+    /// every drand value here is the wrong round's, which also checks that
+    /// the anchor never waits on the pairing.
+    const DRAND_SIGNATURE: &str = "90973449df156e156dc8c702aa397ebe24ab3ba4f0d7f46e921ba6ab906bc07515977132dc109498c6adebe27cde6fb5";
+
+    /// A delay value: an anchor string, and the audit's opinion of its proof
+    /// is not what these tests are about.
+    const DELAY: &str = "de1a7";
+
+    fn beacon_record(orders: u64, source: &str, value: &str) -> Value {
+        let block = if source == drand::SOURCE {
+            drand::round_for_epoch(orders, 600)
+        } else {
+            0
+        };
+        Value::object([
+            ("orders", Value::Int(i128::from(orders))),
+            ("source", Value::string(source)),
+            ("block", Value::Int(i128::from(block))),
+            ("value", Value::string(value)),
+        ])
+    }
+
+    /// A log with `beacons` written at the start of `orders`, then six
+    /// accepted claims revealed in it, then settled by this crate.
+    ///
+    /// The claims and verdicts are appended directly: what is under test is
+    /// which anchor the batch is sorted by, and a verifier run would only add
+    /// a toolchain the answer does not depend on.
+    fn settled_behind(tag: &str, orders: u64, beacons: &[(&str, &str)]) -> (Node, Value) {
+        let dir = scratch(tag);
+        let mut ledger = Ledger::open(dir.join("log.jsonl")).expect("open");
+        for (offset, (source, value)) in beacons.iter().enumerate() {
+            ledger
+                .append(
+                    BEACON,
+                    beacon_record(orders, source, value),
+                    &at_epoch(orders, offset as u64),
+                )
+                .expect("beacon");
+        }
+        let revealed = at_epoch(orders, 10);
+        for who in ["alice", "bob", "carol", "dave", "erin", "frank"] {
+            let claim = Claim {
+                objective_id: "o".repeat(64),
+                submitter: who.into(),
+                artifact: Value::object([("n", Value::Int(1))]),
+                nonce: who.into(),
+                created_at: revealed.clone(),
+                cites: Vec::new(),
+                relations: Vec::new(),
+                signature: None,
+            };
+            ledger
+                .append(CLAIM, claim.to_value(), &revealed)
+                .expect("claim");
+            ledger
+                .append(
+                    VERDICT,
+                    Value::object([
+                        ("claim_id", Value::string(claim.id())),
+                        ("objective_id", Value::string(claim.objective_id.clone())),
+                        (
+                            "verdict",
+                            Verdict::new(
+                                Status::Accept,
+                                "crafted",
+                                Value::object(Vec::<(String, Value)>::new()),
+                            )
+                            .to_value(),
+                        ),
+                    ]),
+                    &revealed,
+                )
+                .expect("verdict");
+        }
+        let mut node = Node::new(ledger, &dir);
+        let settle = orders + 2 + crate::partition::finality_epochs();
+        node.settle_at(&at_epoch(settle, 0)).expect("settle");
+        let batch = node
+            .ledger
+            .entries_of_kind(BATCH)
+            .into_iter()
+            .find(|entry| entry.payload.get("epoch").and_then(Value::as_u64) == Some(orders))
+            .map(|entry| entry.payload.clone())
+            .expect("the epoch settled");
+        (node, batch)
+    }
+
+    /// The order `anchor` gives the batch's claims.
+    fn order_under(node: &Node, orders: u64, anchor: &str) -> Vec<String> {
+        let accepted = node.accepted_claims();
+        let mut ids: Vec<String> = accepted.keys().cloned().collect();
+        ids.sort_by_key(|id| {
+            (
+                settlement_rank(orders, anchor, &accepted[id].commitment_hash()),
+                id.clone(),
+            )
+        });
+        ids
+    }
+
+    fn listed(batch: &Value) -> Vec<String> {
+        match batch.get("claims") {
+            Some(Value::Array(items)) => items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn from_the_cutover_a_delay_beacon_recorded_first_does_not_pre_empt_drand() {
+        let orders = drand::GOVERNS_FROM;
+        let (node, batch) = settled_behind(
+            "drand-governs",
+            orders,
+            &[("vdf", DELAY), (drand::SOURCE, DRAND_SIGNATURE)],
+        );
+        assert_eq!(node.anchor_of_epoch(orders, None), DRAND_SIGNATURE);
+        assert_eq!(
+            batch.get("anchor").and_then(Value::as_str),
+            Some(DRAND_SIGNATURE)
+        );
+        assert_eq!(listed(&batch), order_under(&node, orders, DRAND_SIGNATURE));
+        assert_ne!(
+            listed(&batch),
+            order_under(&node, orders, DELAY),
+            "the fixture must tell the two anchors apart"
+        );
+        // The batch audits clean against the drand anchor, and the delay
+        // record beside it is not a second beacon.
+        let problems = node.audit(false);
+        assert!(
+            !problems.iter().any(|p| p.contains("batch")),
+            "{problems:?}"
+        );
+        assert!(
+            !problems.iter().any(|p| p.contains("second beacon")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn from_the_cutover_two_drand_beacons_are_still_a_duplicate() {
+        let orders = drand::GOVERNS_FROM;
+        let dir = scratch("drand-twice");
+        let mut ledger = Ledger::open(dir.join("log.jsonl")).expect("open");
+        for (offset, value) in [DRAND_SIGNATURE, "aa"].into_iter().enumerate() {
+            ledger
+                .append(
+                    BEACON,
+                    beacon_record(orders, drand::SOURCE, value),
+                    &at_epoch(orders, offset as u64),
+                )
+                .expect("beacon");
+        }
+        let node = Node::new(ledger, &dir);
+        assert_eq!(node.anchor_of_epoch(orders, None), DRAND_SIGNATURE);
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|p| p.contains("second beacon")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn below_the_cutover_the_first_beacon_still_governs() {
+        let orders = drand::GOVERNS_FROM - 1;
+        let (node, batch) = settled_behind(
+            "drand-before-cutover",
+            orders,
+            &[("vdf", DELAY), (drand::SOURCE, DRAND_SIGNATURE)],
+        );
+        assert_eq!(node.anchor_of_epoch(orders, None), DELAY);
+        assert_eq!(listed(&batch), order_under(&node, orders, DELAY));
+        let problems = node.audit(false);
+        assert!(
+            problems.iter().any(|p| p.contains("second beacon")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn from_the_cutover_an_epoch_with_only_a_delay_beacon_falls_back() {
+        let orders = drand::GOVERNS_FROM + 1;
+        let (node, batch) = settled_behind(
+            "drand-absent",
+            orders,
+            &[("vdf", DELAY), ("ethereum", "aa")],
+        );
+        // No batch precedes this one, so the chain head is empty.
+        assert_eq!(node.anchor_of_epoch(orders, Some(0)), "");
+        assert_eq!(batch.get("anchor").and_then(Value::as_str), Some(""));
+        assert_eq!(listed(&batch), order_under(&node, orders, ""));
+        let problems = node.audit(false);
+        assert!(
+            !problems
+                .iter()
+                .any(|p| p.contains("batch") || p.contains("second beacon")),
+            "{problems:?}"
+        );
     }
 }

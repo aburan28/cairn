@@ -54,6 +54,17 @@ to the ledger instead.
 One beacon per epoch, and a second is refused rather than tie-broken. Every
 tie-break is a choice, and the choice belongs to nobody.
 
+From epoch 2,991,168 (2026-11-15T00:00Z at 600-second epochs) "one beacon"
+means one **drand** beacon: only a `drand` record orders an epoch, and an
+`ethereum` or `vdf` record is admitted but orders nothing, so it is neither
+the anchor nor the first of two. Every other source's value is one its writer
+had a hand in -- a block's proposer, a delay's seed and `T` -- and under "first
+record wins" an operator who disliked the drand round could append one of
+those ahead of it. Earlier epochs keep the first admissible record of any
+source. See [drand-beacon.md](drand-beacon.md) and the *beacon grinding* row
+of [../threat-model.md](../threat-model.md) for what remains: a sequencer can
+still withhold the drand beacon and settle on the chain head.
+
 ## What an auditor without a chain still gets
 
 This is the constraint that shaped the design. The project's one guarantee is

@@ -5984,10 +5984,26 @@ fn cmd_beacon(
             );
         }
     }
+    // The anchor the log now derives, not the value just written: from
+    // `DRAND_GOVERNS_FROM` a non-drand beacon is recorded and orders nothing,
+    // and printing its value as the new anchor would tell the operator the
+    // opposite of what settlement will do.
+    let after = node.anchor_of_epoch(orders);
     say(
         out,
-        format!("  anchor   {} -> {}", short(&before), short(&value)),
+        format!("  anchor   {} -> {}", short(&before), short(&after)),
     );
+    if after != value {
+        say(
+            out,
+            format!(
+                "  note     recorded, but does not order epoch {orders}: from epoch {} only \
+                 a {} beacon does",
+                cairn::node::DRAND_GOVERNS_FROM,
+                drand::SOURCE
+            ),
+        );
+    }
     if source == drand::SOURCE {
         // Said out loud because the difference between this and every other
         // source is exactly what an operator needs to know, and it is a claim

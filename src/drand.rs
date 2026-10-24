@@ -78,8 +78,10 @@ pub const GENESIS_TIME: u64 = 1_692_803_367;
 /// What a beacon record drawn from this chain names itself.
 ///
 /// `Node::record_beacon` matches on it to decide whether the round derivation
-/// applies, so it is consensus-visible in the weak sense that a reader
-/// re-deriving an audit has to spell it the same way.
+/// applies, and from `node::DRAND_GOVERNS_FROM` settlement matches on it to
+/// decide whether a beacon orders its epoch at all -- so it is
+/// consensus-visible in the strong sense too: a reader that spelled it
+/// differently would derive a different anchor.
 pub const SOURCE: &str = "drand";
 
 /// A compressed G1 point, hex: 48 bytes, 96 characters.

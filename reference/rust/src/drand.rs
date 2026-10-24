@@ -48,6 +48,27 @@ pub const GENESIS: u64 = 1_692_803_367;
 /// The `source` a beacon from this chain carries.
 pub const SOURCE: &str = "drand";
 
+/// The first epoch only a beacon of [`SOURCE`] orders (2026-11-15T00:00Z at
+/// 600-second epochs).
+///
+/// Every other source's value is one its writer had a hand in: a delay
+/// beacon's seed is the log's root, so whoever orders the appends picks among
+/// seeds at one evaluation each, and chooses whether to write one at all.
+/// Under "first record wins" that let an operator who disliked the drand
+/// round append a delay beacon ahead of it. A drand round is fixed by the
+/// epoch and signed by a group nobody here controls. Other sources stay
+/// admissible and order nothing; earlier epochs keep the rule their anchors
+/// were derived under.
+pub const GOVERNS_FROM: u64 = 2_991_168;
+
+/// Whether a beacon naming `source` may order `epoch`.
+///
+/// The one place this crate asks it, so the anchor and the audit's duplicate
+/// count cannot drift apart.
+pub fn orders(epoch: u64, source: Option<&str>) -> bool {
+    epoch < GOVERNS_FROM || source == Some(SOURCE)
+}
+
 /// When `round` is published.
 pub fn published_at(round: u64) -> u64 {
     GENESIS.saturating_add(round.saturating_sub(1).saturating_mul(PERIOD))
