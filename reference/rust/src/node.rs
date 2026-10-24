@@ -1928,7 +1928,12 @@ impl Node {
             self.ledger.root_at(positions).as_deref(),
             difficulty,
         );
-        if crate::vdf::verify(&seed, difficulty, &output, &witness) {
+        let verified = if orders >= crate::vdf::QUOTIENT_GROUP_FROM {
+            crate::vdf::verify_canonical(&seed, difficulty, &output, &witness)
+        } else {
+            crate::vdf::verify(&seed, difficulty, &output, &witness)
+        };
+        if verified {
             None
         } else {
             Some(format!(

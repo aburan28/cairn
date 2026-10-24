@@ -5952,7 +5952,7 @@ fn cmd_beacon(
                 ),
             );
             let seed = node.vdf_seed(orders, node.ledger().len(), difficulty);
-            let computed = cairn::vdf::prove(&seed, difficulty);
+            let computed = cairn::node::prove_vdf_beacon(orders, &seed, difficulty);
             (
                 computed.output_hex(),
                 Some((difficulty, computed.witness_hex())),
