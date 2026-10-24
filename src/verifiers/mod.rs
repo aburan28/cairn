@@ -71,8 +71,8 @@
 //! Expiry yields `Unavailable`, so a slow checker can never become a rejection.
 
 pub mod limits;
-pub mod sixclass;
 pub mod sandbox;
+pub mod sixclass;
 pub mod workspace;
 
 use std::collections::BTreeMap;
