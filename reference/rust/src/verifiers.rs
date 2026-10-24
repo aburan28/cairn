@@ -117,7 +117,7 @@ impl Verdict {
         }
     }
 
-    fn plain(status: Status, detail: impl Into<String>) -> Verdict {
+    pub(crate) fn plain(status: Status, detail: impl Into<String>) -> Verdict {
         Verdict::new(status, detail, Value::object(Vec::<(String, Value)>::new()))
     }
 
@@ -356,6 +356,7 @@ pub const KINDS: &[&str] = &[
     "statistical",
     "replay",
     "lean",
+    "sixclass_dp",
     "workspace",
 ];
 
@@ -431,6 +432,7 @@ pub fn run(root: &Path, spec: &Value, artifact: &Value) -> Verdict {
         Some("statistical") => statistical(root, spec, artifact),
         Some("replay") => replay(root, spec, artifact),
         Some("lean") => lean(root, spec, artifact),
+        Some("sixclass_dp") => crate::sixclass_dp::verify(spec, artifact),
         Some("workspace") => crate::workspace::workspace(root, spec, artifact),
         // An unknown kind says nothing about the artifact: another node may
         // well implement it.
@@ -1663,6 +1665,7 @@ mod tests {
             "statistical",
             "replay",
             "lean",
+            "sixclass_dp",
             "workspace",
         ] {
             assert!(
