@@ -121,6 +121,27 @@ pub const MIN_VDF_DIFFICULTY: u64 = 1 << 16;
 /// record's own epoch, never of a clock.
 pub const VDF_SEED_BINDS_DIFFICULTY_FROM: u64 = 2_989_152;
 
+/// The first epoch whose delay beacon is read in `Z_N*/{±1}`: its value and
+/// witness must each be the smaller of `z` and `N − z` (see
+/// [`crate::vdf::verify_canonical`]).
+///
+/// In `Z_N*`, `N − y` with the witness for its own challenge is a second
+/// valid beacon for every honest one, so each evaluation bought two
+/// orderings. Requiring the canonical value was not taken while it would have
+/// failed about half the honest beacons already in logs; the seed cutover
+/// above had not yet been reached by any record, so this rides on it and
+/// fails none.
+pub const VDF_QUOTIENT_GROUP_FROM: u64 = VDF_SEED_BINDS_DIFFICULTY_FROM;
+
+/// Prove a delay beacon for `epoch` in the group its epoch is read in.
+pub fn prove_vdf_beacon(epoch: u64, seed: &[u8], difficulty: u64) -> crate::vdf::Proof {
+    if epoch >= VDF_QUOTIENT_GROUP_FROM {
+        crate::vdf::prove_canonical(seed, difficulty)
+    } else {
+        crate::vdf::prove(seed, difficulty)
+    }
+}
+
 /// A reader's own minimum for delay beacons, above [`MIN_VDF_DIFFICULTY`].
 ///
 /// The record names its difficulty, and a useful one fills most of an epoch,
@@ -6749,11 +6770,13 @@ impl Node {
         let witness = crate::hex::decode(payload_str(payload, "witness").ok_or_else(fail)?)
             .ok_or_else(fail)?;
         let proof = crate::vdf::Proof { output, witness };
-        if crate::vdf::verify(
-            &self.vdf_seed(epoch, positions, difficulty),
-            difficulty,
-            &proof,
-        ) {
+        let seed = self.vdf_seed(epoch, positions, difficulty);
+        let verified = if epoch >= VDF_QUOTIENT_GROUP_FROM {
+            crate::vdf::verify_canonical(&seed, difficulty, &proof)
+        } else {
+            crate::vdf::verify(&seed, difficulty, &proof)
+        };
+        if verified {
             Ok(())
         } else {
             Err(fail())
@@ -14659,6 +14682,53 @@ mod tests {
     /// The seed is the epoch's own anchor, so it is not knowable before the
     /// epoch's records exist — and a sequencer that reorders them has to pay
     /// the delay again for each ordering it tries.
+    /// From the cutover a beacon is read in `Z_N*/{±1}`: the prover emits the
+    /// canonical value and witness, the check accepts that and only that, and
+    /// a units proof that is not already canonical is refused. Before it,
+    /// beacons keep the rule they were written under.
+    #[test]
+    fn from_the_cutover_a_delay_beacon_is_read_up_to_sign() {
+        let dir = TempDir::new("vdf-quotient");
+        let node = node(&dir);
+        let at = node.ledger().len();
+        const T: u64 = MIN_VDF_DIFFICULTY;
+        let payload = |orders: u64, proof: &crate::vdf::Proof| {
+            Value::object([
+                ("orders", Value::Int(i128::from(orders))),
+                ("difficulty", Value::Int(i128::from(T))),
+                ("value", Value::string(proof.output_hex())),
+                ("witness", Value::string(proof.witness_hex())),
+            ])
+        };
+
+        let after = VDF_QUOTIENT_GROUP_FROM;
+        let seed = node.vdf_seed(after, at, T);
+        let canon = prove_vdf_beacon(after, &seed, T);
+        assert_eq!(canon, crate::vdf::prove_canonical(&seed, T));
+        assert!(node.check_vdf_beacon(&payload(after, &canon), at).is_ok());
+        // The other spelling of the same beacon -- the witness negated, which
+        // the check up to sign would otherwise pass -- is refused outright.
+        let mut flipped = canon.clone();
+        flipped.witness = crate::vdf::modulus()
+            .sub(&crate::crypto::bignum::Nat::from_be_bytes(&canon.witness))
+            .to_be_bytes(crate::vdf::ELEMENT_BYTES);
+        assert!(node
+            .check_vdf_beacon(&payload(after, &flipped), at)
+            .is_err());
+        let units = crate::vdf::prove(&seed, T);
+        assert_eq!(
+            node.check_vdf_beacon(&payload(after, &units), at).is_ok(),
+            units == canon,
+            "after the cutover only the canonical spelling is a beacon"
+        );
+
+        let before = VDF_QUOTIENT_GROUP_FROM - 1;
+        let seed = node.vdf_seed(before, at, T);
+        let legacy = prove_vdf_beacon(before, &seed, T);
+        assert_eq!(legacy, crate::vdf::prove(&seed, T));
+        assert!(node.check_vdf_beacon(&payload(before, &legacy), at).is_ok());
+    }
+
     /// For one seed a longer delay is one more squaring of a shorter one, so
     /// a difficulty the record chose freely let a sequencer grind the order
     /// at a squaring per candidate. From the cutover the seed covers `T`: the

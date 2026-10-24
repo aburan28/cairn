@@ -256,6 +256,40 @@ fn shift_right(value: &Nat, bits: usize) -> Nat {
 /// epoch that needs it. It belongs in the record so a verifier reads it rather
 /// than assuming it.
 pub fn prove(seed: &[u8], difficulty: u64) -> Proof {
+    prove_in(seed, difficulty, Group::Units)
+}
+
+/// [`prove`] in the quotient group `Z_N*/{±1}`: the output and the witness are
+/// each the canonical member of their pair `{z, N − z}`; see [`verify_canonical`].
+pub fn prove_canonical(seed: &[u8], difficulty: u64) -> Proof {
+    prove_in(seed, difficulty, Group::Quotient)
+}
+
+/// Which group a beacon is read in.
+///
+/// In `Z_N*`, `−1` is a square root of `1` that everybody knows, so an honest
+/// `(y, π)` hands every reader a second beacon for free: `N − y`, with the
+/// witness for its own challenge. Settlement sorts by the value, so that is a
+/// second ordering per evaluation. Reading values up to sign -- naming each pair
+/// `{z, N − z}` by its smaller member -- leaves one value per seed. The witness
+/// is canonical too, so one beacon has one spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Group {
+    Units,
+    Quotient,
+}
+
+/// The smaller of `z` and `N − z`: one name for the pair `{z, −z}`.
+fn canonical(z: &Nat, n: &Nat) -> Nat {
+    let negated = n.sub(z);
+    if negated.cmp(z) == core::cmp::Ordering::Less {
+        negated
+    } else {
+        z.clone()
+    }
+}
+
+fn prove_in(seed: &[u8], difficulty: u64, group: Group) -> Proof {
     let m = Montgomery::new(modulus()).expect("the modulus is odd");
     let x = element(seed);
 
@@ -266,6 +300,12 @@ pub fn prove(seed: &[u8], difficulty: u64) -> Proof {
         y = m.mul(&y, &y);
     }
     let y = m.leave(&y);
+    // The challenge is over the value the record will carry. `π` below is the
+    // same either way: it depends on `l`, not on the sign of `y`.
+    let y = match group {
+        Group::Units => y,
+        Group::Quotient => canonical(&y, m.modulus()),
+    };
 
     let l = challenge(&x, &y, difficulty);
     // π = x^⌊2^T/l⌋, computed by streaming the long division rather than
@@ -296,9 +336,14 @@ pub fn prove(seed: &[u8], difficulty: u64) -> Proof {
             remainder = value;
         }
     }
+    let witness = m.leave(&witness);
+    let witness = match group {
+        Group::Units => witness,
+        Group::Quotient => canonical(&witness, m.modulus()),
+    };
     Proof {
         output: y.to_be_bytes(ELEMENT_BYTES),
-        witness: m.leave(&witness).to_be_bytes(ELEMENT_BYTES),
+        witness: witness.to_be_bytes(ELEMENT_BYTES),
     }
 }
 
@@ -308,6 +353,18 @@ pub fn prove(seed: &[u8], difficulty: u64) -> Proof {
 /// That is the asymmetry the whole design is for: a beacon that took a second
 /// to produce is checked in microseconds, by everyone, forever.
 pub fn verify(seed: &[u8], difficulty: u64, proof: &Proof) -> bool {
+    verify_in(seed, difficulty, proof, Group::Units)
+}
+
+/// [`verify`] in the quotient group: `output` and `witness` must each be the
+/// canonical member of their pair, and the check holds up to sign. Since `l` is
+/// an odd prime, `(−π)^l = −π^l`, so a canonical witness lands on `±y` and both
+/// are the same element here.
+pub fn verify_canonical(seed: &[u8], difficulty: u64, proof: &Proof) -> bool {
+    verify_in(seed, difficulty, proof, Group::Quotient)
+}
+
+fn verify_in(seed: &[u8], difficulty: u64, proof: &Proof, group: Group) -> bool {
     if proof.output.len() != ELEMENT_BYTES || proof.witness.len() != ELEMENT_BYTES {
         return false;
     }
@@ -328,6 +385,13 @@ pub fn verify(seed: &[u8], difficulty: u64, proof: &Proof) -> bool {
     if y.is_zero() || witness.is_zero() {
         return false;
     }
+    // One spelling per beacon: the other member of either pair is refused,
+    // not accepted as a second name for the same thing.
+    if group == Group::Quotient
+        && (canonical(&y, m.modulus()) != y || canonical(&witness, m.modulus()) != witness)
+    {
+        return false;
+    }
     let l = challenge(&x, &y, difficulty);
     // r = 2^T mod l by modular exponentiation -- `log T` multiplications, not
     // `T`. Doubling `T` times here was the first version, and it made
@@ -336,12 +400,90 @@ pub fn verify(seed: &[u8], difficulty: u64, proof: &Proof) -> bool {
     let small = Montgomery::new(l.clone()).expect("the challenge is an odd prime");
     let r = small.pow(&Nat::from_u64(2), &Nat::from_u64(difficulty));
     let left = m.mul(&m.enter(&m.pow(&witness, &l)), &m.enter(&m.pow(&x, &r)));
-    m.leave(&left).cmp(&y) == core::cmp::Ordering::Equal
+    let left = m.leave(&left);
+    let left = match group {
+        Group::Units => left,
+        Group::Quotient => canonical(&left, m.modulus()),
+    };
+    left.cmp(&y) == core::cmp::Ordering::Equal
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The other member of `proof`'s pair, with a witness for its own
+    /// challenge: what a reader of `Z_N*` gets for free from an honest beacon.
+    fn negated(seed: &[u8], difficulty: u64, proof: &Proof) -> Proof {
+        let n = modulus();
+        let m = Montgomery::new(n.clone()).expect("odd");
+        let x = element(seed);
+        let other = n.sub(&Nat::from_be_bytes(&proof.output));
+        let l = challenge(&x, &other, difficulty);
+        let (quotient, _) = Nat::one().shl(difficulty as usize).divrem(&l);
+        // `x^⌊2^T/l⌋` lands on `x^(2^T)`; negating it lands on `N − x^(2^T)`.
+        let witness = n.sub(&m.pow(&x, &quotient));
+        Proof {
+            output: other.to_be_bytes(ELEMENT_BYTES),
+            witness: witness.to_be_bytes(ELEMENT_BYTES),
+        }
+    }
+
+    #[test]
+    fn the_quotient_group_leaves_one_beacon_per_seed() {
+        const T: u64 = 300;
+        let seed = b"one beacon per seed";
+        let honest = prove(seed, T);
+        let twin = negated(seed, T, &honest);
+        // In the units, both are beacons: two orderings for one evaluation.
+        assert!(verify(seed, T, &honest));
+        assert!(verify(seed, T, &twin), "Z_N* accepts the negated beacon");
+        assert_ne!(honest.output, twin.output);
+
+        // In the quotient, the canonical one is the beacon and the other is not.
+        let canon = prove_canonical(seed, T);
+        assert!(verify_canonical(seed, T, &canon));
+        let other = if canon.output == honest.output {
+            twin
+        } else {
+            assert_eq!(
+                canon.output, twin.output,
+                "the same pair, its smaller member"
+            );
+            honest
+        };
+        assert!(
+            !verify_canonical(seed, T, &other),
+            "the other member is refused"
+        );
+        let negated_canon = negated(seed, T, &canon);
+        assert!(!verify_canonical(seed, T, &negated_canon));
+
+        // One spelling: the witness's other member is refused too, though
+        // the check up to sign would otherwise pass it.
+        let mut flipped = canon.clone();
+        flipped.witness = modulus()
+            .sub(&Nat::from_be_bytes(&canon.witness))
+            .to_be_bytes(ELEMENT_BYTES);
+        assert!(!verify_canonical(seed, T, &flipped));
+        // And a canonical proof is not quietly a units proof for the
+        // epochs before the cutover, or the other way round.
+        assert!(!verify_canonical(seed, T + 1, &canon));
+    }
+
+    const QUOTIENT_KAT_OUTPUT: &str = "22e5e622c9664bd754f30085e490aa33a1af3ea1c160e2b79e70004f04c12462a92902099200d38d279f240a7d05684b1624e56f5b0b53424f6a0d20bbd6b565cbb645dd4015c8272c397371817ea122b03c26ae8ceed8ba317a65257efe4bc5da8be7c8d885f2634a9180eca078b60e800c6df5caf4458e885be698f576ca0f8afda6a841be22c63d3f4c3bb4c0aff271d448683582e257aac72f165477aa03be1189378d8f3dde63d3b99a405eab72943e8a26938c6c19c2c7b7183d60a177150d888d4c92391e9bb228110f40c881833cad0859cd115c2a2e743ec3a042f95c6ed9372e4217b5398b04b2927eb260a899693a5e5a41e6c89377b44bd09421";
+    const QUOTIENT_KAT_WITNESS: &str = "5f5de76811776f2940ab061a46fd45ef3c5c81841770af3f4ada0dbd1cb7a9d055afd681c9ec703a8adcc2432d768b52b35268358a19b1f5a543f228aef881cad82474cab017042a5fe0a15b83e48a6ed8e3089191faa76b151c7f22a72b04ceaf891fd19b06eabf40e743825d4fc3a0555d3e5b031ef83b9e0d725837666497be646cd17d6df5d33999bf7c40730e4d6339f22018f673f6b2a76fd6aaa05abea8808eb007ffe14fed300900e7ee9fb62cc358fedf07594ed6f399aab0e6bb4408cffe52e08e247713d4eddaca3a7d744e731e96b228529e9b567be4fb2b0a494ba59f4717a6a7e9905b5c58282cbdf1783fa999a30a292ce53bdb0fcbc01b2b";
+
+    /// Pinned in `reference/rust/src/vdf.rs` too: the two implementations
+    /// agree on the quotient-group rule past the cutover, which no interop log
+    /// reaches yet.
+    #[test]
+    fn the_canonical_beacon_has_a_known_answer() {
+        let canon = prove_canonical(b"cairn/vdf/quotient-kat", 300);
+        assert_eq!(canon.output_hex(), QUOTIENT_KAT_OUTPUT);
+        assert_eq!(canon.witness_hex(), QUOTIENT_KAT_WITNESS);
+        assert!(verify_canonical(b"cairn/vdf/quotient-kat", 300, &canon));
+    }
 
     #[test]
     fn a_proof_verifies_and_a_forged_one_does_not() {

@@ -132,6 +132,28 @@ fn challenge(x: &BigUint, y: &BigUint, difficulty: u64) -> BigUint {
 /// The primitive only: the floor on `difficulty` is the beacon rule's, not
 /// this function's.
 pub fn verify(seed: &[u8], difficulty: u64, output: &[u8], witness: &[u8]) -> bool {
+    verify_in(seed, difficulty, output, witness, false)
+}
+
+/// [`verify`] read in `Z_N*/{±1}`: `output` and `witness` must each be the
+/// smaller of `z` and `N - z`, and the check holds up to sign. Without it,
+/// `N - y` with the witness for its own challenge is a second beacon for
+/// every honest one.
+pub fn verify_canonical(seed: &[u8], difficulty: u64, output: &[u8], witness: &[u8]) -> bool {
+    verify_in(seed, difficulty, output, witness, true)
+}
+
+/// The smaller of `z` and `n - z`.
+fn canonical(z: &BigUint, n: &BigUint) -> BigUint {
+    let negated = n - z;
+    if negated < *z {
+        negated
+    } else {
+        z.clone()
+    }
+}
+
+fn verify_in(seed: &[u8], difficulty: u64, output: &[u8], witness: &[u8], quotient: bool) -> bool {
     if output.len() != ELEMENT_BYTES || witness.len() != ELEMENT_BYTES {
         return false;
     }
@@ -142,11 +164,24 @@ pub fn verify(seed: &[u8], difficulty: u64, output: &[u8], witness: &[u8]) -> bo
     if y >= n || pi >= n || y == zero || pi == zero {
         return false;
     }
+    if quotient && (canonical(&y, &n) != y || canonical(&pi, &n) != pi) {
+        return false;
+    }
     let x = element(seed);
     let l = challenge(&x, &y, difficulty);
     let r = BigUint::from(2u32).modpow(&BigUint::from(difficulty), &l);
-    (pi.modpow(&l, &n) * x.modpow(&r, &n)) % &n == y
+    let left = (pi.modpow(&l, &n) * x.modpow(&r, &n)) % &n;
+    if quotient {
+        canonical(&left, &n) == y
+    } else {
+        left == y
+    }
 }
+
+/// The first epoch whose beacon is read in `Z_N*/{±1}`; the same cutover as
+/// [`SEED_BINDS_DIFFICULTY_FROM`], which no record had reached when this was
+/// added, so no beacon already in a log changes meaning.
+pub const QUOTIENT_GROUP_FROM: u64 = SEED_BINDS_DIFFICULTY_FROM;
 
 /// The first epoch whose seed covers the beacon's difficulty: for one seed a
 /// longer delay is one more squaring of a shorter one, so a `T` the record
@@ -209,6 +244,28 @@ mod tests {
             .to_string()
             .starts_with("25195908475657893494027183240048398571429282126204"));
         assert!(n.to_string().ends_with("20720357"));
+    }
+
+    /// The same bytes `src/vdf.rs` pins for `prove_canonical`: past the
+    /// cutover both implementations accept exactly this, and neither the other
+    /// member of the value's pair nor of the witness's.
+    #[test]
+    fn the_canonical_beacon_known_answer_verifies_and_its_negations_do_not() {
+        let hex = |text: &str| -> Vec<u8> {
+            (0..text.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        let y = hex("22e5e622c9664bd754f30085e490aa33a1af3ea1c160e2b79e70004f04c12462a92902099200d38d279f240a7d05684b1624e56f5b0b53424f6a0d20bbd6b565cbb645dd4015c8272c397371817ea122b03c26ae8ceed8ba317a65257efe4bc5da8be7c8d885f2634a9180eca078b60e800c6df5caf4458e885be698f576ca0f8afda6a841be22c63d3f4c3bb4c0aff271d448683582e257aac72f165477aa03be1189378d8f3dde63d3b99a405eab72943e8a26938c6c19c2c7b7183d60a177150d888d4c92391e9bb228110f40c881833cad0859cd115c2a2e743ec3a042f95c6ed9372e4217b5398b04b2927eb260a899693a5e5a41e6c89377b44bd09421");
+        let pi = hex("5f5de76811776f2940ab061a46fd45ef3c5c81841770af3f4ada0dbd1cb7a9d055afd681c9ec703a8adcc2432d768b52b35268358a19b1f5a543f228aef881cad82474cab017042a5fe0a15b83e48a6ed8e3089191faa76b151c7f22a72b04ceaf891fd19b06eabf40e743825d4fc3a0555d3e5b031ef83b9e0d725837666497be646cd17d6df5d33999bf7c40730e4d6339f22018f673f6b2a76fd6aaa05abea8808eb007ffe14fed300900e7ee9fb62cc358fedf07594ed6f399aab0e6bb4408cffe52e08e247713d4eddaca3a7d744e731e96b228529e9b567be4fb2b0a494ba59f4717a6a7e9905b5c58282cbdf1783fa999a30a292ce53bdb0fcbc01b2b");
+        let seed = b"cairn/vdf/quotient-kat";
+        assert!(verify_canonical(seed, 300, &y, &pi));
+        let n = modulus();
+        let negate = |bytes: &[u8]| fixed(&(&n - BigUint::from_bytes_be(bytes)));
+        assert!(!verify_canonical(seed, 300, &negate(&y), &pi));
+        assert!(!verify_canonical(seed, 300, &y, &negate(&pi)));
+        assert!(!verify_canonical(seed, 301, &y, &pi));
     }
 
     #[test]
