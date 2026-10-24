@@ -1,0 +1,37 @@
+{
+  "artifact_schema": {
+    "type": "object",
+    "required": ["dps"],
+    "properties": {
+      "dps": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 64,
+        "description": "Native six-class distinguished-point records with job_id, walker, steps, x, y, a, b."
+      }
+    }
+  },
+  "created_at": "2026-10-24T00:00:00+00:00",
+  "funder": "treasury",
+  "goal": "GOAL-sixclass-secp256k1-research",
+  "piecework": {
+    "items": "dps",
+    "key": ["x", "y", "a", "b"],
+    "unit_price": 1,
+    "units": 1000000
+  },
+  "reward": 1000,
+  "statement": "Research demonstration of a native six-class distinguished-point checker on a fresh isolated-custody secp256k1 ECDLP target. Public job SHA-256: 81bd38d6e82cc3f04428e770835539a06832e6a2c2850cfd844366f1a07c99eb. The private scalar is outside this repository. A valid DP proves the class key and aG+bQ equation, not recovery of the scalar or attack feasibility. This example is not a funded external prize. Walker provenance requires sampled re-walk auditing.",
+  "verifier": {
+    "kind": "sixclass_dp",
+    "walk": "six-class-rho-secp-tight-v2/rust1",
+    "curve": "secp256k1",
+    "target": {
+      "x": "89cb80f1f59286686df618db0e90cfbab69fba1ed8ce411e71bd92c32e225766",
+      "y": "993951a5860014e24a369d7dfd58815659018062822a77b52182080301548fe3"
+    },
+    "job_id": "0d781860101f21bf10f603b39184d736b7d3dfd52d44cdcfe1d28c010384e6c7",
+    "num_branches": 32,
+    "dp_bits": 5
+  }
+}
