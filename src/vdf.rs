@@ -260,7 +260,7 @@ pub fn prove(seed: &[u8], difficulty: u64) -> Proof {
 }
 
 /// [`prove`] in the quotient group `Z_N*/{±1}`: the output and the witness are
-/// each the canonical member of their pair `{z, N − z}`. See [`Group`].
+/// each the canonical member of their pair `{z, N − z}`; see [`verify_canonical`].
 pub fn prove_canonical(seed: &[u8], difficulty: u64) -> Proof {
     prove_in(seed, difficulty, Group::Quotient)
 }
