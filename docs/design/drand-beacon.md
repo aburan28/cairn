@@ -265,6 +265,28 @@ refuses `--delay` and `--drand-signature` together rather than ranking them,
 because silently preferring one proof over the other would be the command
 choosing an epoch's settlement anchor on the operator's behalf.
 
+**From epoch 2,991,168 the protocol does rank them, and drand wins outright.**
+The command still refuses to choose; the rule does not leave it to the order
+records arrive in. With the first record of any source governing, the delay
+beacon's residuals were drand's too: an operator holding a round it disliked
+could append a `vdf` beacon first, picking its seed through what it appended
+and its `T` above the floor, and that beacon set the order. From
+`DRAND_GOVERNS_FROM` (`drand::GOVERNS_FROM` in the reference) only a `drand`
+record orders an epoch. The first *drand* record wins, so a delay beacon
+written ahead of it pre-empts nothing; a `vdf` or `ethereum` record is still
+admissible and orders nothing, so it is not a duplicate of the drand one
+either, and the audit does not call it one; an epoch whose only beacon is
+`vdf` settles on the epoch-chain head and is listed by `epochs_without_beacon`
+exactly as an epoch with none. The pairing is still checked at admission and
+in the audit, never at settlement, for the reason above.
+
+The cost is the row in the table: liveness now has one source. A node that
+cannot reach a relay, or a sequencer that chooses not to record the round,
+settles that epoch on the grindable chain head, and a `--delay` beacon no
+longer narrows that. It is visible — the round is public, and
+`CAIRN_REQUIRE_BEACON=1` makes the audit name the epoch — but withholding is
+not prevented, and [../threat-model.md](../threat-model.md) says so.
+
 If the network ever decides it wants no outside dependency at all — which is
 [anchored-time.md](anchored-time.md) recommendation 3, still open — the VDF is
 the answer and this note is the one that gets dropped. Nothing here argues

@@ -487,6 +487,10 @@ value as a verifiable delay of N sequential squarings instead of taking it from
 the caller. N must be at least 65,536 (`MIN_VDF_DIFFICULTY`), a floor against a
 free beacon; a delay that resists grinding takes most of an epoch.
 
+From epoch 2,991,168 (`DRAND_GOVERNS_FROM`) only a `--drand-signature` beacon
+orders an epoch. Any other source is still recorded, and the command says it
+does not order the epoch and prints the anchor unchanged.
+
 ### `drand-round [--orders EPOCH]`
 
 Which drand round an epoch settles against, and when it publishes. A query, so

@@ -324,6 +324,46 @@ echo "$VDF_VIEW" | grep -q "CAIRN_MIN_VDF_DIFFICULTY" \
   || fail "the primary ignored a reader's minimum delay"
 rm -f "$V"
 
+# --- past the drand cutover, a beacon from anywhere else orders nothing -----
+rule "past the drand cutover a non-drand beacon is recorded, orders nothing, and both agree"
+# Every epoch at a few seconds long is far past DRAND_GOVERNS_FROM, so this is
+# the post-cutover rule run end to end: the primary records an `ethereum`
+# beacon in the reveal's epoch and settles, and each implementation must
+# re-derive the epoch-chain head as the anchor rather than the beacon. Before
+# the rule, both would have sorted by `deadbeef`; an implementation that had
+# not learned it would report the primary's batch as mis-anchored. No drand
+# beacon is recorded, because no round in an epoch this late can be verified
+# and `beacon --drand-signature` rightly refuses one that does not.
+W="$(mktemp -u /tmp/pw-interop-gov-XXXXXX).jsonl"
+(
+  export CAIRN_EPOCH_SECONDS=4
+  epoch_now() { $RUST drand-round | awk '/^epoch/ {print $2}'; }
+  W_OID=$($RUST --log "$W" --root . post examples/collatz/objective.json | head -1 | awk '{print $2}')
+  $RUST --log "$W" --root . commit "$W_OID" --submitter grace \
+      --artifact examples/collatz/artifact.json --nonce g1 >/dev/null
+  # Into a fresh epoch, so the beacon and the reveal land in the same one.
+  start=$(epoch_now)
+  while [ "$(epoch_now)" = "$start" ]; do sleep 0.1; done
+  epoch=$(epoch_now)
+  $RUST --log "$W" --root . beacon --orders "$epoch" --source ethereum --block 1 \
+      --value deadbeef >/dev/null
+  $RUST --log "$W" --root . reveal "$W_OID" --submitter grace \
+      --artifact examples/collatz/artifact.json --nonce g1 >/dev/null
+  sleep $((CAIRN_EPOCH_SECONDS * (CAIRN_FINALITY_EPOCHS + 1) + 1))
+  $RUST --log "$W" --root . settle >/dev/null
+  grep -q '"kind": *"beacon"' "$W" || fail "no beacon in $W"
+  grep -q '"kind": *"batch"' "$W" || fail "no settlement batch in $W"
+  if grep '"kind": *"batch"' "$W" | grep -q deadbeef; then
+    fail "the primary settled past the cutover on an ethereum beacon"
+  fi
+  $RUST --log "$W" --root . audit | grep -q "log verified" \
+    || fail "the primary rejects its own post-cutover batch"
+  "$REF" --log "$W" --root . audit | grep -q "log verified" \
+    || fail "the reference derives a different anchor past the drand cutover"
+) || { rm -f "$W"; exit 1; }
+rm -f "$W"
+echo "  both ordered the epoch against the chain head, not the ethereum beacon"
+
 # --- the roots must agree exactly ----------------------------------------
 rule "Merkle roots agree across implementations"
 for LOG in "$A" "$B"; do
