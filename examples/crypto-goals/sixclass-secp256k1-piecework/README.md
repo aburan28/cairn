@@ -10,8 +10,10 @@ The private scalar and audit file are outside all three repositories.
 branch count, and DP predicate. `sample-dp.json` is the first point returned
 by one native worker in a separate container with only the public job mounted.
 The checker independently recomputes the six-class key and `aG+bQ` equation;
-the integration test accepts this record and rejects a changed coefficient.
-Walker provenance still needs sampled re-walk auditing.
+the integration test accepts this record, rejects a changed coefficient, and
+rejects a repeated `(walker, steps)` trail in one batch. The `crypto` worker's
+native `verify_trail` replays deterministic starts, steps, and cycle escapes;
+that audit remains an external sampling obligation for this Cairn objective.
 
 This is a conformance and piecework example. The sample does not reveal a
 discrete logarithm, establish six-class success probability, or price a

@@ -225,9 +225,17 @@ pub fn verify(spec: &Value, artifact: &Value) -> Verdict {
     if items.is_empty() || items.len() > 64 {
         return Verdict::reject("dps count must be 1..64");
     }
+    let mut trails = std::collections::BTreeSet::new();
     for (index, item) in items.iter().enumerate() {
         if !check_dp(&curve, item) {
             return Verdict::reject(format!("invalid six-class DP at index {index}"));
+        }
+        let trail = (
+            item.get("walker").and_then(Value::as_u64).unwrap(),
+            item.get("steps").and_then(Value::as_u64).unwrap(),
+        );
+        if !trails.insert(trail) {
+            return Verdict::reject(format!("duplicate six-class trail at index {index}"));
         }
     }
     Verdict::accept(format!(
@@ -261,6 +269,16 @@ mod tests {
                     record.insert("a".into(), Value::string("1"));
                 }
             }
+        }
+        assert_eq!(verify(spec, &bad).status, super::super::Status::Reject);
+        if let Value::Object(root) = &mut bad {
+            root.insert(
+                "dps".into(),
+                Value::Array(vec![
+                    sample.get("dps").unwrap().as_array().unwrap()[0].clone(),
+                    sample.get("dps").unwrap().as_array().unwrap()[0].clone(),
+                ]),
+            );
         }
         assert_eq!(verify(spec, &bad).status, super::super::Status::Reject);
     }
