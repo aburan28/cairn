@@ -71,6 +71,7 @@
 //! Expiry yields `Unavailable`, so a slow checker can never become a rejection.
 
 pub mod limits;
+pub mod sixclass;
 pub mod sandbox;
 pub mod workspace;
 
@@ -272,6 +273,7 @@ pub enum Kind {
     Evaluator,
     Lean,
     Replay,
+    SixclassDp,
     Statistical,
     Workspace,
 }
@@ -287,6 +289,7 @@ impl Kind {
         Kind::Evaluator,
         Kind::Lean,
         Kind::Replay,
+        Kind::SixclassDp,
         Kind::Statistical,
         Kind::Workspace,
     ];
@@ -297,6 +300,7 @@ impl Kind {
             Kind::Evaluator => "evaluator",
             Kind::Lean => "lean",
             Kind::Replay => "replay",
+            Kind::SixclassDp => "sixclass_dp",
             Kind::Statistical => "statistical",
             Kind::Workspace => "workspace",
         }
@@ -308,6 +312,7 @@ impl Kind {
             "evaluator" => Some(Kind::Evaluator),
             "lean" => Some(Kind::Lean),
             "replay" => Some(Kind::Replay),
+            "sixclass_dp" => Some(Kind::SixclassDp),
             "statistical" => Some(Kind::Statistical),
             "workspace" => Some(Kind::Workspace),
             _ => None,
@@ -1270,6 +1275,7 @@ impl VerifierRegistry {
             "evaluator",
             "lean",
             "replay",
+            "sixclass_dp",
             "statistical",
             "workspace",
         ]
@@ -1341,7 +1347,7 @@ impl VerifierRegistry {
         let mut unservable: Vec<(&str, Value)> = Vec::new();
         let mut servable: Vec<Value> = Vec::new();
         for kind in Self::kinds() {
-            let reason = if required && !jailed {
+            let reason = if required && !jailed && *kind != "sixclass_dp" {
                 Some(format!(
                     "{} is set and no sandbox mechanism is usable here",
                     sandbox::REQUIRE_ENV
@@ -1516,6 +1522,7 @@ impl VerifierRegistry {
         };
         match Kind::parse(kind) {
             Some(Kind::Certificate) => self.verify_certificate(spec, artifact),
+            Some(Kind::SixclassDp) => sixclass::verify(spec, artifact),
             Some(Kind::Evaluator) => self.verify_evaluator(spec, artifact),
             Some(Kind::Lean) => self.verify_lean(spec, artifact),
             Some(Kind::Replay) => self.verify_replay(spec, artifact),
@@ -4139,6 +4146,7 @@ mod tests {
                 "evaluator",
                 "lean",
                 "replay",
+                "sixclass_dp",
                 "statistical",
                 "workspace"
             ]

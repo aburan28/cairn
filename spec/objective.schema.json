@@ -39,6 +39,7 @@
             "evaluator",
             "lean",
             "replay",
+            "sixclass_dp",
             "statistical",
             "workspace"
           ]

@@ -43,6 +43,7 @@ ui = []
 # obvious reading of its absence, and it is the wrong one.
 
 [dependencies]
+num-bigint = "0.5"
 # Parsing untrusted JSON only. Canonical *output* is written by this crate's own
 # encoder -- see src/canonical.rs for why the two are deliberately separate.
 serde_json = { version = "1", features = ["arbitrary_precision"] }
