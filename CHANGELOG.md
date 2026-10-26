@@ -1,5 +1,12 @@
 # Changelog
 
+## [15.0.1](https://github.com/aburan28/cairn/compare/v15.0.0...v15.0.1) (2026-10-26)
+
+
+### Fixes
+
+* **consensus:** only a drand beacon orders an epoch from 2026-11-15 ([#367](https://github.com/aburan28/cairn/issues/367)) ([0a5799d](https://github.com/aburan28/cairn/commit/0a5799ddfd0bbea80d84680acef654cfa7defc08))
+
 ## [15.0.0](https://github.com/aburan28/cairn/compare/v14.0.0...v15.0.0) (2026-10-23)
 
 
