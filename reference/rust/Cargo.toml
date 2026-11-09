@@ -55,7 +55,7 @@ curve25519-dalek = { version = "5", default-features = false, features = ["alloc
 # 0.10 and would put a second SHA-256 in the tree. It is also a second
 # hand-written expander, checked against RFC 9380's vectors independently of the
 # primary's -- the same bargain as the rest of this crate.
-bls12_381_plus = "0.9"
+bls12_381_plus = "0.10"
 
 [profile.release]
 overflow-checks = true
