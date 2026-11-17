@@ -4,8 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
   merge_group:
     types: [checks_requested]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,14 +17,14 @@ permissions:
 # run holds those runners until it finishes. A push to main is never cancelled,
 # so every merged revision still gets a finished result.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
     # Stable job names below remain available to branch protection. A skipped
     # job succeeds, so docs-only changes need only this small detector runner.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       core: ${{ steps.scope.outputs.core }}
@@ -38,7 +40,7 @@ jobs:
       examples: ${{ steps.scope.outputs.examples }}
       packaging: ${{ steps.scope.outputs.packaging }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
@@ -52,14 +54,14 @@ jobs:
   rust:
     needs: changes
     if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.core != 'false')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --check
       # `--locked` on everything that compiles the workspace: Cargo.lock is
       # checked in, and a CI run that quietly rewrites it is testing a
@@ -237,10 +239,10 @@ jobs:
     # nothing regenerates it -- the reference reproduces it or fails.
     needs: changes
     if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.reference != 'false')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: cargo build --release --locked --manifest-path reference/rust/Cargo.toml
       - run: cargo test --manifest-path reference/rust/Cargo.toml
       - run: cargo fmt --check --manifest-path reference/rust/Cargo.toml
@@ -268,12 +270,12 @@ jobs:
     # a test expected a refusal the jail never gave.
     needs: changes
     if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.jail != 'false')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       # Ubuntu confines unprivileged user namespaces with AppArmor (on by
       # default since 23.10), and where it does, bwrap installs and then cannot
@@ -303,12 +305,12 @@ jobs:
     # must stay invisible to it. The rest of the suite is the `rust` job's.
     needs: changes
     if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.jail != 'false')
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # The probe `sandbox::mechanism` runs, by name, so a runner where the
       # jail cannot start fails here rather than going green unjailed.
       - run: sandbox-exec -p '(version 1)(allow default)' /usr/bin/true
@@ -328,12 +330,12 @@ jobs:
     # transitive deps need edition2024.
     needs: changes
     if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.msrv != 'false')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.89.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@d92bbbb03544f480ed5c7ba4b54020e4ed2c4f65 # 1.89.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo check --locked --all-targets --all-features
 
   tla:
@@ -348,17 +350,17 @@ jobs:
     # pass.
     needs: changes
     if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.tla != 'false')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-java@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
         with:
           distribution: temurin
           java-version: "21"
       # ~8 MB. The key is dated rather than fixed: a fixed key silently pins the
       # first jar ever cached, which is a stale toolchain nobody chose.
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .local/tla2tools.jar
           key: tla2tools-2026-07
@@ -373,13 +375,13 @@ jobs:
     # silently forks the network's identity scheme.
     needs: changes
     if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.interop != 'false')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - run: cargo build --release --locked
@@ -444,13 +446,13 @@ jobs:
     # spelled out so the intent survives someone "fixing" a red build.
     needs: changes
     if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.audit != 'false')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     continue-on-error: false
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo install cargo-audit --locked
       - run: cargo audit
 
@@ -465,15 +467,15 @@ jobs:
     # one. See ui/README.md.
     needs: changes
     if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.ui != 'false')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # v7. The inputs used here -- `node-version`, `cache`,
       # `cache-dependency-path` -- are unchanged across v4..v7; what moved is the
       # runner's bundled Node and the cache backend, neither of which this job
       # pins. `actions/checkout` above is already on the same major line.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           cache: npm
@@ -502,8 +504,8 @@ jobs:
       - run: ./scripts/no-github-links.sh
       - run: npm run build
         working-directory: ui
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --locked --features ui
       - run: npx playwright install --with-deps chromium
         working-directory: ui
@@ -530,10 +532,10 @@ jobs:
       CAIRN_REQUIRE_SANDBOX: "off"
       CAIRN_WINDOWS_BROWSER: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           cache: npm
@@ -544,10 +546,10 @@ jobs:
         working-directory: ui
       - run: npx playwright install chromium
         working-directory: ui
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --locked --lib --target x86_64-pc-windows-msvc windows_objective_processes_require_a_supported_jail
       - run: 'cargo test --locked --lib --target x86_64-pc-windows-msvc ledger::tests::a_second_writer_is_refused_rather_than_allowed_to_fork_the_log'
       - run: 'cargo test --locked --lib --target x86_64-pc-windows-msvc ledger::tests::a_hard_link_alias_cannot_open_a_second_writer'
@@ -564,7 +566,7 @@ jobs:
           Expand-Archive -Path dist/*.zip -DestinationPath unpacked
           python scripts/windows-smoke.py unpacked/cairn.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cairn-windows-x64
           path: |
@@ -587,10 +589,10 @@ jobs:
     # job catches is a compile that fails.
     needs: changes
     if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.macos != 'false')
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The compiler is the image's and is not pinned here, so the log names
       # it: a failure that began with an image update should look like one.
       - run: swift --version
@@ -629,16 +631,16 @@ jobs:
     # and a stale sha256 pin turns an open bounty into an unsatisfiable one.
     needs: changes
     if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.examples != 'false')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --release --locked
       # The ECC2K auditor tools have a Python-only unit suite. Its only external
       # test dependency is cryptography; AWS SDK and PostgreSQL calls are mocked.
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Test ECC2K ingest service in an isolated Python environment
@@ -723,11 +725,53 @@ jobs:
     #
     needs: changes
     if: always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.packaging != 'false')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The self-test skips the lint, with a note, where shellcheck is absent --
       # which is right on a laptop and would be a silent hole here.
       - run: shellcheck --version
       - run: ./packaging/selftest.sh
+
+  check:
+    name: check
+    needs:
+      - changes
+      - rust
+      - reference
+      - jail
+      - jail-macos
+      - msrv
+      - tla
+      - interop
+      - audit
+      - ui
+      - windows
+      - gui-macos
+      - gui-ios
+      - examples
+      - packaging
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require scope detection and every selected job to pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          results = json.loads(os.environ["RESULTS"])
+          if results["changes"]["result"] != "success":
+              raise SystemExit("CI scope detection failed")
+          failed = {
+              job: details["result"]
+              for job, details in results.items()
+              if job != "changes" and details["result"] not in {"success", "skipped"}
+          }
+          if failed:
+              raise SystemExit(f"CI jobs did not pass: {failed}")
+          PY
